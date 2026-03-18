@@ -113,24 +113,43 @@
     const titlebar = document.querySelector(".titlebar");
     if (!titlebar) return;
 
-    const controls = document.createElement("div");
-    controls.className = "window-controls";
-    controls.innerHTML = `
-      <button class="wc-btn wc-minimize" title="最小化">
-        <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1"/></svg>
-      </button>
-      <button class="wc-btn wc-maximize" title="最大化">
-        <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1"/></svg>
-      </button>
-      <button class="wc-btn wc-close" title="关闭">
-        <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" stroke-width="1"/><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" stroke-width="1"/></svg>
-      </button>
-    `;
-    titlebar.appendChild(controls);
+    let controls = titlebar.querySelector(".window-controls");
+    if (!controls) {
+      controls = document.createElement("div");
+      controls.className = "window-controls";
+      controls.innerHTML = `
+        <button class="wc-btn wc-minimize" title="最小化">
+          <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1"/></svg>
+        </button>
+        <button class="wc-btn wc-maximize" title="最大化">
+          <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+        </button>
+        <button class="wc-btn wc-close" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" stroke-width="1"/><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" stroke-width="1"/></svg>
+        </button>
+      `;
+      titlebar.appendChild(controls);
+    }
 
-    controls.querySelector(".wc-minimize").addEventListener("click", () => p.windowMinimize());
-    controls.querySelector(".wc-maximize").addEventListener("click", () => p.windowMaximize());
-    controls.querySelector(".wc-close").addEventListener("click", () => p.windowClose());
+    // Settings 页面会预渲染 controls，这里统一只绑定一次，避免重复 append/监听。
+    if (controls.dataset.hanaBound !== "1") {
+      controls.dataset.hanaBound = "1";
+      controls.querySelector(".wc-minimize")?.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        p.windowMinimize();
+      });
+      controls.querySelector(".wc-maximize")?.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        p.windowMaximize();
+      });
+      controls.querySelector(".wc-close")?.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        p.windowClose();
+      });
+    }
 
     // 最大化状态变化时切换图标
     if (p.onMaximizeChange) {
@@ -142,6 +161,15 @@
           svg.innerHTML = '<rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1"/>';
         }
       });
+    }
+    if (p.windowIsMaximized) {
+      try {
+        const maximized = await p.windowIsMaximized();
+        const svg = controls.querySelector(".wc-maximize svg");
+        if (svg && maximized) {
+          svg.innerHTML = '<rect x="3" y="1" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1"/><rect x="1" y="3" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1"/>';
+        }
+      } catch {}
     }
   }
 })();

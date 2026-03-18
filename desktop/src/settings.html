@@ -56,6 +56,13 @@
         html[data-platform="linux"] .titlebar-minimal {
             pointer-events: auto;
         }
+        .titlebar-minimal .window-controls {
+            display: none;
+        }
+        html[data-platform="win32"] .titlebar-minimal .window-controls,
+        html[data-platform="linux"] .titlebar-minimal .window-controls {
+            display: flex;
+        }
         /* 加载蒙版 */
         .settings-loading-mask {
             position: fixed;
@@ -75,7 +82,19 @@
 </head>
 <body>
     <!-- Windows/Linux 自绘窗口控制按钮注入点（platform.js initPlatform 查找 .titlebar 并注入） -->
-    <div class="titlebar titlebar-minimal"></div>
+    <div class="titlebar titlebar-minimal">
+        <div class="window-controls">
+            <button class="wc-btn wc-minimize" title="最小化">
+                <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1"/></svg>
+            </button>
+            <button class="wc-btn wc-maximize" title="最大化">
+                <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+            </button>
+            <button class="wc-btn wc-close" title="关闭">
+                <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" stroke-width="1"/><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" stroke-width="1"/></svg>
+            </button>
+        </div>
+    </div>
     <div id="react-root"></div>
 
     <script src="lib/markdown-it.min.js"></script>
