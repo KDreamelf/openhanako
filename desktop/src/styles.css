@@ -3108,8 +3108,6 @@ html[data-platform="linux"] .tb-toggle-right {
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
-/* ========================================
-   输入区
 .assistant-error-note {
     margin: var(--space-xs) 0;
     padding: var(--space-xs) var(--space-sm);
@@ -3122,6 +3120,8 @@ html[data-platform="linux"] .tb-toggle-right {
     white-space: pre-wrap;
 }
 
+/* ========================================
+   输入区
    ======================================== */
 .input-area {
     position: absolute;
