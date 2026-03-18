@@ -3108,6 +3108,18 @@ html[data-platform="linux"] .tb-toggle-right {
 
 /* ========================================
    输入区
+.assistant-error-note {
+    margin: var(--space-xs) 0;
+    padding: var(--space-xs) var(--space-sm);
+    color: var(--coral);
+    background: rgba(var(--coral-rgb), 0.08);
+    border: 1px solid rgba(var(--coral-rgb), 0.2);
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+
    ======================================== */
 .input-area {
     position: absolute;

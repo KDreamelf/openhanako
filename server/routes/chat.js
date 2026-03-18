@@ -82,10 +82,25 @@ export default async function chatRoute(app, { engine, hub }) {
         isThinking: false,
         titleRequested: false,
         titlePreview: "",
+        lastTurnError: null,
+        lastTurnErrorBroadcasted: false,
         ...createSessionStreamState(),
       });
     }
     return sessionState.get(sessionPath);
+  }
+
+  function getLatestAssistantError(session) {
+    const messages = Array.isArray(session?.messages) ? session.messages : [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message?.role !== "assistant") continue;
+      if (message.stopReason === "error" && message.errorMessage) {
+        return message.errorMessage;
+      }
+      break;
+    }
+    return null;
   }
 
   const clients = new Set();
@@ -228,7 +243,9 @@ export default async function chatRoute(app, { engine, hub }) {
       } else if (sub === "toolcall_start") {
         // 不在这里关闭 thinking 状态
       } else if (sub === "error") {
-        if (isActive) broadcast({ type: "error", message: event.assistantMessageEvent.error || "Unknown error" });
+        ss.lastTurnError = event.assistantMessageEvent.error || "Unknown error";
+        ss.lastTurnErrorBroadcasted = true;
+        if (isActive) broadcast({ type: "error", message: ss.lastTurnError });
       }
     } else if (event.type === "tool_execution_start") {
       if (!ss) return;
@@ -407,6 +424,13 @@ export default async function chatRoute(app, { engine, hub }) {
       ss.moodParser.reset();
       ss.xingParser.reset();
 
+      const fallbackError = ss.lastTurnError || getLatestAssistantError(engine.getSessionByPath(sessionPath));
+      if (fallbackError && isActive && !ss.lastTurnErrorBroadcasted) {
+        broadcast({ type: "error", message: fallbackError });
+      }
+      ss.lastTurnError = null;
+      ss.lastTurnErrorBroadcasted = false;
+
       if (isActive) {
         debugLog()?.log("ws", "assistant reply done");
         maybeGenerateFirstTurnTitle(sessionPath, ss);
@@ -524,6 +548,8 @@ export default async function chatRoute(app, { engine, hub }) {
           ss.xingParser.reset();
           ss.titleRequested = false;
           ss.titlePreview = "";
+          ss.lastTurnError = null;
+          ss.lastTurnErrorBroadcasted = false;
           beginSessionStream(ss);
           broadcast({ type: "status", isStreaming: true });
           await hub.send(promptText, msg.images ? { images: msg.images } : undefined);

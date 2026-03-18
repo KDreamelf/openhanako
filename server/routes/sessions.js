@@ -140,12 +140,14 @@ export default async function sessionsRoute(app, { engine }) {
           if (text) messages.push({ role: "user", content: text });
         } else if (m.role === "assistant") {
           const { text, thinking, toolUses } = extractTextContent(m.content, { stripThink: true });
-          if (text || toolUses.length) {
+          if (text || toolUses.length || m.errorMessage) {
             messages.push({
               role: "assistant",
               content: text,
               thinking: thinking || undefined,
               toolCalls: toolUses.length ? toolUses : undefined,
+              stopReason: m.stopReason || undefined,
+              errorMessage: m.errorMessage || undefined,
             });
           }
         } else if (m.role === "toolResult") {

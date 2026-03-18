@@ -64,9 +64,7 @@ function showError(message: string): void {
   const { state } = ctx;
   ctx._cr().ensureAssistantMessage();
   const el = document.createElement('div');
-  el.style.color = 'var(--coral)';
-  el.style.fontSize = '0.85rem';
-  el.style.margin = 'var(--space-xs) 0';
+  el.className = 'assistant-error-note';
   el.textContent = `⚠ ${message}`;
   state.currentAssistantEl.appendChild(el);
   scrollToBottom();

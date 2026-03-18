@@ -306,6 +306,13 @@ async function loadMessages(): Promise<void> {
             bubble.appendChild(mdEl);
           }
 
+          if (m.errorMessage) {
+            const errEl = document.createElement('div');
+            errEl.className = 'assistant-error-note';
+            errEl.textContent = `⚠ ${m.errorMessage}`;
+            bubble.appendChild(errEl);
+          }
+
           if (fileMap[i]) {
             for (const f of fileMap[i]) {
               _fc().appendFileCard(f.filePath, f.label, f.ext || '');
