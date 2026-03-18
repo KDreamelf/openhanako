@@ -11,6 +11,7 @@
 const { app, BrowserWindow, WebContentsView, globalShortcut, ipcMain, dialog, session, shell, nativeTheme, Tray, Menu, nativeImage, systemPreferences, Notification } = require("electron");
 const os = require("os");
 const path = require("path");
+const { pathToFileURL } = require("url");
 const { fork, execFileSync } = require("child_process");
 const fs = require("fs");
 
@@ -30,6 +31,39 @@ if (process.platform !== "win32") {
 const hanakoHome = process.env.HANA_HOME
   ? path.resolve(process.env.HANA_HOME.replace(/^~/, os.homedir()))
   : path.join(os.homedir(), ".hanako");
+
+let _proxyRuntimePromise = null;
+function loadProxyRuntime() {
+  if (!_proxyRuntimePromise) {
+    const moduleUrl = pathToFileURL(path.join(__dirname, "..", "lib", "net", "proxy-runtime.js")).href;
+    _proxyRuntimePromise = import(moduleUrl);
+  }
+  return _proxyRuntimePromise;
+}
+
+function readPreferencesFile() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(hanakoHome, "user", "preferences.json"), "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+async function applyDesktopProxyConfig(proxyOverride) {
+  try {
+    const proxyRuntime = await loadProxyRuntime();
+    const prefs = readPreferencesFile();
+    const proxyResult = await proxyRuntime.applyProxyConfig(proxyOverride === undefined ? prefs.proxy : proxyOverride);
+    console.log(`[desktop] proxy initialized: ${proxyRuntime.describeAppliedProxy(proxyResult)}`);
+    for (const warning of proxyResult.warnings || []) {
+      console.warn(`[desktop] proxy warning: ${warning}`);
+    }
+    return proxyResult;
+  } catch (err) {
+    console.warn(`[desktop] proxy init failed: ${err.message}`);
+    return null;
+  }
+}
 
 // 按 HANA_HOME 隔离 Electron userData（localStorage / cache / session）
 // 生产: ~/Library/Application Support/Hanako
@@ -1518,6 +1552,9 @@ ipcMain.on("settings-changed", (_event, type, data) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("settings-changed", type, data);
   }
+  if (type === "proxy-changed") {
+    void applyDesktopProxyConfig(data?.proxy);
+  }
   if (type === "theme-changed" && data?.theme) {
     const name = data.theme;
     _browserViewerTheme = name === "auto"
@@ -1964,7 +2001,10 @@ app.whenReady().then(async () => {
     createSplashWindow();
     const splashShownAt = Date.now();
 
-    // 2. 后台启动 server
+    // 2. 先应用代理配置，再启动依赖网络的模块
+    await applyDesktopProxyConfig();
+
+    // 3. 后台启动 server
     console.log("[desktop] 启动 Hanako Server...");
     await startServer();
     console.log(`[desktop] Server 就绪，端口: ${serverPort}`);
@@ -1972,14 +2012,14 @@ app.whenReady().then(async () => {
     setupBrowserCommands();
     createTray();
 
-    // 3. 确保 splash 至少显示 3 秒
+    // 4. 确保 splash 至少显示 3 秒
     const elapsed = Date.now() - splashShownAt;
     const minSplashMs = 3000;
     if (elapsed < minSplashMs) {
       await new Promise(r => setTimeout(r, minSplashMs - elapsed));
     }
 
-    // 4. 检测是否需要 onboarding
+    // 5. 检测是否需要 onboarding
     if (isSetupComplete()) {
       // 已完成配置：直接创建主窗口
       createMainWindow();
@@ -1993,7 +2033,7 @@ app.whenReady().then(async () => {
       createOnboardingWindow();
     }
 
-    // 5. 注册 DevTools 快捷键（Cmd+Option+=，仅 dev 模式）
+    // 6. 注册 DevTools 快捷键（Cmd+Option+=，仅 dev 模式）
     const isDev = process.argv.includes("--dev") || process.env.NODE_ENV === "development";
     if (isDev) {
       globalShortcut.register("CommandOrControl+Alt+=", () => {
@@ -2005,7 +2045,7 @@ app.whenReady().then(async () => {
       });
     }
 
-    // 6. 后台检查更新（不阻塞启动）
+    // 7. 后台检查更新（不阻塞启动）
     checkForUpdates().catch(() => {});
   } catch (err) {
     console.error("[desktop] 启动失败:", err.message);

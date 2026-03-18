@@ -110,8 +110,8 @@ export async function autoSaveConfig(
   }
 }
 
-/** 全局模型自动保存 */
-export async function autoSaveGlobalModels(
+/** 全局偏好自动保存 */
+export async function autoSaveGlobalPreferences(
   partial: Record<string, any>,
   opts: { silent?: boolean } = {},
 ) {
@@ -128,10 +128,15 @@ export async function autoSaveGlobalModels(
     const refreshRes = await hanaFetch('/api/preferences/models');
     const newGlobal = await refreshRes.json();
     useSettingsStore.setState({ globalModelsConfig: newGlobal });
+    if (partial.proxy) {
+      platform?.settingsChanged?.('proxy-changed', { proxy: newGlobal.proxy || partial.proxy });
+    }
   } catch (err: any) {
     store.showToast(t('settings.saveFailed') + ': ' + err.message, 'error');
   }
 }
+
+export const autoSaveGlobalModels = autoSaveGlobalPreferences;
 
 let _saveFavTimer: ReturnType<typeof setTimeout> | null = null;
 export function autoSaveModels() {

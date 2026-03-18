@@ -1,16 +1,30 @@
 import React, { useState, useEffect } from 'react';
 import { useSettingsStore } from '../store';
-import { t, autoSaveConfig } from '../helpers';
+import { t, autoSaveConfig, autoSaveGlobalPreferences } from '../helpers';
 import { Toggle } from '../widgets/Toggle';
+import { SelectWidget } from '../widgets/SelectWidget';
 
 const platform = (window as any).platform;
 
+const DEFAULT_PROXY = {
+  mode: 'system',
+  manual: {
+    httpProxy: '',
+    httpsProxy: '',
+    noProxy: '',
+  },
+};
+
 export function WorkTab() {
-  const { settingsConfig, showToast } = useSettingsStore();
+  const { settingsConfig, globalModelsConfig, showToast } = useSettingsStore();
   const [homeFolder, setHomeFolder] = useState('');
   const [hbEnabled, setHbEnabled] = useState(true);
   const [hbInterval, setHbInterval] = useState(17);
   const [cronAutoApprove, setCronAutoApprove] = useState(true);
+  const [proxyMode, setProxyMode] = useState('system');
+  const [httpProxy, setHttpProxy] = useState('');
+  const [httpsProxy, setHttpsProxy] = useState('');
+  const [noProxy, setNoProxy] = useState('');
 
   useEffect(() => {
     if (settingsConfig) {
@@ -20,6 +34,14 @@ export function WorkTab() {
       setCronAutoApprove(settingsConfig.desk?.cron_auto_approve !== false);
     }
   }, [settingsConfig]);
+
+  useEffect(() => {
+    const proxy = globalModelsConfig?.proxy || DEFAULT_PROXY;
+    setProxyMode(proxy.mode || 'system');
+    setHttpProxy(proxy.manual?.httpProxy || '');
+    setHttpsProxy(proxy.manual?.httpsProxy || '');
+    setNoProxy(proxy.manual?.noProxy || '');
+  }, [globalModelsConfig]);
 
   const pickHomeFolder = async () => {
     const folder = await platform?.selectFolder?.();
@@ -45,9 +67,31 @@ export function WorkTab() {
     await autoSaveConfig({ desk: { cron_auto_approve: on } });
   };
 
+  const saveProxy = async (mode = proxyMode, opts: { silent?: boolean } = {}) => {
+    await autoSaveGlobalPreferences({
+      proxy: {
+        mode,
+        manual: {
+          httpProxy: httpProxy.trim(),
+          httpsProxy: httpsProxy.trim(),
+          noProxy: noProxy.trim(),
+        },
+      },
+    }, opts);
+  };
+
+  const onProxyModeChange = async (mode: string) => {
+    setProxyMode(mode);
+    if (mode !== 'manual') {
+      await saveProxy(mode);
+    }
+  };
+
   const saveWork = async () => {
     const interval = Math.max(1, Math.min(120, hbInterval));
-    await autoSaveConfig({ desk: { heartbeat_interval: interval } });
+    await autoSaveConfig({ desk: { heartbeat_interval: interval } }, { silent: true });
+    await saveProxy(proxyMode, { silent: true });
+    showToast(t('settings.autoSaved'), 'success');
   };
 
   return (
@@ -85,6 +129,68 @@ export function WorkTab() {
             </button>
           )}
         </div>
+      </section>
+
+      {/* 代理 */}
+      <section className="settings-section">
+        <h2 className="settings-section-title">{t('settings.proxy.title')}</h2>
+        <p className="settings-desc settings-desc-compact">
+          {t('settings.proxy.desc')}
+        </p>
+        <div className="settings-field">
+          <label className="settings-field-label">{t('settings.proxy.mode')}</label>
+          <SelectWidget
+            options={[
+              { value: 'none', label: t('settings.proxy.modes.none') },
+              { value: 'system', label: t('settings.proxy.modes.system') },
+              { value: 'manual', label: t('settings.proxy.modes.manual') },
+            ]}
+            value={proxyMode}
+            onChange={onProxyModeChange}
+            placeholder={t('settings.proxy.mode')}
+          />
+          <span className="settings-field-hint">{t('settings.proxy.modeHint')}</span>
+        </div>
+        {proxyMode === 'system' && (
+          <p className="settings-hint">{t('settings.proxy.systemHint')}</p>
+        )}
+        {proxyMode === 'manual' && (
+          <>
+            <div className="settings-row">
+              <div className="settings-field settings-field-half">
+                <label className="settings-field-label">{t('settings.proxy.httpProxy')}</label>
+                <input
+                  type="text"
+                  className="settings-input"
+                  value={httpProxy}
+                  onChange={(e) => setHttpProxy(e.target.value)}
+                  placeholder="http://127.0.0.1:7897"
+                />
+              </div>
+              <div className="settings-field settings-field-half">
+                <label className="settings-field-label">{t('settings.proxy.httpsProxy')}</label>
+                <input
+                  type="text"
+                  className="settings-input"
+                  value={httpsProxy}
+                  onChange={(e) => setHttpsProxy(e.target.value)}
+                  placeholder="http://127.0.0.1:7897"
+                />
+              </div>
+            </div>
+            <div className="settings-field">
+              <label className="settings-field-label">{t('settings.proxy.noProxy')}</label>
+              <input
+                type="text"
+                className="settings-input"
+                value={noProxy}
+                onChange={(e) => setNoProxy(e.target.value)}
+                placeholder="localhost,127.0.0.1,::1"
+              />
+              <span className="settings-field-hint">{t('settings.proxy.noProxyHint')}</span>
+            </div>
+          </>
+        )}
       </section>
 
       {/* 巡检 */}

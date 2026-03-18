@@ -568,6 +568,22 @@
       "noProvider": "Please select a search engine first",
       "noKey": "Please enter an API Key first"
     },
+    "proxy": {
+      "title": "Proxy",
+      "desc": "Controls whether Hanako uses a proxy for all external network requests. Saving applies to both the built-in server and the desktop main process.",
+      "mode": "Proxy mode",
+      "modeHint": "System proxy is recommended by default so behavior stays close to a browser.",
+      "systemHint": "System proxy reads the operating system settings when possible. PAC / auto proxy scripts are not parsed directly yet.",
+      "httpProxy": "HTTP proxy",
+      "httpsProxy": "HTTPS proxy",
+      "noProxy": "No proxy",
+      "noProxyHint": "Separate multiple entries with commas, for example localhost,127.0.0.1,::1",
+      "modes": {
+        "none": "No proxy",
+        "system": "System proxy",
+        "manual": "Manual"
+      }
+    },
     "work": {
       "title": "Patrol",
       "heartbeatEnabled": "Patrol mode",

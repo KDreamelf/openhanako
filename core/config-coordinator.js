@@ -16,6 +16,7 @@ import {
   loadModelsRegistry,
   resolveApiKeyFromAuth,
 } from "../lib/memory/config-loader.js";
+import { mergeProxyConfig, normalizeProxyConfig } from "../lib/net/proxy-runtime.js";
 
 const log = createModuleLogger("config");
 
@@ -152,6 +153,20 @@ export class ConfigCoordinator {
     }
     this._savePrefs(prefs);
     log.log(`setUtilityApi: provider=${partial.provider || "-"}, base_url=${partial.base_url || "-"}`);
+  }
+
+  // ── Proxy Config ──
+
+  getProxyConfig() {
+    return normalizeProxyConfig(this._prefs().proxy);
+  }
+
+  setProxyConfig(partial) {
+    const prefs = this._prefs();
+    prefs.proxy = mergeProxyConfig(prefs.proxy, partial);
+    this._savePrefs(prefs);
+    log.log(`setProxyConfig: mode=${prefs.proxy.mode}`);
+    return prefs.proxy;
   }
 
   resolveUtilityConfig() {

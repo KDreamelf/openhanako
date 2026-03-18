@@ -18,6 +18,7 @@ import websocket from "@fastify/websocket";
 import { HanaEngine } from "../core/engine.js";
 import { ensureFirstRun } from "../core/first-run.js";
 import { initDebugLog } from "../lib/debug-log.js";
+import { applyProxyConfig, describeAppliedProxy } from "../lib/net/proxy-runtime.js";
 
 // Pi SDK 的 fetch 请求会累积 AbortSignal listener，提高上限避免无害警告
 setMaxListeners(50);
@@ -58,6 +59,21 @@ process.env.HANA_HOME = hanakoHome;
 console.log("[server] ① ensureFirstRun...");
 ensureFirstRun(hanakoHome, productDir);
 console.log("[server] ① ensureFirstRun 完成");
+
+try {
+  const prefsPath = path.join(hanakoHome, "user", "preferences.json");
+  let prefs = {};
+  try {
+    prefs = JSON.parse(fs.readFileSync(prefsPath, "utf-8"));
+  } catch {}
+  const proxyResult = await applyProxyConfig(prefs.proxy);
+  console.log(`[server] proxy initialized: ${describeAppliedProxy(proxyResult)}`);
+  for (const warning of proxyResult.warnings || []) {
+    console.warn(`[server] proxy warning: ${warning}`);
+  }
+} catch (err) {
+  console.warn(`[server] proxy init failed: ${err.message}`);
+}
 
 // ── 初始化 Debug 日志 ──
 const dlog = initDebugLog(path.join(hanakoHome, "logs"));

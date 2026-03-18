@@ -1,11 +1,12 @@
 /**
  * 全局偏好设置路由（跨 agent 共享）
  *
- * GET  /api/preferences/models  — 读取全局模型 + 搜索配置
- * PUT  /api/preferences/models  — 更新全局模型 + 搜索配置
+ * GET  /api/preferences/models  — 读取全局模型 + 搜索/代理配置
+ * PUT  /api/preferences/models  — 更新全局模型 + 搜索/代理配置
  */
 
 import { debugLog } from "../../lib/debug-log.js";
+import { applyProxyConfig } from "../../lib/net/proxy-runtime.js";
 
 export default async function preferencesRoute(app, { engine }) {
 
@@ -33,6 +34,7 @@ export default async function preferencesRoute(app, { engine }) {
           base_url: utilityApi.base_url || "",
           api_key: mask(utilityApi.api_key),
         },
+        proxy: engine.getProxyConfig?.() || null,
       };
     } catch (err) {
       reply.code(500);
@@ -68,6 +70,12 @@ export default async function preferencesRoute(app, { engine }) {
       if (body.utility_api) {
         engine.setUtilityApi(body.utility_api);
         sections.push("utility_api");
+      }
+
+      if (body.proxy) {
+        const proxyConfig = engine.setProxyConfig(body.proxy);
+        await applyProxyConfig(proxyConfig);
+        sections.push("proxy");
       }
 
       if (needsModelSync) {

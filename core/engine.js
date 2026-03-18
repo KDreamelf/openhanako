@@ -239,6 +239,8 @@ export class HanaEngine {
   setSearchConfig(p) { return this._configCoord.setSearchConfig(p); }
   getUtilityApi() { return this._configCoord.getUtilityApi(); }
   setUtilityApi(p) { return this._configCoord.setUtilityApi(p); }
+  getProxyConfig() { return this._configCoord.getProxyConfig(); }
+  setProxyConfig(p) { return this._configCoord.setProxyConfig(p); }
   resolveUtilityConfig() { return this._configCoord.resolveUtilityConfig(); }
   readFavorites() { return this._configCoord.readFavorites(); }
   async saveFavorites(f) { return this._configCoord.saveFavorites(f); }

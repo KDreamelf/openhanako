@@ -568,6 +568,22 @@
       "noProvider": "请先选择搜索引擎",
       "noKey": "请先输入 API Key"
     },
+    "proxy": {
+      "title": "代理配置",
+      "desc": "控制 Hanako 所有外部网络请求是否走代理。保存后会同时应用到内置 Server 和桌面端主进程。",
+      "mode": "代理模式",
+      "modeHint": "默认推荐使用系统代理，行为更接近浏览器。",
+      "systemHint": "系统代理会尽量读取操作系统配置。当前版本暂不直接解析 PAC/自动代理脚本。",
+      "httpProxy": "HTTP 代理",
+      "httpsProxy": "HTTPS 代理",
+      "noProxy": "不走代理",
+      "noProxyHint": "多个地址用逗号分隔，例如 localhost,127.0.0.1,::1",
+      "modes": {
+        "none": "不使用代理",
+        "system": "系统代理",
+        "manual": "手动配置"
+      }
+    },
     "work": {
       "title": "巡检",
       "heartbeatEnabled": "巡检模式",
