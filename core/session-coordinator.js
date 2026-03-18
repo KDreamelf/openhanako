@@ -14,6 +14,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { createModuleLogger } from "../lib/debug-log.js";
 import { BrowserManager } from "../lib/browser/browser-manager.js";
+import { createAgentSessionSettings } from "./agent-session-settings.js";
 
 const log = createModuleLogger("session");
 
@@ -97,6 +98,11 @@ export class SessionCoordinator {
       modelRegistry: models.modelRegistry,
       model: models.currentModel,
       thinkingLevel: models.resolveThinkingLevel(this._d.getPrefs().getThinkingLevel()),
+      settingsManager: createAgentSessionSettings({
+        cwd: effectiveCwd,
+        agentDir: agent.agentDir,
+        model: models.currentModel,
+      }),
       resourceLoader: this._d.getResourceLoader(),
       tools: sessionTools,
       customTools: sessionCustomTools,
@@ -451,6 +457,11 @@ export class SessionCoordinator {
         modelRegistry: models.modelRegistry,
         model: execModel,
         thinkingLevel: models.resolveThinkingLevel(this._d.getPrefs().getThinkingLevel()),
+        settingsManager: createAgentSessionSettings({
+          cwd: execCwd,
+          agentDir: targetAgent.agentDir,
+          model: execModel,
+        }),
         resourceLoader: execResourceLoader,
         tools: actTools,
         customTools: actCustomTools,

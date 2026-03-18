@@ -9,10 +9,10 @@ import path from "path";
 import {
   createAgentSession,
   SessionManager,
-  SettingsManager,
 } from "@mariozechner/pi-coding-agent";
 import { debugLog } from "../lib/debug-log.js";
 import { READ_ONLY_BUILTIN_TOOLS } from "./config-coordinator.js";
+import { createAgentSessionSettings } from "./agent-session-settings.js";
 
 const STEER_PREFIX = "（插话，无需 MOOD）\n";
 
@@ -298,7 +298,8 @@ export class BridgeSessionManager {
   /** 创建 bridge 专用 settings：100k token 触发压缩 */
   _createSettings(model) {
     const contextWindow = model?.contextWindow || 200_000;
-    return SettingsManager.inMemory({
+    return createAgentSessionSettings({
+      model,
       compaction: {
         enabled: true,
         reserveTokens: Math.max(contextWindow - 100_000, 16384),

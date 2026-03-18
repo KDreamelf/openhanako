@@ -11,6 +11,7 @@ import fs from "fs";
 import path from "path";
 import { createAgentSession, SessionManager } from "@mariozechner/pi-coding-agent";
 import { debugLog } from "../lib/debug-log.js";
+import { createAgentSessionSettings } from "../core/agent-session-settings.js";
 
 /**
  * 以指定 agentId 的身份跑一次临时会话。
@@ -77,6 +78,11 @@ export async function runAgentSession(agentId, rounds, { engine, signal, session
     modelRegistry: ctx.modelRegistry,
     model,
     thinkingLevel: "medium",
+    settingsManager: createAgentSessionSettings({
+      cwd,
+      agentDir,
+      model,
+    }),
     resourceLoader: tempResourceLoader,
     tools,
     customTools,
