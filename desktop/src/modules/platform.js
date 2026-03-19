@@ -81,6 +81,7 @@
 
     // Skill 查看器 → Web 环境暂不支持
     openSkillViewer: () => {},
+    openSkillViewerFromXing: null,
     listSkillFiles: async () => [],
     readSkillFile: async () => null,
     onSkillViewerLoad: () => {},

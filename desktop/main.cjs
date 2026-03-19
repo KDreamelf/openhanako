@@ -743,9 +743,103 @@ function createSettingsWindow(tab, theme) {
 }
 
 // ── 创建 Skill 预览窗口 ──
+function parseSkillMeta(content) {
+  const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+  const frontmatter = fmMatch?.[1] || "";
+  const readField = (field) => {
+    const match = frontmatter.match(new RegExp(`^${field}:\\s*(.+)$`, "m"));
+    return match ? match[1].trim().replace(/^["']|["']$/g, "") : null;
+  };
+  return {
+    name: readField("name"),
+    title: readField("title"),
+  };
+}
+
+function buildXingSkillSlug(title) {
+  const normalized = String(title || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return normalized || `xing-skill-${Date.now().toString(36)}`;
+}
+
+function buildXingSkillMarkdown(title, markdownContent) {
+  const displayTitle = String(title || "对话工作流").replace(/\s+/g, " ").trim() || "对话工作流";
+  const internalName = buildXingSkillSlug(displayTitle);
+  const body = String(markdownContent || "").trim();
+  const description = [
+    `Apply the workflow and preferences summarized from the current conversation for tasks related to "${displayTitle}".`,
+    "Use this skill when the user asks for similar style, process, quality bar, or working constraints.",
+    `对与「${displayTitle}」相关的任务应用当前对话提炼出的流程与偏好。`,
+    "当用户提出相近主题、风格要求、流程约束或质量标准时使用。",
+  ].join(" ");
+
+  return `---
+name: ${internalName}
+title: ${JSON.stringify(displayTitle)}
+description: ${JSON.stringify(description)}
+---
+
+# ${displayTitle}
+
+此技能由 \`/xing\` 从当前对话自动提炼。
+
+命中相似任务时，优先复用下列偏好、流程、质量标准与注意事项；若与用户当前轮的明确要求冲突，以当前轮要求为准。
+
+${body}
+
+## 使用提醒
+
+- 先判断当前任务是否与本技能主题相近。
+- 优先复用可泛化的约束，不要机械套用与当前任务无关的细节。
+- 若用户给出新的明确要求，以最新要求为准。
+`;
+}
+
+function createXingSkillPreview(title, markdownContent) {
+  const displayTitle = String(title || "对话工作流").replace(/\s+/g, " ").trim() || "对话工作流";
+  const body = String(markdownContent || "").trim();
+  if (!body) return null;
+
+  const previewRoot = path.join(hanakoHome, "tmp", "xing-skill-previews");
+  const previewDir = path.join(previewRoot, `${buildXingSkillSlug(displayTitle)}-${Date.now().toString(36)}`);
+  fs.mkdirSync(previewDir, { recursive: true });
+
+  const skillPath = path.join(previewDir, "SKILL.md");
+  fs.writeFileSync(skillPath, buildXingSkillMarkdown(displayTitle, body), "utf-8");
+
+  return {
+    name: displayTitle,
+    displayName: displayTitle,
+    baseDir: previewDir,
+    filePath: skillPath,
+    installed: false,
+  };
+}
+
+function parseSkillPreviewInfoFromDir(skillDir, fallbackName) {
+  const skillPath = path.join(skillDir, "SKILL.md");
+  const content = fs.readFileSync(skillPath, "utf-8");
+  const meta = parseSkillMeta(content);
+  const name = meta.name || fallbackName;
+  const displayName = meta.title || fallbackName || name;
+  return {
+    name,
+    displayName,
+    baseDir: skillDir,
+    filePath: skillPath,
+    installed: false,
+  };
+}
+
 function createSkillViewerWindow(skillInfo) {
   if (skillViewerWindow && !skillViewerWindow.isDestroyed()) {
     // 复用已有窗口，传递新 skill 数据
+    skillViewerWindow.setTitle(skillInfo.displayName || skillInfo.name || "Skill Preview");
     skillViewerWindow.webContents.send("skill-viewer-load", skillInfo);
     skillViewerWindow.show();
     skillViewerWindow.focus();
@@ -757,7 +851,7 @@ function createSkillViewerWindow(skillInfo) {
     height: 680,
     minWidth: 600,
     minHeight: 400,
-    title: skillInfo.name || "Skill Preview",
+    title: skillInfo.displayName || skillInfo.name || "Skill Preview",
     frame: false,
     backgroundColor: "#F4F0E4",
     show: true,
@@ -1662,7 +1756,7 @@ ipcMain.handle("open-skill-viewer", (_event, data) => {
       // 先检查同名 skill 是否已安装在 skills 目录
       const installedDir = path.join(hanakoHome, "skills", baseName);
       if (fs.existsSync(path.join(installedDir, "SKILL.md"))) {
-        createSkillViewerWindow({ name: baseName, baseDir: installedDir, installed: false });
+        createSkillViewerWindow(parseSkillPreviewInfoFromDir(installedDir, baseName));
         return;
       }
 
@@ -1695,12 +1789,7 @@ ipcMain.handle("open-skill-viewer", (_event, data) => {
         }
         if (!skillDir) return;
 
-        const content = fs.readFileSync(path.join(skillDir, "SKILL.md"), "utf-8");
-        const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
-        const nameMatch = fmMatch?.[1]?.match(/^name:\s*(.+)$/m);
-        const name = nameMatch ? nameMatch[1].trim().replace(/^["']|["']$/g, "") : baseName;
-
-        createSkillViewerWindow({ name, baseDir: skillDir, installed: false });
+        createSkillViewerWindow(parseSkillPreviewInfoFromDir(skillDir, baseName));
       } catch (err) {
         console.error("[skill-viewer] Failed to extract .skill file:", err.message);
       }
@@ -1710,6 +1799,13 @@ ipcMain.handle("open-skill-viewer", (_event, data) => {
 
   if (!data.baseDir || !path.isAbsolute(data.baseDir)) return;
   createSkillViewerWindow(data);
+});
+
+ipcMain.handle("open-skill-viewer-from-xing", (_event, data) => {
+  const preview = createXingSkillPreview(data?.title, data?.content);
+  if (!preview) return null;
+  createSkillViewerWindow(preview);
+  return preview;
 });
 
 ipcMain.handle("skill-viewer-list-files", (_event, baseDir) => {

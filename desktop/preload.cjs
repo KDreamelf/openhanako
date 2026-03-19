@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld("hana", {
   onEditorDetached: (cb) => ipcRenderer.on("editor-detached", (_, detached) => cb(detached)),
   // Skill 预览窗口
   openSkillViewer: (data) => ipcRenderer.invoke("open-skill-viewer", data),
+  openSkillViewerFromXing: (data) => ipcRenderer.invoke("open-skill-viewer-from-xing", data),
   listSkillFiles: (baseDir) => ipcRenderer.invoke("skill-viewer-list-files", baseDir),
   readSkillFile: (filePath) => ipcRenderer.invoke("skill-viewer-read-file", filePath),
   onSkillViewerLoad: (cb) => ipcRenderer.on("skill-viewer-load", (_, data) => cb(data)),

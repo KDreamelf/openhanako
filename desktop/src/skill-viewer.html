@@ -342,7 +342,7 @@
     // ── 接收 skill 数据 ──
     window.hana.onSkillViewerLoad(async (skillInfo) => {
         currentSkill = skillInfo;
-        svSkillName.textContent = skillInfo.name || "Skill";
+        svSkillName.textContent = skillInfo.displayName || skillInfo.name || "Skill";
         svCopyBtn.style.display = skillInfo.installed ? "none" : "";
 
         const files = await window.hana.listSkillFiles(skillInfo.baseDir);

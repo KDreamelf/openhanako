@@ -613,6 +613,17 @@ function crShowXingLoading(title: string): void {
   crState().xingCardEl = card;
 }
 
+async function crOpenXingSkillPreview(title: string | null, markdownContent: string): Promise<void> {
+  const body = markdownContent.trim();
+  if (!body) return;
+  const openSkillPreview = (window as any).platform?.openSkillViewerFromXing;
+  if (typeof openSkillPreview !== 'function') return;
+  await openSkillPreview({
+    title: title || '对话工作流',
+    content: body,
+  });
+}
+
 function crSealXingCard(title: string | null, markdownContent: string): void {
   const existingCard = crState().xingCardEl as HTMLElement | null;
 
@@ -637,8 +648,11 @@ function crSealXingCard(title: string | null, markdownContent: string): void {
   const injectCopyButtons = (window as any).HanaModules?.utils?.injectCopyButtons;
   if (injectCopyButtons) injectCopyButtons(bodyEl);
 
+  const actionsEl = document.createElement('div');
+  actionsEl.className = 'xing-card-actions';
+
   const copyBtn = document.createElement('button');
-  copyBtn.className = 'xing-card-copy';
+  copyBtn.className = 'xing-card-action';
   copyBtn.textContent = '复制';
   copyBtn.addEventListener('click', () => {
     navigator.clipboard.writeText(markdownContent.trim()).then(() => {
@@ -646,7 +660,36 @@ function crSealXingCard(title: string | null, markdownContent: string): void {
       setTimeout(() => { copyBtn.textContent = '复制'; }, 1500);
     });
   });
-  card.appendChild(copyBtn);
+  actionsEl.appendChild(copyBtn);
+
+  if (typeof (window as any).platform?.openSkillViewerFromXing === 'function') {
+    const skillBtn = document.createElement('button');
+    skillBtn.className = 'xing-card-action';
+    skillBtn.textContent = '转为技能';
+    skillBtn.addEventListener('click', async () => {
+      skillBtn.disabled = true;
+      const originalText = skillBtn.textContent;
+      skillBtn.textContent = '生成中...';
+      try {
+        await crOpenXingSkillPreview(title, markdownContent);
+        skillBtn.textContent = '已打开';
+        setTimeout(() => {
+          skillBtn.disabled = false;
+          skillBtn.textContent = '转为技能';
+        }, 1500);
+      } catch (err) {
+        console.error('[xing] open skill preview failed:', err);
+        skillBtn.textContent = '生成失败';
+        setTimeout(() => {
+          skillBtn.disabled = false;
+          skillBtn.textContent = originalText || '转为技能';
+        }, 1800);
+      }
+    });
+    actionsEl.appendChild(skillBtn);
+  }
+
+  card.appendChild(actionsEl);
 
   if (existingCard && existingCard.parentNode) {
     existingCard.parentNode.replaceChild(card, existingCard);
@@ -687,6 +730,7 @@ export function setupChatRenderShim(modules: Record<string, unknown>): void {
     renderHistoryToolGroup: crRenderHistoryToolGroup,
     showXingLoading: crShowXingLoading,
     sealXingCard: crSealXingCard,
+    openXingSkillPreview: crOpenXingSkillPreview,
     initChatRender: (injected: ChatRenderCtx) => { crCtx = injected; },
   };
 }

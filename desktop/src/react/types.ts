@@ -119,7 +119,15 @@ export interface PlatformApi {
   openExternal(url: string): void;
   showInFinder(path: string): void;
   browserEmergencyStop?(): void;
-  openSkillViewer?(opts: { skillPath: string }): void;
+  openSkillViewer?(opts: {
+    skillPath?: string;
+    name?: string;
+    displayName?: string;
+    baseDir?: string;
+    filePath?: string;
+    installed?: boolean;
+  }): void;
+  openSkillViewerFromXing?(opts: { title: string; content: string }): Promise<unknown>;
   settingsChanged(event: string, payload?: unknown): void;
   onSettingsChanged(callback: (event: string, payload: unknown) => void): void;
   onSwitchTab?(callback: (tab: string) => void): void;

@@ -2330,9 +2330,18 @@ html[data-platform="linux"] .tb-toggle-right {
     line-height: 1.65;
 }
 
-.xing-card-copy {
-    display: block;
-    margin: var(--space-sm) auto 0;
+.xing-card-actions {
+    display: flex;
+    justify-content: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+}
+
+.xing-card-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 88px;
     padding: 4px 16px;
     font-size: 0.75rem;
     font-family: inherit;
@@ -2341,15 +2350,20 @@ html[data-platform="linux"] .tb-toggle-right {
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     cursor: pointer;
-    transition: color 0.15s, border-color 0.15s;
+    transition: color 0.15s, border-color 0.15s, opacity 0.15s;
 }
 
-.xing-card-copy:hover {
+.xing-card-action:hover {
     color: var(--accent);
     border-color: var(--accent);
 }
 
-.xing-card.loading .xing-card-copy { display: none; }
+.xing-card-action:disabled {
+    cursor: default;
+    opacity: 0.7;
+}
+
+.xing-card.loading .xing-card-actions { display: none; }
 
 /* ═══ Bridge 接入设置 ═══ */
 

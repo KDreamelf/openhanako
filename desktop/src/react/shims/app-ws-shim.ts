@@ -328,7 +328,16 @@ function handleServerMessage(msg: any): void {
       break;
 
     case 'xing_end':
-      _cr().sealXingCard(state.xingTitle, state._xingBuf || '');
+      {
+        const xingTitle = state.xingTitle;
+        const xingContent = state._xingBuf || '';
+        _cr().sealXingCard(xingTitle, xingContent);
+        if (!msg.__fromReplay) {
+          Promise.resolve(_cr().openXingSkillPreview?.(xingTitle, xingContent)).catch((err: unknown) => {
+            console.error('[xing] auto open skill preview failed:', err);
+          });
+        }
+      }
       state.inXing = false;
       state.xingTitle = null;
       state.xingCardEl = null;
