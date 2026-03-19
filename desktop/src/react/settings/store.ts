@@ -13,6 +13,7 @@ export interface Agent {
 
 export interface SkillInfo {
   name: string;
+  displayName?: string;
   description?: string;
   enabled: boolean;
   hidden?: boolean;

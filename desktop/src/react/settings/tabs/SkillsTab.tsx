@@ -80,11 +80,12 @@ export function SkillsTab() {
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      showToast(t('settings.skills.installSuccess', { name: data.skill?.name || '' }), 'success');
+      showToast(t('settings.skills.installSuccess', { name: data.skill?.displayName || data.skill?.name || '' }), 'success');
       await loadSkills();
       if (data.skill?.baseDir) {
         platform?.openSkillViewer?.({
           name: data.skill.name,
+          displayName: data.skill.displayName,
           baseDir: data.skill.baseDir,
           filePath: data.skill.filePath,
           installed: true,
@@ -95,8 +96,8 @@ export function SkillsTab() {
     }
   };
 
-  const deleteSkill = async (name: string) => {
-    const msg = t('settings.skills.deleteConfirm', { name });
+  const deleteSkill = async (name: string, displayName?: string) => {
+    const msg = t('settings.skills.deleteConfirm', { name: displayName || name });
     if (!confirm(msg)) return;
     try {
       const res = await hanaFetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
@@ -369,7 +370,7 @@ export function SkillsTab() {
 function SkillRow({ skill, nameHint, onDelete, onToggle }: {
   skill: SkillInfo;
   nameHint?: string;
-  onDelete: (name: string) => void;
+  onDelete: (name: string, displayName?: string) => void;
   onToggle: (name: string, enabled: boolean) => void;
 }) {
   const rawDesc = skill.description || '';
@@ -385,6 +386,7 @@ function SkillRow({ skill, nameHint, onDelete, onToggle }: {
         if (skill.baseDir) {
           (window as any).platform?.openSkillViewer?.({
             name: skill.name,
+            displayName: skill.displayName,
             baseDir: skill.baseDir,
             filePath: skill.filePath,
             installed: true,
@@ -394,8 +396,8 @@ function SkillRow({ skill, nameHint, onDelete, onToggle }: {
     >
       <div className="skills-list-info">
         <span className="skills-list-name">
-          {skill.name}
-          {nameHint && <span className="skills-list-name-hint">{nameHint}</span>}
+          {skill.displayName || skill.name}
+          {!skill.displayName && nameHint && <span className="skills-list-name-hint">{nameHint}</span>}
         </span>
         <span className="skills-list-desc">{displayDesc}</span>
       </div>
@@ -403,7 +405,7 @@ function SkillRow({ skill, nameHint, onDelete, onToggle }: {
         <button
           className="skill-card-delete"
           title={t('settings.skills.delete')}
-          onClick={(e) => { e.stopPropagation(); onDelete(skill.name); }}
+          onClick={(e) => { e.stopPropagation(); onDelete(skill.name, skill.displayName); }}
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
             <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />

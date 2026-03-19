@@ -7,6 +7,24 @@
 import fs from "fs";
 import path from "path";
 
+function parseSkillFileMeta(skillFile) {
+  try {
+    const content = fs.readFileSync(skillFile, "utf-8");
+    const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+    const frontmatter = fmMatch?.[1] || "";
+    const readField = (field) => {
+      const match = frontmatter.match(new RegExp(`^${field}:\\s*(.+)$`, "m"));
+      return match ? match[1].trim().replace(/^["']|["']$/g, "") : "";
+    };
+    return {
+      description: readField("description"),
+      displayName: readField("title"),
+    };
+  } catch {
+    return { description: "", displayName: "" };
+  }
+}
+
 export class SkillManager {
   /**
    * @param {object} opts
@@ -35,6 +53,10 @@ export class SkillManager {
     this._allSkills = resourceLoader.getSkills().skills;
     for (const s of this._allSkills) {
       s._hidden = hiddenSkills.has(s.name);
+      if (s.filePath) {
+        const meta = parseSkillFileMeta(s.filePath);
+        if (meta.displayName) s.displayName = meta.displayName;
+      }
     }
     for (const [, ag] of agents) {
       this._allSkills.push(...this.scanLearnedSkills(ag.agentDir));
@@ -53,6 +75,7 @@ export class SkillManager {
     const enabled = agent?.config?.skills?.enabled || [];
     return this._allSkills.map(s => ({
       name: s.name,
+      displayName: s.displayName || s.name,
       description: s.description,
       filePath: s.filePath,
       baseDir: s.baseDir,
@@ -91,6 +114,10 @@ export class SkillManager {
     this._allSkills = resourceLoader.getSkills().skills;
     for (const s of this._allSkills) {
       s._hidden = this._hiddenSkills.has(s.name);
+      if (s.filePath) {
+        const meta = parseSkillFileMeta(s.filePath);
+        if (meta.displayName) s.displayName = meta.displayName;
+      }
     }
     for (const [, ag] of agents) {
       this._allSkills.push(...this.scanLearnedSkills(ag.agentDir));
@@ -150,12 +177,11 @@ export class SkillManager {
       const skillFile = path.join(learnedDir, entry.name, "SKILL.md");
       if (!fs.existsSync(skillFile)) continue;
       try {
-        const content = fs.readFileSync(skillFile, "utf-8");
-        const descMatch = content.match(/^description:\s*(.+?)\s*$/m);
-        const description = descMatch ? descMatch[1].replace(/["']/g, "") : "";
+        const meta = parseSkillFileMeta(skillFile);
         results.push({
           name: entry.name,
-          description,
+          displayName: meta.displayName || entry.name,
+          description: meta.description,
           filePath: skillFile,
           baseDir: path.join(learnedDir, entry.name),
           source: "learned",
