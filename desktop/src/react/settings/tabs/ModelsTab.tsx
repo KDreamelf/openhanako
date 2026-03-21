@@ -145,6 +145,7 @@ function ChatModelSection({
   const { pendingFavorites, pendingDefaultModel, showToast } = useSettingsStore();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerSearch, setPickerSearch] = useState('');
+  const [customInput, setCustomInput] = useState('');
   const [editingModel, setEditingModel] = useState<string | null>(null);
   const [sdkModels, setSdkModels] = useState<Record<string, string[]>>({});
 
@@ -205,9 +206,11 @@ function ChatModelSection({
 
   const query = pickerSearch.toLowerCase();
 
-  const handleCustomSubmit = () => {
+  const handleCustomSubmit = async () => {
     const val = customInput.trim();
     if (!val) return;
+    const providerId = await ensureModelProviderBinding(val);
+    if (!providerId) return;
     addFavorite(val);
     setCustomInput('');
     setPickerOpen(false);
@@ -297,14 +300,14 @@ function ChatModelSection({
               onChange={(e) => setCustomInput(e.target.value)}
               onClick={(e) => e.stopPropagation()}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') handleCustomSubmit();
+                if (e.key === 'Enter') void handleCustomSubmit();
                 e.stopPropagation();
               }}
             />
             <button
               type="button"
               className="mdw-custom-confirm"
-              onClick={(e) => { e.stopPropagation(); handleCustomSubmit(); }}
+              onClick={(e) => { e.stopPropagation(); void handleCustomSubmit(); }}
             >
               ↵
             </button>
