@@ -6,6 +6,28 @@ import { useSettingsStore } from './store';
 
 const DEFAULT_TIMEOUT = 30_000;
 
+async function buildFetchError(path: string, res: Response): Promise<Error> {
+  let detail = '';
+
+  try {
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await res.clone().json();
+      detail = data?.error || data?.message || '';
+    } else {
+      detail = (await res.clone().text()).trim();
+    }
+  } catch {
+    detail = '';
+  }
+
+  const statusText = `${res.status} ${res.statusText}`.trim();
+  const message = detail
+    ? `hanaFetch ${path}: ${detail}`
+    : `hanaFetch ${path}: ${statusText}`;
+  return new Error(message);
+}
+
 export function hanaUrl(path: string): string {
   const { serverPort, serverToken } = useSettingsStore.getState();
   const sep = path.includes('?') ? '&' : '?';
@@ -34,7 +56,7 @@ export async function hanaFetch(
       signal: controller.signal,
     });
     if (!res.ok) {
-      throw new Error(`hanaFetch ${path}: ${res.status} ${res.statusText}`);
+      throw await buildFetchError(path, res);
     }
     return res;
   } finally {

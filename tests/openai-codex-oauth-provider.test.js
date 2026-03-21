@@ -119,4 +119,39 @@ describe("openai codex oauth provider override", () => {
       accountId: "acct-789",
     });
   });
+
+  it("accepts auth.json variants that store tokens in credentials with camelCase keys", async () => {
+    const { parseOpenAICodexAuthFileContent } = await import("../lib/oauth/openai-codex.js");
+    const accessToken = createJwt({
+      exp: 1774591619,
+      [OPENAI_AUTH_CLAIM]: {
+        chatgpt_account_id: "acct-456",
+      },
+    });
+
+    const imported = parseOpenAICodexAuthFileContent(JSON.stringify({
+      auth_mode: "device_code",
+      credentials: {
+        accessToken: accessToken,
+        refreshToken: "refresh-token",
+        accountId: "acct-456",
+      },
+    }));
+
+    expect(imported).toEqual({
+      access: accessToken,
+      refresh: "refresh-token",
+      expires: 1774591619 * 1000,
+      accountId: "acct-456",
+    });
+  });
+
+  it("reports api-key-only auth.json as unsupported import source", async () => {
+    const { parseOpenAICodexAuthFileContent } = await import("../lib/oauth/openai-codex.js");
+
+    expect(() => parseOpenAICodexAuthFileContent(JSON.stringify({
+      auth_mode: "api_key",
+      OPENAI_API_KEY: "sk-test",
+    }))).toThrow("当前 auth.json 只有 OPENAI_API_KEY");
+  });
 });
