@@ -10,6 +10,7 @@ import os from "os";
 import path from "path";
 import YAML from "js-yaml";
 import { loadGlobalProviders, resolveApiKeyFromAuth } from "../lib/memory/config-loader.js";
+import { buildPromptToolApiName, normalizeToolFormat } from "../lib/llm/prompt-tool-provider.js";
 
 /** @deprecated 仅作为 fallback，调用方应通过 opts.modelsJsonPath 传入 */
 function getDefaultModelsJsonPath() {
@@ -81,6 +82,13 @@ function resolveProviderCredentials(providerName, rawConfig, opts = {}) {
   }
 
   return { baseUrl, apiKey, api };
+}
+
+function resolveProviderToolFormat(providerName, rawConfig) {
+  const global = loadGlobalProviders();
+  const globalFormat = global.providers?.[providerName]?.tool_format;
+  if (globalFormat) return normalizeToolFormat(globalFormat);
+  return normalizeToolFormat(rawConfig.providers?.[providerName]?.tool_format);
 }
 
 /**
@@ -167,6 +175,7 @@ export function syncFavoritesToModelsJson(configPath, opts = {}) {
   const newProviders = {};
   for (const [provName, targetModelIds] of providerModels) {
     const { baseUrl, apiKey, api } = resolveProviderCredentials(provName, rawConfig, opts);
+    const toolFormat = resolveProviderToolFormat(provName, rawConfig);
 
     if (!baseUrl) {
       throw new Error(`provider "${provName}" 缺少 Base URL`);
@@ -206,7 +215,7 @@ export function syncFavoritesToModelsJson(configPath, opts = {}) {
 
     newProviders[provName] = {
       baseUrl,
-      api,
+      api: toolFormat === "prompt" ? buildPromptToolApiName(provName, api) : api,
       apiKey: effectiveApiKey,
       models: modelList,
     };

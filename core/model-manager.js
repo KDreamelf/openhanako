@@ -14,6 +14,7 @@ import { registerOAuthProvider } from "@mariozechner/pi-ai/oauth";
 import { minimaxOAuthProvider } from "../lib/oauth/minimax-portal.js";
 import { openaiCodexOAuthProvider } from "../lib/oauth/openai-codex.js";
 import { clearConfigCache, loadGlobalProviders, resolveApiKeyFromAuth } from "../lib/memory/config-loader.js";
+import { refreshPromptToolProviders } from "../lib/llm/prompt-tool-provider.js";
 
 function isLocalBaseUrl(url) {
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(String(url || ""));
@@ -42,6 +43,7 @@ export class ModelManager {
       this._authStorage,
       path.join(this._hanakoHome, "models.json"),
     );
+    refreshPromptToolProviders();
   }
 
   // ── Getters ──
@@ -59,6 +61,7 @@ export class ModelManager {
   /** 刷新可用模型列表 */
   async refreshAvailable() {
     this._availableModels = await this._modelRegistry.getAvailable();
+    this._rebindSelectedModels();
     return this._availableModels;
   }
 
@@ -82,7 +85,9 @@ export class ModelManager {
       // refresh() 内部会 reset OAuth providers，所以本地覆写需要补回去。
       registerOAuthProvider(minimaxOAuthProvider);
       registerOAuthProvider(openaiCodexOAuthProvider);
+      refreshPromptToolProviders();
       this._availableModels = await this._modelRegistry.getAvailable();
+      this._rebindSelectedModels();
     }
     return synced;
   }
@@ -149,6 +154,16 @@ export class ModelManager {
     }
 
     return { api_key, base_url, api };
+  }
+
+  _rebindSelectedModels() {
+    const rebind = (model) => {
+      if (!model?.id) return null;
+      return this._availableModels.find(m => m.id === model.id && m.provider === model.provider) || null;
+    };
+
+    this._defaultModel = rebind(this._defaultModel);
+    this._sessionModel = rebind(this._sessionModel);
   }
 
   /**

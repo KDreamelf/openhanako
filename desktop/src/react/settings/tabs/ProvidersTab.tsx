@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useSettingsStore } from '../store';
 import { hanaFetch } from '../api';
-import { t, PROVIDER_PRESETS, API_FORMAT_OPTIONS } from '../helpers';
+import { t, PROVIDER_PRESETS, API_FORMAT_OPTIONS, TOOL_FORMAT_OPTIONS } from '../helpers';
 import { SelectWidget } from '../widgets/SelectWidget';
 import { KeyInput } from '../widgets/KeyInput';
 import { loadSettingsConfig } from '../actions';
@@ -11,6 +11,10 @@ const platform = (window as any).platform;
 // OAuth 合规白名单（MiniMax 合法，OpenAI Codex 灰色但安全）
 const ALLOWED_OAUTH = new Set(['minimax', 'openai-codex']);
 
+function getApiFormatLabel(api: string) {
+  return API_FORMAT_OPTIONS.find((item) => item.value === api)?.label || api || '-';
+}
+
 export function ProvidersTab() {
   const { settingsConfig, showToast } = useSettingsStore();
   const providers = settingsConfig?.providers || {};
@@ -18,11 +22,16 @@ export function ProvidersTab() {
   const [customName, setCustomName] = useState('');
   const [customUrl, setCustomUrl] = useState('');
   const [customApi, setCustomApi] = useState('');
+  const [customToolFormat, setCustomToolFormat] = useState('native');
   const [presetVal, setPresetVal] = useState('');
   const [oauthStatus, setOauthStatus] = useState<Record<string, any>>({});
 
   const registered = new Set(Object.keys(providers));
   const isCustom = presetVal === '__custom__';
+  const toolFormatOptions = TOOL_FORMAT_OPTIONS.map((item) => ({
+    value: item.value,
+    label: t(item.labelKey) || item.label,
+  }));
 
   const oauthEntries = Object.entries(oauthStatus).filter(([id]) => ALLOWED_OAUTH.has(id));
   const hasOAuth = oauthEntries.length > 0;
@@ -51,11 +60,12 @@ export function ProvidersTab() {
 
   const addProvider = async () => {
     const key = newKey.trim();
-    let name: string, url: string, api: string;
+    let name: string, url: string, api: string, toolFormat: string;
     if (isCustom) {
       name = customName.trim().toLowerCase();
       url = customUrl.trim();
       api = customApi.trim();
+      toolFormat = customToolFormat;
       if (!name) { showToast(t('settings.providers.nameRequired'), 'error'); return; }
       if (!url) { showToast(t('settings.providers.urlRequired'), 'error'); return; }
       if (!api) { showToast(t('settings.providers.apiRequired'), 'error'); return; }
@@ -64,6 +74,7 @@ export function ProvidersTab() {
       name = presetVal;
       url = preset?.url || '';
       api = preset?.api || '';
+      toolFormat = customToolFormat;
       if (!url || !api) {
         showToast(t('settings.providers.apiRequired'), 'error');
         return;
@@ -77,7 +88,17 @@ export function ProvidersTab() {
       const res = await hanaFetch('/api/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ providers: { [name]: { base_url: url, api_key: key, api, models: [] } } }),
+        body: JSON.stringify({
+          providers: {
+            [name]: {
+              base_url: url,
+              api_key: key,
+              api,
+              tool_format: toolFormat,
+              models: [],
+            },
+          },
+        }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
@@ -87,6 +108,7 @@ export function ProvidersTab() {
       setCustomName('');
       setCustomUrl('');
       setCustomApi('');
+      setCustomToolFormat('native');
       await loadSettingsConfig();
       platform?.settingsChanged?.('models-changed');
     } catch (err: any) {
@@ -104,6 +126,23 @@ export function ProvidersTab() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       showToast(t('settings.providers.deleted', { name }), 'success');
+      await loadSettingsConfig();
+      platform?.settingsChanged?.('models-changed');
+    } catch (err: any) {
+      showToast(t('settings.saveFailed') + ': ' + err.message, 'error');
+    }
+  };
+
+  const updateProviderToolFormat = async (name: string, toolFormat: string) => {
+    try {
+      const res = await hanaFetch('/api/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providers: { [name]: { tool_format: toolFormat } } }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      showToast(t('settings.autoSaved'), 'success');
       await loadSettingsConfig();
       platform?.settingsChanged?.('models-changed');
     } catch (err: any) {
@@ -197,6 +236,18 @@ export function ProvidersTab() {
                 </div>
               </>
             )}
+            {presetVal && (
+              <div className="settings-field">
+                <label className="settings-field-label">{t('settings.providers.toolFormat')}</label>
+                <SelectWidget
+                  options={toolFormatOptions}
+                  value={customToolFormat}
+                  onChange={setCustomToolFormat}
+                  placeholder={t('settings.providers.toolFormat')}
+                />
+                <span className="settings-field-hint">{t('settings.providers.toolFormatHint')}</span>
+              </div>
+            )}
             <div className="settings-field">
               <label className="settings-field-label">{t('settings.api.apiKey')}</label>
               <KeyInput value={newKey} onChange={setNewKey} placeholder={t('settings.api.apiKeyPlaceholder')} />
@@ -214,29 +265,48 @@ export function ProvidersTab() {
               ) : (
                 apiProviders.map(([name, p]: [string, any]) => (
                   <div key={name} className="provider-item" data-provider={name}>
-                    <span className="provider-item-name" title={p.base_url || ''}>{name}</span>
-                    <span className="provider-item-count">
-                      {(p.models || []).length > 0
-                        ? t('settings.providers.modelCount', { n: (p.models || []).length })
-                        : t('settings.providers.noModels')}
-                    </span>
-                    <div className="provider-item-actions">
-                      <button
-                        className="provider-item-action fetch"
-                        title={t('settings.providers.fetchModels')}
-                        onClick={(e) => fetchModels(name, p.base_url, p.api, e.currentTarget)}
-                      >
-                        {t('settings.providers.fetchModels')}
-                      </button>
-                      <button
-                        className="provider-item-action delete"
-                        title={t('settings.providers.delete')}
-                        onClick={() => deleteProvider(name)}
-                      >
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                          <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                        </svg>
-                      </button>
+                    <div className="provider-item-main">
+                      <span className="provider-item-name" title={p.base_url || ''}>{name}</span>
+                      <span className="provider-item-count">
+                        {(p.models || []).length > 0
+                          ? t('settings.providers.modelCount', { n: (p.models || []).length })
+                          : t('settings.providers.noModels')}
+                      </span>
+                      <div className="provider-item-actions">
+                        <button
+                          className="provider-item-action fetch"
+                          title={t('settings.providers.fetchModels')}
+                          onClick={(e) => fetchModels(name, p.base_url, p.api, e.currentTarget)}
+                        >
+                          {t('settings.providers.fetchModels')}
+                        </button>
+                        <button
+                          className="provider-item-action delete"
+                          title={t('settings.providers.delete')}
+                          onClick={() => deleteProvider(name)}
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                    <div className="provider-item-subrow">
+                      <div className="provider-item-meta">
+                        <span className="provider-item-meta-label">{t('settings.providers.apiFormat')}</span>
+                        <span className="provider-item-meta-value">{getApiFormatLabel(p.api)}</span>
+                      </div>
+                      <div className="provider-item-meta provider-item-meta-control">
+                        <span className="provider-item-meta-label">{t('settings.providers.toolFormat')}</span>
+                        <div className="provider-item-select">
+                          <SelectWidget
+                            options={toolFormatOptions}
+                            value={p.tool_format || 'native'}
+                            onChange={(value) => updateProviderToolFormat(name, value)}
+                            placeholder={t('settings.providers.toolFormat')}
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 ))

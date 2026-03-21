@@ -5,6 +5,7 @@ import { Toggle } from '../widgets/Toggle';
 import { SelectWidget } from '../widgets/SelectWidget';
 
 const platform = (window as any).platform;
+const isWindows = document.documentElement.dataset.platform === 'win32';
 
 const DEFAULT_PROXY = {
   mode: 'system',
@@ -13,6 +14,11 @@ const DEFAULT_PROXY = {
     httpsProxy: '',
     noProxy: '',
   },
+};
+
+const DEFAULT_BASH = {
+  mode: 'smart',
+  git_dir: '',
 };
 
 export function WorkTab() {
@@ -25,6 +31,8 @@ export function WorkTab() {
   const [httpProxy, setHttpProxy] = useState('');
   const [httpsProxy, setHttpsProxy] = useState('');
   const [noProxy, setNoProxy] = useState('');
+  const [bashMode, setBashMode] = useState('smart');
+  const [gitDir, setGitDir] = useState('');
 
   useEffect(() => {
     if (settingsConfig) {
@@ -41,7 +49,14 @@ export function WorkTab() {
     setHttpProxy(proxy.manual?.httpProxy || '');
     setHttpsProxy(proxy.manual?.httpsProxy || '');
     setNoProxy(proxy.manual?.noProxy || '');
+    const bash = globalModelsConfig?.bash || DEFAULT_BASH;
+    setBashMode(bash.mode || 'smart');
+    setGitDir(bash.git_dir || '');
   }, [globalModelsConfig]);
+
+  const savedBash = globalModelsConfig?.bash || DEFAULT_BASH;
+  const bashDirty = savedBash.mode !== bashMode || (savedBash.git_dir || '') !== gitDir;
+  const bashDetection = !bashDirty ? globalModelsConfig?.bash_detection : null;
 
   const pickHomeFolder = async () => {
     const folder = await platform?.selectFolder?.();
@@ -67,6 +82,16 @@ export function WorkTab() {
     await autoSaveConfig({ desk: { cron_auto_approve: on } });
   };
 
+  const pickGitDir = async () => {
+    const folder = await platform?.selectFolder?.();
+    if (!folder) return;
+    setGitDir(folder);
+  };
+
+  const clearGitDir = () => {
+    setGitDir('');
+  };
+
   const saveProxy = async (mode = proxyMode, opts: { silent?: boolean } = {}) => {
     await autoSaveGlobalPreferences({
       proxy: {
@@ -80,6 +105,11 @@ export function WorkTab() {
     }, opts);
   };
 
+  const buildBashConfig = () => ({
+    mode: bashMode,
+    git_dir: gitDir.trim(),
+  });
+
   const onProxyModeChange = async (mode: string) => {
     setProxyMode(mode);
     if (mode !== 'manual') {
@@ -89,8 +119,22 @@ export function WorkTab() {
 
   const saveWork = async () => {
     const interval = Math.max(1, Math.min(120, hbInterval));
+    if (isWindows && bashMode === 'custom_git' && !gitDir.trim()) {
+      showToast(t('settings.work.gitDirRequired'), 'error');
+      return;
+    }
     await autoSaveConfig({ desk: { heartbeat_interval: interval } }, { silent: true });
-    await saveProxy(proxyMode, { silent: true });
+    await autoSaveGlobalPreferences({
+      proxy: {
+        mode: proxyMode,
+        manual: {
+          httpProxy: httpProxy.trim(),
+          httpsProxy: httpsProxy.trim(),
+          noProxy: noProxy.trim(),
+        },
+      },
+      ...(isWindows ? { bash: buildBashConfig() } : {}),
+    }, { silent: true });
     showToast(t('settings.autoSaved'), 'success');
   };
 
@@ -192,6 +236,76 @@ export function WorkTab() {
           </>
         )}
       </section>
+
+      {isWindows && (
+        <section className="settings-section">
+          <h2 className="settings-section-title">{t('settings.work.bashTitle')}</h2>
+          <p className="settings-desc settings-desc-compact">
+            {t('settings.work.bashDesc')}
+          </p>
+          <div className="settings-field">
+            <label className="settings-field-label">{t('settings.work.bashMode')}</label>
+            <SelectWidget
+              options={[
+                { value: 'smart', label: t('settings.work.bashModes.smart') },
+                { value: 'custom_git', label: t('settings.work.bashModes.customGit') },
+              ]}
+              value={bashMode}
+              onChange={setBashMode}
+              placeholder={t('settings.work.bashMode')}
+            />
+            <span className="settings-field-hint">{t('settings.work.bashModeHint')}</span>
+          </div>
+          {bashMode === 'custom_git' && (
+            <div className="settings-field">
+              <label className="settings-field-label">{t('settings.work.gitDir')}</label>
+              <div className="settings-folder-picker">
+                <input
+                  type="text"
+                  className="settings-input settings-folder-input"
+                  readOnly
+                  value={gitDir}
+                  placeholder={t('settings.work.gitDirPlaceholder')}
+                  onClick={pickGitDir}
+                />
+                <button className="settings-folder-browse" onClick={pickGitDir}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
+                </button>
+                {gitDir && (
+                  <button
+                    className="settings-folder-clear"
+                    onClick={clearGitDir}
+                    title={t('settings.work.homeFolderClear')}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+              <span className="settings-field-hint">{t('settings.work.gitDirHint')}</span>
+            </div>
+          )}
+          {bashDetection?.found && (
+            <div className="settings-field">
+              <span className="settings-field-hint">{t('settings.work.bashResolved', { path: bashDetection.bash_path || bashDetection.git_dir })}</span>
+            </div>
+          )}
+          {bashDetection && !bashDetection.found && (
+            <div className="settings-field">
+              {bashMode === 'smart' && (
+                <div className="settings-field-hint settings-field-hint-warn">{t('settings.work.bashSmartMissing')}</div>
+              )}
+              <div className="settings-field-hint settings-field-hint-warn" style={{ whiteSpace: 'pre-line' }}>
+                {bashDetection.message}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* 巡检 */}
       <section className="settings-section">

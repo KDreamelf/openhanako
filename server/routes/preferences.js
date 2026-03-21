@@ -7,6 +7,7 @@
 
 import { debugLog } from "../../lib/debug-log.js";
 import { applyProxyConfig } from "../../lib/net/proxy-runtime.js";
+import { detectGitBash } from "../../lib/sandbox/win32-exec.js";
 
 export default async function preferencesRoute(app, { engine }) {
 
@@ -22,6 +23,7 @@ export default async function preferencesRoute(app, { engine }) {
       const models = engine.getSharedModels();
       const search = engine.getSearchConfig();
       const utilityApi = engine.getUtilityApi();
+      const bash = engine.getBashConfig?.() || { mode: "smart", git_dir: "" };
 
       return {
         models,
@@ -34,6 +36,8 @@ export default async function preferencesRoute(app, { engine }) {
           base_url: utilityApi.base_url || "",
           api_key: mask(utilityApi.api_key),
         },
+        bash,
+        bash_detection: process.platform === "win32" ? detectGitBash(bash) : null,
         proxy: engine.getProxyConfig?.() || null,
       };
     } catch (err) {
@@ -70,6 +74,11 @@ export default async function preferencesRoute(app, { engine }) {
       if (body.utility_api) {
         engine.setUtilityApi(body.utility_api);
         sections.push("utility_api");
+      }
+
+      if (body.bash) {
+        engine.setBashConfig?.(body.bash);
+        sections.push("bash");
       }
 
       if (body.proxy) {

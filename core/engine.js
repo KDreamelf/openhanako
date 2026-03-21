@@ -252,6 +252,8 @@ export class HanaEngine {
   setThinkingLevel(l) { return this._configCoord.setThinkingLevel(l); }
   getSandbox() { return this._prefs.getSandbox(); }
   setSandbox(v) { this._prefs.setSandbox(v); }
+  getBashConfig() { return this._prefs.getBashConfig(); }
+  setBashConfig(v) { return this._prefs.setBashConfig(v); }
   getLearnSkills() { return this._prefs.getLearnSkills(); }
   setLearnSkills(p) { this._prefs.setLearnSkills(p); }
   getLocale() { return this._prefs.getLocale(); }
@@ -438,6 +440,7 @@ export class HanaEngine {
       workspace: effectiveWorkspace,
       hanakoHome: this.hanakoHome,
       mode: effectiveMode,
+      bash: this.getBashConfig(),
     });
   }
 

@@ -219,6 +219,11 @@ export class ConfigCoordinator {
       sharedModels: this.getSharedModels(),
     });
     this.normalizeUtilityApiPreferences();
+    const session = this._d.getSession();
+    if (synced && session && models.currentModel) {
+      await session.setModel(models.currentModel);
+      session.setThinkingLevel(models.resolveThinkingLevel(this.getThinkingLevel()));
+    }
     return synced;
   }
 

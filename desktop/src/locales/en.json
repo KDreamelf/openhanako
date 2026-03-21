@@ -402,6 +402,12 @@
       "customName": "Name",
       "customUrl": "Base URL",
       "apiFormat": "API Protocol",
+      "toolFormat": "Tool Calling Format",
+      "toolFormatHint": "Use native tool calling by default. Switch to prompt-tag mode for models that cannot emit native tool calls.",
+      "toolFormats": {
+        "native": "Native tool calling",
+        "prompt": "Prompt tags (<tool_call>)"
+      },
       "url": "Base URL",
       "apiKey": "API Key",
       "addBtn": "Add",
@@ -600,7 +606,21 @@
       "homeFolderDesc": "Default working directory for new chats, patrol and cron tasks",
       "homeFolderPlaceholder": "Not set (choose manually each time)",
       "homeFolderClear": "Clear",
-      "homeFolderBrowse": "Browse"
+      "homeFolderBrowse": "Browse",
+      "bashTitle": "Git Bash",
+      "bashDesc": "Helps when some models insist on using bash on Windows. You can let Hanako detect Git automatically or point it to a Git for Windows install directory.",
+      "bashMode": "Bash Source",
+      "bashModeHint": "Smart detection checks PATH for git first, then common default Git installation directories.",
+      "bashModes": {
+        "smart": "Smart detection",
+        "customGit": "Custom Git directory"
+      },
+      "gitDir": "Git install directory",
+      "gitDirHint": "Choose the Git for Windows install root, not the bash.exe file itself.",
+      "gitDirPlaceholder": "No Git directory selected",
+      "gitDirRequired": "Please choose a Git install directory",
+      "bashResolved": "Current shell: {path}",
+      "bashSmartMissing": "Smart detection could not find Git Bash. Git for Windows may not be installed."
     },
     "toolCaps": {
       "title": "Self-learning Skills"

@@ -92,6 +92,29 @@ export class PreferencesManager {
     this.savePreferences(prefs);
   }
 
+  /** 读取 Windows Git Bash 偏好 */
+  getBashConfig() {
+    const bash = this.getPreferences().bash || {};
+    return {
+      mode: bash.mode === "custom_git" ? "custom_git" : "smart",
+      git_dir: typeof bash.git_dir === "string" ? bash.git_dir : "",
+    };
+  }
+
+  /** 保存 Windows Git Bash 偏好 */
+  setBashConfig(partial) {
+    const prefs = this.getPreferences();
+    const current = this.getBashConfig();
+    prefs.bash = {
+      ...current,
+      ...(partial || {}),
+      mode: partial?.mode === "custom_git" ? "custom_git" : (partial?.mode === "smart" ? "smart" : current.mode),
+      git_dir: typeof partial?.git_dir === "string" ? partial.git_dir : current.git_dir,
+    };
+    this.savePreferences(prefs);
+    return prefs.bash;
+  }
+
   /** 读取 primary agent ID */
   getPrimaryAgent() {
     return this.getPreferences().primaryAgent || null;

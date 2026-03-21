@@ -402,6 +402,12 @@
       "customName": "名称",
       "customUrl": "Base URL",
       "apiFormat": "API 协议",
+      "toolFormat": "工具调用格式",
+      "toolFormatHint": "默认使用原生工具调用。不支持原生工具调用的模型，可改为提示词标签模式。",
+      "toolFormats": {
+        "native": "原生工具调用",
+        "prompt": "提示词标签（<tool_call>）"
+      },
       "url": "Base URL",
       "apiKey": "API Key",
       "addBtn": "添加",
@@ -600,7 +606,21 @@
       "homeFolderDesc": "新建对话默认使用的工作目录，巡检和定时任务也在这里执行",
       "homeFolderPlaceholder": "未设置（每次手动选择）",
       "homeFolderClear": "清除",
-      "homeFolderBrowse": "选择文件夹"
+      "homeFolderBrowse": "选择文件夹",
+      "bashTitle": "Git Bash",
+      "bashDesc": "用于处理某些模型在 Windows 下坚持使用 bash 的情况。可选择智能判断 Git 安装位置，或手动指定 Git for Windows 的安装目录。",
+      "bashMode": "Bash 来源",
+      "bashModeHint": "智能判断会先从 PATH 查找 git，再检查常见的 Git 默认安装目录。",
+      "bashModes": {
+        "smart": "智能判断",
+        "customGit": "手动指定 Git 目录"
+      },
+      "gitDir": "Git 安装目录",
+      "gitDirHint": "请选择 Git for Windows 的安装根目录，而不是单独的 bash.exe。",
+      "gitDirPlaceholder": "未选择 Git 目录",
+      "gitDirRequired": "请选择 Git 安装目录",
+      "bashResolved": "当前将使用：{path}",
+      "bashSmartMissing": "智能判断当前未找到 Git Bash，通常表示尚未安装 Windows 版 Git。"
     },
     "toolCaps": {
       "title": "自学 Skills"

@@ -199,6 +199,19 @@ export const API_FORMAT_OPTIONS = [
   { value: 'openai-codex-responses', label: 'OpenAI Codex Responses' },
 ];
 
+export const TOOL_FORMAT_OPTIONS = [
+  {
+    value: 'native',
+    label: 'Native Tool Calling',
+    labelKey: 'settings.providers.toolFormats.native',
+  },
+  {
+    value: 'prompt',
+    label: 'Prompt Tags (<tool_call>)',
+    labelKey: 'settings.providers.toolFormats.prompt',
+  },
+];
+
 export const CONTEXT_PRESETS = [
   { label: '64K', value: 65536 },
   { label: '128K', value: 131072 },

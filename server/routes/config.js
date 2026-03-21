@@ -51,6 +51,7 @@ export default async function configRoute(app, { engine }) {
           base_url: p.base_url || "",
           api: p.api || "",
           api_key: mask(p.api_key),
+          tool_format: p.tool_format || "native",
           models: p.models || [],
           model_count: (p.models || []).length,
         };

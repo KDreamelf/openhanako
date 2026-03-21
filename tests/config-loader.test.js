@@ -167,6 +167,33 @@ describe("loadConfig", () => {
     const providers = getAllProviders(configPath);
     expect(providers.dashscope.models).toEqual(["qwen-plus", "qwen-max"]);
   });
+
+  it("getAllProviders 会返回规范化后的 tool_format", () => {
+    fs.writeFileSync(
+      path.join(hanakoHome, "providers.yaml"),
+      YAML.dump({
+        providers: {
+          dashscope: {
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            api_key: "sk-test",
+            api: "openai-completions",
+            tool_format: "prompt",
+          },
+          openai: {
+            base_url: "https://api.openai.com/v1",
+            api_key: "sk-openai",
+            api: "openai-completions",
+          },
+        },
+      }),
+      "utf-8",
+    );
+    writeYaml({ api: { provider: "dashscope" } });
+
+    const providers = getAllProviders(configPath);
+    expect(providers.dashscope.tool_format).toBe("prompt");
+    expect(providers.openai.tool_format).toBe("native");
+  });
 });
 
 describe("saveConfig", () => {
