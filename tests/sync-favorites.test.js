@@ -126,4 +126,46 @@ describe("syncFavoritesToModelsJson", () => {
     expect(result.providers.dashscope.models[0].id).toBe("qwen-plus");
     expect(result.providers.dashscope.models[0].name).toBe("Qwen Plus");
   });
+
+  it("当前配置已经切到 OAuth provider 时，不会继续沿用旧 models.json 的陈旧 provider 归属", () => {
+    fs.writeFileSync(
+      configPath,
+      [
+        "api:",
+        '  provider: "openai-codex"',
+        "models:",
+        '  chat: "gpt-5.4"',
+        "  favorites:",
+        '    - "gpt-5.4"',
+        "providers:",
+        "  openai-codex:",
+        '    base_url: "https://chatgpt.com/backend-api"',
+        '    api_key: "oauth-token"',
+        '    api: "openai-codex-responses"',
+        "    models:",
+        '      - "gpt-5.4"',
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const modelsPath = path.join(tmpRoot, "custom-models.json");
+    fs.writeFileSync(modelsPath, JSON.stringify({
+      providers: {
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: "sk-stale",
+          models: [{ id: "gpt-5.4", name: "GPT 5.4" }],
+        },
+      },
+    }, null, 2), "utf-8");
+
+    const changed = syncFavoritesToModelsJson(configPath, { modelsJsonPath: modelsPath });
+    const result = JSON.parse(fs.readFileSync(modelsPath, "utf-8"));
+
+    expect(changed).toBe(true);
+    expect(Object.keys(result.providers)).toEqual(["openai-codex"]);
+    expect(result.providers["openai-codex"].models[0].id).toBe("gpt-5.4");
+  });
 });

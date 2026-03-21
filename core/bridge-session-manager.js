@@ -146,7 +146,7 @@ export class BridgeSessionManager {
         if (!chatModelId) {
           throw new Error(`[bridge] agent "${agent.agentName}" 未配置 models.chat`);
         }
-        const chatModel = mm.availableModels.find(m => m.id === chatModelId);
+        const chatModel = mm.resolveConfiguredModel(chatModelId, agent.config);
         if (!chatModel) {
           throw new Error(`[bridge] agent "${agent.agentName}" 配置的模型 "${chatModelId}" 不在可用列表中`);
         }
@@ -177,7 +177,7 @@ export class BridgeSessionManager {
         if (!ownerModelId) {
           throw new Error(`[bridge] agent "${agent.agentName}" 未配置 models.chat`);
         }
-        const ownerModel = mm.availableModels.find(m => m.id === ownerModelId);
+        const ownerModel = mm.resolveConfiguredModel(ownerModelId, agent.config);
         if (!ownerModel) {
           throw new Error(`[bridge] agent "${agent.agentName}" 配置的模型 "${ownerModelId}" 不在可用列表中`);
         }

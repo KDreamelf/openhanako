@@ -3,6 +3,7 @@ import { useSettingsStore } from '../store';
 import { hanaFetch } from '../api';
 import {
   t, formatContext, getProviderDisplayName, lookupModelMeta, resolveProviderForModel,
+  getVisibleModelProviderIds, groupSdkModelsByProvider,
   autoSaveConfig, autoSaveGlobalModels, autoSaveModels,
   CONTEXT_PRESETS, OUTPUT_PRESETS,
 } from '../helpers';
@@ -148,18 +149,27 @@ function ChatModelSection({
   const [customInput, setCustomInput] = useState('');
   const [editingModel, setEditingModel] = useState<string | null>(null);
   const [sdkModels, setSdkModels] = useState<Record<string, string[]>>({});
+  const providerKeys = Object.keys(providers).sort().join('|');
 
   // 加载 SDK 可用模型，按 provider 分组（补充 OAuth provider 等不在 providers.yaml models 列表里的）
   useEffect(() => {
-    hanaFetch('/api/models').then(r => r.json()).then(data => {
-      const byProvider: Record<string, string[]> = {};
-      for (const m of (data.models || [])) {
-        if (!byProvider[m.provider]) byProvider[m.provider] = [];
-        byProvider[m.provider].push(m.id);
-      }
-      setSdkModels(byProvider);
-    }).catch(() => {});
-  }, []);
+    let cancelled = false;
+
+    Promise.all([
+      hanaFetch('/api/models').then((r) => r.json()).catch(() => ({ models: [] })),
+      hanaFetch('/api/auth/oauth/status').then((r) => r.json()).catch(() => ({})),
+    ]).then(([modelsData, oauthStatus]) => {
+      if (cancelled) return;
+      const visibleProviders = getVisibleModelProviderIds(providers, oauthStatus);
+      setSdkModels(groupSdkModelsByProvider(modelsData.models, visibleProviders));
+    }).catch(() => {
+      if (!cancelled) setSdkModels({});
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [providerKeys]);
 
   const removeFavorite = (mid: string) => {
     const next = new Set(pendingFavorites);
@@ -178,7 +188,7 @@ function ChatModelSection({
     autoSaveModels();
   };
 
-  const addFavorite = (mid: string) => {
+  const addFavorite = (mid: string, providerHint?: string) => {
     const wasEmpty = pendingFavorites.size === 0;
     const next = new Set(pendingFavorites);
     next.add(mid);
@@ -186,7 +196,7 @@ function ChatModelSection({
     if (wasEmpty) {
       updates.pendingDefaultModel = mid;
       const partial: Record<string, any> = { models: { chat: mid } };
-      const prov = resolveProviderForModel(mid);
+      const prov = resolveProviderForModel(mid, providerHint || null);
       if (prov) partial.api = { provider: prov };
       autoSaveConfig(partial, { refreshModels: true });
     }
@@ -272,7 +282,7 @@ function ChatModelSection({
                       <button
                         key={mid}
                         className={`cml-picker-option${isAdded ? ' added' : ''}`}
-                        onClick={() => { if (!isAdded) addFavorite(mid); }}
+                        onClick={() => { if (!isAdded) addFavorite(mid, provName); }}
                       >
                         <span className="cml-picker-option-name">{mid}</span>
                         {isAdded ? (

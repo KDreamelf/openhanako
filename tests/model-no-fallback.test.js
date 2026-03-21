@@ -22,6 +22,13 @@ vi.mock("@mariozechner/pi-coding-agent", () => ({
     create: sessionManagerCreateMock,
     open: vi.fn(),
   },
+  SettingsManager: {
+    create: vi.fn(() => ({ settings: {} })),
+    inMemory: vi.fn((settings) => ({
+      settings,
+      getTransport: () => settings.transport ?? "sse",
+    })),
+  },
 }));
 
 vi.mock("../lib/debug-log.js", () => ({

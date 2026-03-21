@@ -30,6 +30,23 @@ export const PATROL_TOOLS_DEFAULT = [
 const STEER_PREFIX = "（插话，无需 MOOD）\n";
 const MAX_CACHED_SESSIONS = 20;
 
+function resolveConfiguredModelEntry(models, modelId, agentConfig) {
+  if (!modelId) return null;
+  if (typeof models?.resolveConfiguredModel === "function") {
+    return models.resolveConfiguredModel(modelId, agentConfig);
+  }
+
+  const preferredProvider = agentConfig?.api?.provider || "";
+  if (preferredProvider) {
+    const exact = models?.availableModels?.find((model) => (
+      model.id === modelId && model.provider === preferredProvider
+    ));
+    if (exact) return exact;
+  }
+
+  return models?.availableModels?.find((model) => model.id === modelId) || null;
+}
+
 export class SessionCoordinator {
   /**
    * @param {object} deps
@@ -335,22 +352,12 @@ export class SessionCoordinator {
       buildTools:     (cwd, customTools, opts) => this._d.buildTools(cwd, customTools, opts),
       resolveModel:   (agentConfig) => {
         let id = agentConfig?.models?.chat;
-        // 非 active agent 可能没有配 models.chat（模板默认为空），回退到全局默认模型
         if (!id) {
-          if (models.defaultModel) {
-            log.log(`[resolveModel] agentConfig 未指定 models.chat，回退到默认模型 ${models.defaultModel.id}`);
-            return models.defaultModel;
-          }
-          log.error(`[resolveModel] agentConfig 未指定 models.chat，也没有默认模型`);
+          log.error(`[resolveModel] agentConfig 未指定 models.chat`);
           throw new Error("resolveModel: 未指定 models.chat，无法选择模型");
         }
-        const found = models.availableModels.find(m => m.id === id);
+        const found = resolveConfiguredModelEntry(models, id, agentConfig);
         if (!found) {
-          // 模型 ID 在可用列表中找不到，尝试回退到默认模型
-          if (models.defaultModel) {
-            log.log(`[resolveModel] 模型 "${id}" 不在可用列表中，回退到默认模型 ${models.defaultModel.id}`);
-            return models.defaultModel;
-          }
           const available = models.availableModels.map(m => `${m.provider}/${m.id}`).join(", ");
           const hasAuth = models.modelRegistry
             ? `hasAuth("${models.inferModelProvider?.(id) || "?"}")=unknown`
@@ -416,7 +423,7 @@ export class SessionCoordinator {
           log.error(`[executeIsolated] agent "${targetAgent.agentName}" 未指定 models.chat`);
           throw new Error(`executeIsolated: agent "${targetAgent.agentName}" 未指定 models.chat`);
         }
-        resolvedModel = models.availableModels.find(m => m.id === modelId);
+        resolvedModel = resolveConfiguredModelEntry(models, modelId, targetAgent.config);
         if (!resolvedModel) {
           const available = models.availableModels.map(m => `${m.provider}/${m.id}`).join(", ");
           log.error(`[executeIsolated] 找不到模型 "${modelId}"。availableModels=[${available}]`);

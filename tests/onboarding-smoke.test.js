@@ -45,4 +45,9 @@ describe("onboarding 页面冒烟检查", () => {
 
     expect(missing).toEqual([]);
   });
+
+  it("跳过按钮位于进度条下方，避免和标题区重叠", () => {
+    expect(html.indexOf('id="obProgress"')).toBeLessThan(html.indexOf('id="skipPageBtn"'));
+    expect(html.indexOf('id="obProgress"')).toBeLessThan(html.indexOf('id="skipSetupBtn"'));
+  });
 });

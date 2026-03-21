@@ -5,7 +5,7 @@ import { useSettingsStore } from './store';
 import { hanaFetch } from './api';
 import knownModels from '../../../../lib/known-models.json';
 
-const platform = (window as any).platform;
+const platform = typeof window !== 'undefined' ? (window as any).platform : undefined;
 
 export function t(key: string, params?: Record<string, any>): any {
   return (window as any).t?.(key, params) ?? key;
@@ -28,14 +28,54 @@ export function formatContext(n: number): string {
   return Math.round(n / 1000) + 'K';
 }
 
-export function resolveProviderForModel(modelId: string): string | null {
+export function resolveProviderForModel(modelId: string, preferredProviderId?: string | null): string | null {
   const config = useSettingsStore.getState().settingsConfig;
   if (!modelId || !config) return null;
   const providers = config.providers || {};
+  const preferredProviders = [
+    preferredProviderId,
+    config._raw?.api?.provider,
+    config.api?.provider,
+  ].filter(Boolean) as string[];
+
+  for (const providerId of preferredProviders) {
+    if ((providers[providerId]?.models || []).includes(modelId)) return providerId;
+  }
+
   for (const [name, p] of Object.entries(providers) as [string, any][]) {
     if ((p.models || []).includes(modelId)) return name;
   }
   return null;
+}
+
+export function getVisibleModelProviderIds(
+  providers: Record<string, any> | null | undefined,
+  oauthStatus: Record<string, any> | null | undefined,
+): Set<string> {
+  const visible = new Set<string>(Object.keys(providers || {}));
+  for (const [providerId, info] of Object.entries(oauthStatus || {})) {
+    if (info?.loggedIn) visible.add(providerId);
+  }
+  return visible;
+}
+
+export function groupSdkModelsByProvider(
+  models: Array<{ id?: string; provider?: string }> | null | undefined,
+  visibleProviders?: Set<string> | null,
+): Record<string, string[]> {
+  const grouped: Record<string, string[]> = {};
+  const filterEnabled = !!visibleProviders && visibleProviders.size > 0;
+
+  for (const model of models || []) {
+    const providerId = typeof model?.provider === 'string' ? model.provider.trim() : '';
+    const modelId = typeof model?.id === 'string' ? model.id.trim() : '';
+    if (!providerId || !modelId) continue;
+    if (filterEnabled && !visibleProviders.has(providerId)) continue;
+    if (!grouped[providerId]) grouped[providerId] = [];
+    grouped[providerId].push(modelId);
+  }
+
+  return grouped;
 }
 
 export function getProviderDisplayName(providerId: string): string {

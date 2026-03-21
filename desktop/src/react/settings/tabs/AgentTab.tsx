@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useSettingsStore } from '../store';
 import { hanaFetch, hanaUrl, yuanFallbackAvatar } from '../api';
-import { t, autoSaveConfig, savePins } from '../helpers';
+import { t, autoSaveConfig, savePins, resolveProviderForModel } from '../helpers';
 import { SelectWidget } from '../widgets/SelectWidget';
 import { browseAgent, switchToAgent, loadSettingsConfig, loadAgents } from '../actions';
 
@@ -287,13 +287,8 @@ export function AgentTab() {
             onChange={async (modelId) => {
               store.set({ pendingDefaultModel: modelId });
               const partial: Record<string, any> = { models: { chat: modelId } };
-              const providers = settingsConfig?.providers || {};
-              for (const [name, p] of Object.entries(providers) as [string, any][]) {
-                if ((p.models || []).includes(modelId)) {
-                  partial.api = { provider: name };
-                  break;
-                }
-              }
+              const providerId = resolveProviderForModel(modelId);
+              if (providerId) partial.api = { provider: providerId };
               await autoSaveConfig(partial, { refreshModels: true });
             }}
             placeholder={t('settings.api.selectModel')}

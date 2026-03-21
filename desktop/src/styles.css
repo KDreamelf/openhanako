@@ -7514,6 +7514,12 @@ body.resizing .jian-sidebar-inner {
     display: flex;
 }
 
+.sdw-popup.sdw-popup-portal {
+    display: flex;
+    position: fixed;
+    max-height: min(280px, calc(100vh - 16px));
+}
+
 .sdw-option {
     display: flex;
     align-items: center;

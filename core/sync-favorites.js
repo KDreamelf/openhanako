@@ -91,6 +91,29 @@ function resolveProviderToolFormat(providerName, rawConfig) {
   return normalizeToolFormat(rawConfig.providers?.[providerName]?.tool_format);
 }
 
+function addModelProviderCandidate(map, modelId, providerName) {
+  if (!modelId || !providerName) return;
+  if (!map.has(modelId)) map.set(modelId, []);
+  const providers = map.get(modelId);
+  if (!providers.includes(providerName)) providers.push(providerName);
+}
+
+function addProviderModelsToCandidates(map, providers) {
+  for (const [providerName, providerData] of Object.entries(providers || {})) {
+    for (const modelEntry of (providerData?.models || [])) {
+      const modelId = typeof modelEntry === "string" ? modelEntry : modelEntry?.id;
+      addModelProviderCandidate(map, modelId, providerName);
+    }
+  }
+}
+
+function providerHasUsableCredentials(providerName, rawConfig, opts) {
+  const { baseUrl, apiKey, api } = resolveProviderCredentials(providerName, rawConfig, opts);
+  if (!baseUrl || !api) return false;
+  const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/.test(baseUrl);
+  return !!(apiKey || isLocal);
+}
+
 /**
  * 同步 favorites + 角色模型到 HANA_HOME/models.json（默认 ~/.hanako/models.json）
  *
@@ -136,33 +159,30 @@ export function syncFavoritesToModelsJson(configPath, opts = {}) {
     return true;
   }
 
-  // ── 3. 建立 modelId → providerName 反查表 ──
-  const modelToProvider = new Map();
-  // 现有 models.json 作为当前运行时模型视图
-  for (const [provName, provData] of Object.entries(modelsJson.providers || {})) {
-    for (const m of (provData.models || [])) {
-      const id = typeof m === "string" ? m : m?.id;
-      if (id) modelToProvider.set(id, provName);
-    }
+  // ── 3. 建立 modelId → providerName 候选表 ──
+  // 优先级：当前 chat 配置 → providers.yaml / config.providers 声明 → 旧 models.json 回退。
+  // 旧运行时视图不应压过当前 provider 选择，否则会把 OAuth 模型误绑回已删除的旧 provider。
+  const modelToProviders = new Map();
+  if (models.chat && rawConfig.api?.provider) {
+    addModelProviderCandidate(modelToProviders, models.chat, rawConfig.api.provider);
   }
-  // 全局 providers.yaml 作为声明源补充
+
+  // 全局 providers.yaml 作为主声明源
   const globalProviders = loadGlobalProviders().providers || {};
-  for (const [provName, provData] of Object.entries(globalProviders)) {
-    for (const mid of (provData.models || [])) {
-      if (!modelToProvider.has(mid)) modelToProvider.set(mid, provName);
-    }
-  }
+  addProviderModelsToCandidates(modelToProviders, globalProviders);
   // per-agent providers（向后兼容）
   const configProviders = rawConfig.providers || {};
-  for (const [provName, provData] of Object.entries(configProviders)) {
-    for (const mid of (provData.models || [])) {
-      if (!modelToProvider.has(mid)) modelToProvider.set(mid, provName);
-    }
-  }
+  addProviderModelsToCandidates(modelToProviders, configProviders);
+  // 现有 models.json 仅作为最后的兜底来源，避免 provider 被删除后仍长期残留。
+  addProviderModelsToCandidates(modelToProviders, modelsJson.providers || {});
+
   // ── 4. 按 provider 分组必须保留的模型 ──
   const providerModels = new Map(); // providerName → Set<modelId>
   for (const mid of mustKeep) {
-    const prov = modelToProvider.get(mid);
+    const providerCandidates = modelToProviders.get(mid) || [];
+    const prov = providerCandidates.find((providerName) =>
+      providerHasUsableCredentials(providerName, rawConfig, opts)
+    ) || providerCandidates[0];
     if (!prov) {
       console.warn(`\x1b[33m  [sync] 模型 "${mid}" 未绑定 provider，跳过\x1b[0m`);
       continue;

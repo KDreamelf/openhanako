@@ -229,7 +229,8 @@ export class ConfigCoordinator {
 
   async setModel(modelId) {
     const models = this._d.getModels();
-    const model = models.setModel(modelId);
+    const preferredProvider = this._d.getAgent()?.config?.api?.provider || "";
+    const model = models.setModel(modelId, preferredProvider);
     const session = this._d.getSession();
     if (session) {
       await session.setModel(model);
@@ -319,7 +320,7 @@ export class ConfigCoordinator {
 
     // 切换聊天模型：不需要 sync，模型早已注册
     if (partial.models?.chat) {
-      const newModel = models.availableModels.find(m => m.id === partial.models.chat);
+      const newModel = models.resolveConfiguredModel(partial.models.chat, agent.config);
       if (newModel) {
         models.defaultModel = newModel;
         models.currentModel = newModel;

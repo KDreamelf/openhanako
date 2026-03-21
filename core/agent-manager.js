@@ -266,7 +266,7 @@ export class AgentManager {
       const preferredId = this.agent.config.models?.chat;
       const models = this._d.getModels();
       if (preferredId) {
-        const model = models.availableModels.find(m => m.id === preferredId);
+        const model = models.resolveConfiguredModel(preferredId, this.agent.config);
         if (!model) {
           throw new Error(`agent "${agentId}" 配置的模型 "${preferredId}" 不在可用列表中`);
         }

@@ -66,6 +66,32 @@ export class ModelManager {
   }
 
   /**
+   * 按模型 ID 查找可用模型。
+   * 当同一个模型 ID 同时挂在多个 provider 下时，优先选择显式传入的 provider。
+   */
+  findAvailableModel(modelId, preferredProvider = "") {
+    const id = typeof modelId === "string" ? modelId.trim() : "";
+    if (!id) return null;
+
+    const provider = typeof preferredProvider === "string" ? preferredProvider.trim() : "";
+    if (provider) {
+      const exact = this._availableModels.find((model) => model.id === id && model.provider === provider);
+      if (exact) return exact;
+    }
+
+    return this._availableModels.find((model) => model.id === id) || null;
+  }
+
+  /**
+   * 根据 agent 当前配置解析聊天模型。
+   * 对存在重复模型 ID 的 provider，优先使用 config.api.provider。
+   */
+  resolveConfiguredModel(modelId, agentConfig) {
+    const preferredProvider = agentConfig?.api?.provider || "";
+    return this.findAvailableModel(modelId, preferredProvider);
+  }
+
+  /**
    * 同步 favorites → models.json，然后刷新 ModelRegistry
    * @param {string} configPath - agent config.yaml 路径
    * @param {object} opts
@@ -96,8 +122,8 @@ export class ModelManager {
    * 切换当前模型（只改状态，不推到 session）
    * @returns {object} 新模型对象
    */
-  setModel(modelId) {
-    const model = this._availableModels.find(m => m.id === modelId);
+  setModel(modelId, preferredProvider = "") {
+    const model = this.findAvailableModel(modelId, preferredProvider);
     if (!model) throw new Error(`找不到模型: ${modelId}`);
     this._sessionModel = model;
     return model;
@@ -111,19 +137,20 @@ export class ModelManager {
   /**
    * 将模型引用（id/name/object）解析成 SDK 可用的模型对象
    */
-  resolveExecutionModel(modelRef) {
+  resolveExecutionModel(modelRef, preferredProvider = "") {
     if (!modelRef) return this.currentModel;
     if (typeof modelRef !== "string") return modelRef;
     const ref = modelRef.trim();
     if (!ref) return this.currentModel;
-    const model = this._availableModels.find(m => m.id === ref || m.name === ref);
+    const model = this.findAvailableModel(ref, preferredProvider)
+      || this._availableModels.find(m => m.name === ref);
     if (!model) throw new Error(`找不到模型: ${ref}`);
     return model;
   }
 
   /** 根据模型 ID 推断其所属 provider */
-  inferModelProvider(modelId) {
-    return modelId ? this._availableModels.find(m => m.id === modelId)?.provider : null;
+  inferModelProvider(modelId, preferredProvider = "") {
+    return modelId ? this.findAvailableModel(modelId, preferredProvider)?.provider : null;
   }
 
   /**

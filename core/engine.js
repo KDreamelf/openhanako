@@ -377,7 +377,7 @@ export class HanaEngine {
         console.warn("[engine] ⚠ 未配置 models.chat，defaultModel 为 null");
         this._models.defaultModel = null;
       } else {
-        const model = availableModels.find(m => m.id === preferredId);
+        const model = this._models.resolveConfiguredModel(preferredId, this.agent.config);
         if (!model) {
           console.error(`[engine] ⚠ 配置的模型 "${preferredId}" 不在可用列表中，defaultModel 为 null`);
           this._models.defaultModel = null;

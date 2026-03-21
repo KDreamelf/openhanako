@@ -29,11 +29,11 @@
         }
 
         .onboarding-corner-actions {
-            position: absolute;
-            top: 16px;
-            right: 16px;
             display: flex;
+            justify-content: flex-end;
             gap: 8px;
+            width: min(100%, 440px);
+            margin-bottom: 14px;
             z-index: 3;
             -webkit-app-region: no-drag;
         }
@@ -474,12 +474,12 @@
     <!-- Windows/Linux 窗口控制按钮注入点 -->
     <div class="titlebar titlebar-minimal"></div>
     <div class="onboarding" id="onboarding">
+        <!-- Progress dots -->
+        <div class="onboarding-progress" id="obProgress"></div>
         <div class="onboarding-corner-actions">
             <button class="ob-corner-btn" id="skipPageBtn"></button>
             <button class="ob-corner-btn" id="skipSetupBtn"></button>
         </div>
-        <!-- Progress dots -->
-        <div class="onboarding-progress" id="obProgress"></div>
 
         <!-- Step 0: Welcome -->
         <div class="onboarding-step" data-step="0" id="stepWelcome">
