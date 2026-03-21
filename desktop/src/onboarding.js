@@ -108,6 +108,83 @@ function showError(msg) {
   toast._timer = setTimeout(() => { toast.style.opacity = "0"; }, 3000);
 }
 
+function showFatalError(err) {
+  const detail = err?.stack || err?.message || String(err || "Unknown onboarding error");
+  console.error("[onboarding] fatal:", detail);
+
+  let panel = $("#obFatalError");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "obFatalError";
+    panel.style.cssText = [
+      "position:fixed",
+      "inset:24px",
+      "display:flex",
+      "flex-direction:column",
+      "justify-content:center",
+      "gap:12px",
+      "padding:24px",
+      "border-radius:16px",
+      "background:rgba(255,248,244,0.96)",
+      "box-shadow:0 12px 40px rgba(0,0,0,0.18)",
+      "z-index:1000",
+      "font-family:inherit",
+    ].join(";");
+
+    const title = document.createElement("div");
+    title.textContent = "初始化引导页失败";
+    title.style.cssText = "font-size:1rem;font-weight:600;color:#6b3e38;";
+
+    const hint = document.createElement("div");
+    hint.textContent = "可以先重试；如果仍失败，请把日志发给开发者。";
+    hint.style.cssText = "font-size:0.82rem;color:#6b5a53;";
+
+    const pre = document.createElement("pre");
+    pre.id = "obFatalErrorDetail";
+    pre.style.cssText = "margin:0;padding:12px;border-radius:10px;background:rgba(0,0,0,0.05);color:#5a322f;font-size:0.74rem;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow:auto;";
+
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:10px;flex-wrap:wrap;";
+
+    const reloadBtn = document.createElement("button");
+    reloadBtn.type = "button";
+    reloadBtn.className = "ob-btn ob-btn-primary";
+    reloadBtn.textContent = "重新加载";
+    reloadBtn.addEventListener("click", () => location.reload());
+
+    const skipBtn = document.createElement("button");
+    skipBtn.type = "button";
+    skipBtn.className = "ob-btn ob-btn-secondary";
+    skipBtn.textContent = "跳过引导";
+    skipBtn.addEventListener("click", async () => {
+      try {
+        await window.hana?.onboardingComplete?.();
+      } catch (skipErr) {
+        showError(skipErr?.message || String(skipErr));
+      }
+    });
+
+    actions.appendChild(reloadBtn);
+    actions.appendChild(skipBtn);
+    panel.appendChild(title);
+    panel.appendChild(hint);
+    panel.appendChild(pre);
+    panel.appendChild(actions);
+    document.body.appendChild(panel);
+  }
+
+  const detailEl = $("#obFatalErrorDetail");
+  if (detailEl) detailEl.textContent = detail;
+}
+
+window.addEventListener("error", (event) => {
+  if (event.error) showFatalError(event.error);
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  showFatalError(event.reason);
+});
+
 // ── Step 导航 ──
 
 function goToStep(index) {
@@ -182,10 +259,6 @@ function applyI18n() {
   $("#providerKeyInput").placeholder = t("onboarding.provider.keyPlaceholder");
   $("#providerCustomNameInput").placeholder = "my-provider";
   $("#providerCustomUrlInput").placeholder = "https://api.example.com/v1";
-  s("customNameLabel", "onboarding.provider.customName");
-  $("#customNameInput").placeholder = t("onboarding.provider.customNamePlaceholder");
-  s("customUrlLabel", "onboarding.provider.customUrl");
-  $("#customUrlInput").placeholder = t("onboarding.provider.customUrlPlaceholder");
   s("providerTestBtn", "onboarding.provider.test");
   s("providerBackBtn", "onboarding.provider.back");
   s("providerNextBtn", "onboarding.provider.next");
@@ -795,22 +868,6 @@ function bindEvents() {
     updateProviderBtns();
   });
 
-  // 自定义 Provider 输入
-  const customNameInput = $("#customNameInput");
-  const customUrlInput = $("#customUrlInput");
-  const customApiSelect = $("#customApiSelect");
-  const onCustomInput = () => {
-    state.providerName = customNameInput.value.trim().toLowerCase().replace(/\s+/g, "-");
-    state.providerUrl = customUrlInput.value.trim();
-    state.providerApi = customApiSelect.value;
-    state.connectionTested = false;
-    $("#providerTestStatus").textContent = "";
-    updateProviderBtns();
-  };
-  customNameInput.addEventListener("input", onCustomInput);
-  customUrlInput.addEventListener("input", onCustomInput);
-  customApiSelect.addEventListener("change", onCustomInput);
-
   $("#toggleKey").addEventListener("click", () => {
     keyInput.type = keyInput.type === "password" ? "text" : "password";
   });
@@ -936,5 +993,6 @@ async function loadAvatar() {
     }
   } catch (err) {
     console.error("[onboarding] init failed:", err);
+    showFatalError(err);
   }
 })();

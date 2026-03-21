@@ -36,7 +36,13 @@ export function ensureFirstRun(hanakoHome, productDir) {
   const skillsDst = path.join(hanakoHome, "skills");
   fs.mkdirSync(skillsDst, { recursive: true });
   if (fs.existsSync(skillsSrc)) {
-    syncSkills(skillsSrc, skillsDst);
+    const skillSync = syncSkills(skillsSrc, skillsDst);
+    if (skillSync.failed.length > 0) {
+      console.warn(`[first-run] skills 同步完成，但有 ${skillSync.failed.length} 个文件复制失败`);
+      for (const failure of skillSync.failed) {
+        console.warn(`[first-run] copy failed: ${failure.src} -> ${failure.dst}: ${failure.message}`);
+      }
+    }
   }
 
   // 4. 确保 user/preferences.json 存在
@@ -100,6 +106,7 @@ function seedDefaultAgent(agentsDir, productDir) {
  */
 function syncSkills(srcDir, dstDir) {
   fs.mkdirSync(dstDir, { recursive: true });
+  const failed = [];
 
   const entries = fs.readdirSync(srcDir, { withFileTypes: true });
   for (const entry of entries) {
@@ -111,24 +118,34 @@ function syncSkills(srcDir, dstDir) {
     // 只要源里有 SKILL.md 就同步整个目录
     if (!fs.existsSync(path.join(skillSrc, "SKILL.md"))) continue;
 
-    copyDirSync(skillSrc, skillDst);
+    copyDirSync(skillSrc, skillDst, failed);
   }
+
+  return { failed };
 }
 
 /** 递归复制目录（覆盖已有文件） */
-function copyDirSync(src, dst) {
+function copyDirSync(src, dst, failed = []) {
   fs.mkdirSync(dst, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
     const s = path.join(src, entry.name);
     const d = path.join(dst, entry.name);
     if (entry.isDirectory()) {
-      copyDirSync(s, d);
+      copyDirSync(s, d, failed);
     } else {
-      // 目标文件可能是只读的，先解除再覆盖（Windows NTFS 不支持 POSIX 权限，静默跳过）
-      if (fs.existsSync(d)) {
-        try { fs.chmodSync(d, 0o644); } catch {}
+      try {
+        // 目标文件可能是只读的，先解除再覆盖（Windows NTFS 不支持 POSIX 权限，静默跳过）
+        if (fs.existsSync(d)) {
+          try { fs.chmodSync(d, 0o644); } catch {}
+        }
+        fs.copyFileSync(s, d);
+      } catch (err) {
+        failed.push({
+          src: s,
+          dst: d,
+          message: err?.message || String(err),
+        });
       }
-      fs.copyFileSync(s, d);
     }
   }
 }
