@@ -13,7 +13,8 @@
  */
 import crypto from "crypto";
 import { createModuleLogger } from "../../lib/debug-log.js";
-import { loadGlobalProviders, saveGlobalProviders } from "../../lib/memory/config-loader.js";
+import fs from "fs";
+import { loadGlobalProviders, saveGlobalProviders, clearConfigCache } from "../../lib/memory/config-loader.js";
 import { importOpenAICodexAuthFile } from "../../lib/oauth/openai-codex.js";
 
 const log = createModuleLogger("auth");
@@ -281,6 +282,14 @@ export default async function authRoute(app, { engine }) {
   /**
    * 登出
    * body: { provider }
+   *
+   * 除了清除 auth.json 的 OAuth 凭证外，还需清理登录时产生的级联副作用：
+   *   - providers.yaml 中 OAuth 自动创建的 provider 条目
+   *   - models.json 中烘焙的 OAuth access token
+   *   - 内存中的配置缓存和可用模型列表
+   *
+   * 如不清理，同名模型的新 API key 供应商会被旧 provider 条目覆盖，
+   * 导致请求仍走已失效的 OAuth token → deactivated_workspace 错误。
    */
   app.post("/api/auth/oauth/logout", async (req, reply) => {
     const { provider } = req.body || {};
@@ -288,7 +297,49 @@ export default async function authRoute(app, { engine }) {
       reply.code(400);
       return { error: "provider is required" };
     }
+
+    // 1. 清除 auth.json 中的 OAuth 凭证
     engine.authStorage.logout(provider);
+    log.log(`oauth logout credentials cleared provider=${provider}`);
+
+    // 2. 清理 providers.yaml —— 仅当该 provider 没有手动 api_key 时才移除
+    //    （OAuth 登录自动创建的条目不含 api_key，移除不会影响用户手动配置）
+    try {
+      const globalProviders = loadGlobalProviders();
+      const providerEntry = globalProviders.providers?.[provider];
+      if (providerEntry && !providerEntry.api_key) {
+        saveGlobalProviders({ providers: { [provider]: null } });
+        log.log(`oauth logout removed provider=${provider} from providers.yaml (no manual api_key)`);
+      }
+    } catch (err) {
+      log.warn(`oauth logout providers.yaml cleanup failed provider=${provider}: ${err.message}`);
+    }
+
+    // 3. 清理 models.json —— 移除该 provider 的条目（含烘焙的 OAuth access token）
+    try {
+      const modelsJsonPath = engine.modelsJsonPath;
+      const raw = fs.readFileSync(modelsJsonPath, "utf-8");
+      const modelsJson = JSON.parse(raw);
+      if (modelsJson.providers?.[provider]) {
+        delete modelsJson.providers[provider];
+        fs.writeFileSync(modelsJsonPath, JSON.stringify(modelsJson, null, 4) + "\n", "utf-8");
+        log.log(`oauth logout removed provider=${provider} from models.json`);
+      }
+    } catch (err) {
+      log.warn(`oauth logout models.json cleanup failed provider=${provider}: ${err.message}`);
+    }
+
+    // 4. 清除配置缓存（auth / providers / models 的内存缓存全部失效）
+    clearConfigCache();
+
+    // 5. 刷新 ModelRegistry + 可用模型列表，让运行时立即反映登出状态
+    try {
+      await engine.refreshAvailableModels();
+      log.log(`oauth logout model refresh completed provider=${provider}`);
+    } catch (err) {
+      log.warn(`oauth logout model refresh failed provider=${provider}: ${err.message}`);
+    }
+
     return { ok: true };
   });
 }
