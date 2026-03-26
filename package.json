@@ -119,6 +119,7 @@
     "win": {
       "target": "nsis",
       "icon": "desktop/src/icon.png",
+      "signAndEditExecutable": false,
       "requestedExecutionLevel": "asInvoker",
       "extraResources": [
         {
