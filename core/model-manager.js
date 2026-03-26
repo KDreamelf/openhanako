@@ -68,10 +68,12 @@ export class ModelManager {
       const cred = this._authStorage.get(p.id);
       if (cred?.type === "oauth") continue; // 已登录，跳过
 
-      // 已登出 —— 检查 providers.yaml 是否有残留
+      // 已登出 —— 无条件清理 providers.yaml 中该 OAuth provider 的条目。
+      // 不能用 !api_key 来判断，因为 getAllProviders() 会把 OAuth token
+      // 补到 api_key 字段，前端保存时可能将其回写到 providers.yaml。
       const globalProviders = loadGlobalProviders();
       const providerEntry = globalProviders.providers?.[p.id];
-      if (providerEntry && !providerEntry.api_key) {
+      if (providerEntry) {
         saveGlobalProviders({ providers: { [p.id]: null } });
         console.log(`[model-manager] 🧹 启动清理：移除 providers.yaml 中已登出的 OAuth provider「${p.id}」`);
         dirty = true;

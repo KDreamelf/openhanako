@@ -302,14 +302,15 @@ export default async function authRoute(app, { engine }) {
     engine.authStorage.logout(provider);
     log.log(`oauth logout credentials cleared provider=${provider}`);
 
-    // 2. 清理 providers.yaml —— 仅当该 provider 没有手动 api_key 时才移除
-    //    （OAuth 登录自动创建的条目不含 api_key，移除不会影响用户手动配置）
+    // 2. 清理 providers.yaml —— 无条件移除该 OAuth provider 的条目。
+    //    OAuth provider 的 api_key 本质上是 OAuth token（或由 getAllProviders 回填），
+    //    不是用户手动输入的密钥，退出后必须一起清除。
     try {
       const globalProviders = loadGlobalProviders();
       const providerEntry = globalProviders.providers?.[provider];
-      if (providerEntry && !providerEntry.api_key) {
+      if (providerEntry) {
         saveGlobalProviders({ providers: { [provider]: null } });
-        log.log(`oauth logout removed provider=${provider} from providers.yaml (no manual api_key)`);
+        log.log(`oauth logout removed provider=${provider} from providers.yaml`);
       }
     } catch (err) {
       log.warn(`oauth logout providers.yaml cleanup failed provider=${provider}: ${err.message}`);
