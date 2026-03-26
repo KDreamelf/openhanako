@@ -5,6 +5,7 @@
  * 以及模型选择、provider 凭证查找、utility 配置解析。
  * 从 Engine 提取，Engine 通过 manager 访问模型状态。
  */
+import fs from "fs";
 import path from "path";
 import {
   AuthStorage,
@@ -13,7 +14,7 @@ import {
 import { registerOAuthProvider } from "@mariozechner/pi-ai/oauth";
 import { minimaxOAuthProvider } from "../lib/oauth/minimax-portal.js";
 import { openaiCodexOAuthProvider } from "../lib/oauth/openai-codex.js";
-import { clearConfigCache, loadGlobalProviders, resolveApiKeyFromAuth } from "../lib/memory/config-loader.js";
+import { clearConfigCache, loadGlobalProviders, saveGlobalProviders, resolveApiKeyFromAuth } from "../lib/memory/config-loader.js";
 import { refreshPromptToolProviders } from "../lib/llm/prompt-tool-provider.js";
 
 function isLocalBaseUrl(url) {
@@ -44,6 +45,59 @@ export class ModelManager {
       path.join(this._hanakoHome, "models.json"),
     );
     refreshPromptToolProviders();
+
+    // 清理历史 OAuth 登出后的残留脏数据
+    this._purgeStaleOAuthProviders();
+  }
+
+  /**
+   * 启动时清理：遍历所有已注册的 OAuth provider，
+   * 如果已登出（auth.json 中无有效凭证），但 providers.yaml / models.json 中仍残留条目，
+   * 则执行与 logout 相同的清理逻辑。
+   *
+   * 这是对旧版 logout 不完整清理的一次性修复，确保运行时不会出现
+   * 「模型解析到已失效的 OAuth provider → deactivated_workspace」的问题。
+   */
+  _purgeStaleOAuthProviders() {
+    const oauthProviders = this._authStorage.getOAuthProviders();
+    if (!oauthProviders?.length) return;
+
+    let dirty = false;
+
+    for (const p of oauthProviders) {
+      const cred = this._authStorage.get(p.id);
+      if (cred?.type === "oauth") continue; // 已登录，跳过
+
+      // 已登出 —— 检查 providers.yaml 是否有残留
+      const globalProviders = loadGlobalProviders();
+      const providerEntry = globalProviders.providers?.[p.id];
+      if (providerEntry && !providerEntry.api_key) {
+        saveGlobalProviders({ providers: { [p.id]: null } });
+        console.log(`[model-manager] 🧹 启动清理：移除 providers.yaml 中已登出的 OAuth provider「${p.id}」`);
+        dirty = true;
+      }
+
+      // 检查 models.json 是否有残留
+      try {
+        const modelsJsonPath = this.modelsJsonPath;
+        const raw = fs.readFileSync(modelsJsonPath, "utf-8");
+        const modelsJson = JSON.parse(raw);
+        if (modelsJson.providers?.[p.id]) {
+          delete modelsJson.providers[p.id];
+          fs.writeFileSync(modelsJsonPath, JSON.stringify(modelsJson, null, 4) + "\n", "utf-8");
+          console.log(`[model-manager] 🧹 启动清理：移除 models.json 中已登出的 OAuth provider「${p.id}」`);
+          dirty = true;
+        }
+      } catch {}
+    }
+
+    if (dirty) {
+      clearConfigCache();
+      this._modelRegistry.refresh();
+      registerOAuthProvider(minimaxOAuthProvider);
+      registerOAuthProvider(openaiCodexOAuthProvider);
+      refreshPromptToolProviders();
+    }
   }
 
   // ── Getters ──
