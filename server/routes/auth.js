@@ -14,6 +14,8 @@
 import crypto from "crypto";
 import { createModuleLogger } from "../../lib/debug-log.js";
 import fs from "fs";
+import path from "path";
+import YAML from "js-yaml";
 import { loadGlobalProviders, saveGlobalProviders, clearConfigCache } from "../../lib/memory/config-loader.js";
 import { importOpenAICodexAuthFile } from "../../lib/oauth/openai-codex.js";
 
@@ -330,7 +332,31 @@ export default async function authRoute(app, { engine }) {
       log.warn(`oauth logout models.json cleanup failed provider=${provider}: ${err.message}`);
     }
 
-    // 4. 清除配置缓存（auth / providers / models 的内存缓存全部失效）
+    // 4. 清理所有 agent config.yaml 中指向该 provider 的 api.provider
+    //    否则 Pi SDK 仍会用 OAuth 认证流程发请求，导致 accountId 提取失败
+    try {
+      const agentsDir = path.join(engine.hanakoHome, "agents");
+      if (fs.existsSync(agentsDir)) {
+        for (const agentName of fs.readdirSync(agentsDir)) {
+          const configPath = path.join(agentsDir, agentName, "config.yaml");
+          if (!fs.existsSync(configPath)) continue;
+          try {
+            const raw = YAML.load(fs.readFileSync(configPath, "utf-8"));
+            if (raw?.api?.provider === provider) {
+              raw.api.provider = "";
+              const header = "# Hanako 系统配置\n# 由设置页面管理，手动编辑也可以\n\n";
+              const yamlStr = header + YAML.dump(raw, { indent: 2, lineWidth: -1, sortKeys: false, quotingType: "\"", forceQuotes: false });
+              fs.writeFileSync(configPath, yamlStr, "utf-8");
+              log.log(`oauth logout cleared api.provider in agent「${agentName}」config.yaml`);
+            }
+          } catch {}
+        }
+      }
+    } catch (err) {
+      log.warn(`oauth logout config.yaml cleanup failed provider=${provider}: ${err.message}`);
+    }
+
+    // 5. 清除配置缓存（auth / providers / models 的内存缓存全部失效）
     clearConfigCache();
 
     // 5. 刷新 ModelRegistry + 可用模型列表，让运行时立即反映登出状态

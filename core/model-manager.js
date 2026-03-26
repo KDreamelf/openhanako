@@ -7,6 +7,7 @@
  */
 import fs from "fs";
 import path from "path";
+import YAML from "js-yaml";
 import {
   AuthStorage,
   ModelRegistry,
@@ -62,36 +63,64 @@ export class ModelManager {
     const oauthProviders = this._authStorage.getOAuthProviders();
     if (!oauthProviders?.length) return;
 
-    let dirty = false;
-
+    // 收集已登出的 OAuth provider ID
+    const loggedOutIds = new Set();
     for (const p of oauthProviders) {
       const cred = this._authStorage.get(p.id);
       if (cred?.type === "oauth") continue; // 已登录，跳过
+      loggedOutIds.add(p.id);
+    }
+    if (loggedOutIds.size === 0) return;
 
-      // 已登出 —— 无条件清理 providers.yaml 中该 OAuth provider 的条目。
-      // 不能用 !api_key 来判断，因为 getAllProviders() 会把 OAuth token
-      // 补到 api_key 字段，前端保存时可能将其回写到 providers.yaml。
+    let dirty = false;
+
+    for (const pid of loggedOutIds) {
+      // 1. 清理 providers.yaml
       const globalProviders = loadGlobalProviders();
-      const providerEntry = globalProviders.providers?.[p.id];
+      const providerEntry = globalProviders.providers?.[pid];
       if (providerEntry) {
-        saveGlobalProviders({ providers: { [p.id]: null } });
-        console.log(`[model-manager] 🧹 启动清理：移除 providers.yaml 中已登出的 OAuth provider「${p.id}」`);
+        saveGlobalProviders({ providers: { [pid]: null } });
+        console.log(`[model-manager] 🧹 启动清理：移除 providers.yaml 中已登出的 OAuth provider「${pid}」`);
         dirty = true;
       }
 
-      // 检查 models.json 是否有残留
+      // 2. 清理 models.json
       try {
         const modelsJsonPath = this.modelsJsonPath;
         const raw = fs.readFileSync(modelsJsonPath, "utf-8");
         const modelsJson = JSON.parse(raw);
-        if (modelsJson.providers?.[p.id]) {
-          delete modelsJson.providers[p.id];
+        if (modelsJson.providers?.[pid]) {
+          delete modelsJson.providers[pid];
           fs.writeFileSync(modelsJsonPath, JSON.stringify(modelsJson, null, 4) + "\n", "utf-8");
-          console.log(`[model-manager] 🧹 启动清理：移除 models.json 中已登出的 OAuth provider「${p.id}」`);
+          console.log(`[model-manager] 🧹 启动清理：移除 models.json 中已登出的 OAuth provider「${pid}」`);
           dirty = true;
         }
       } catch {}
     }
+
+    // 3. 清理所有 agent 的 config.yaml 中指向已登出 OAuth provider 的 api.provider
+    //    如果 config.yaml 的 api.provider 指向已登出的 OAuth provider，
+    //    Pi SDK 仍会用 OAuth 认证流程发请求，导致 accountId 提取失败。
+    try {
+      const agentsDir = path.join(this._hanakoHome, "agents");
+      if (fs.existsSync(agentsDir)) {
+        for (const agentName of fs.readdirSync(agentsDir)) {
+          const configPath = path.join(agentsDir, agentName, "config.yaml");
+          if (!fs.existsSync(configPath)) continue;
+          try {
+            const raw = YAML.load(fs.readFileSync(configPath, "utf-8"));
+            if (raw?.api?.provider && loggedOutIds.has(raw.api.provider)) {
+              console.log(`[model-manager] 🧹 启动清理：agent「${agentName}」的 api.provider 指向已登出的「${raw.api.provider}」，清空`);
+              raw.api.provider = "";
+              const header = "# Hanako 系统配置\n# 由设置页面管理，手动编辑也可以\n\n";
+              const yamlStr = header + YAML.dump(raw, { indent: 2, lineWidth: -1, sortKeys: false, quotingType: "\"", forceQuotes: false });
+              fs.writeFileSync(configPath, yamlStr, "utf-8");
+              dirty = true;
+            }
+          } catch {}
+        }
+      }
+    } catch {}
 
     if (dirty) {
       clearConfigCache();
