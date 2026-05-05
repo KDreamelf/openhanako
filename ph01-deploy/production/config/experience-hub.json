@@ -1,0 +1,13 @@
+{
+  "listen": ":8090",
+  "storage_root": "/data/experience-hub",
+  "admin_token": "39263fb0a04db397e36bb740852badd2cfd93f479a2f841e3f9a6c99ee11722c",
+  "cors_origins": ["https://experience.example.com"],
+  "max_upload_bytes": 536870912,
+  "governance": {
+    "enabled": true,
+    "root_certificate_path": "/etc/ph01/certs/experience-network/root-certificate.json",
+    "master_certificate_path": "/etc/ph01/certs/experience-network/master-certificate.json",
+    "master_private_key_hex": "1b72c295e7c15e8aa05edbc109891f5584f69c3fd87aa6a45f5e83f847e31367"
+  }
+}

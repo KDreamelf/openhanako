@@ -52,6 +52,9 @@ auth.json
 *.p12
 *.crt
 
+# Production deployment seed mTLS certificates are intentionally versioned.
+!/ph01-deploy/production/certs/mtls/*.pem
+
 # ============================================================
 # JavaScript / frontend dependencies and build output
 # ============================================================

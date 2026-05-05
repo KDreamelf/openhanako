@@ -1,0 +1,18 @@
+{
+  "certificate": {
+    "schema_version": "ph01.experience.master_certificate.v1",
+    "certificate_id": "ph01-exp-master-20260504",
+    "role": "experience_review_master",
+    "issuer_root_key_id": "ph01-exp-root-20260504",
+    "algorithm": "secp256k1_ecdsa_sha256_rs64",
+    "public_key_hex": "04f0d295e8002818067b97f19c7935cd30372075fc0d56fc03b13ccef3f5f2ffb20dc95e4a592ea759391973d67916be38f37a6065e5b93d74362c5951ce0d4c3c",
+    "not_before": "2026-05-04T06:56:17Z",
+    "not_after": "2029-05-04T07:56:17Z",
+    "extensions": {
+      "revoked_certificate_fingerprints": []
+    }
+  },
+  "signature_algorithm": "secp256k1_ecdsa_sha256_rs64",
+  "signature_payload_sha256": "caf61b136c4cda581729a0e2722e8fc872d5279b613b6586e94bb81e2bf872b5",
+  "root_signature_hex": "b1e4a9673961f03656ada3d3ab3cb5ab61efebddefee41b2500332f46e96565540a8c033edb647cc782a7dd063070f2b9cbec30f856628dd7e382d3e8198b531"
+}

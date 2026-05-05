@@ -1,0 +1,56 @@
+# PH01 AI 网关正式配置。
+# 这里承载 New API 原本依赖环境变量的数据库、Redis、PH01 认证中心 mTLS 配置。
+
+server:
+  port: 3000
+  log_dir: /app/logs
+  node_name: ph01-ai-gateway-01
+  gin_mode: release
+  frontend_base_url: https://ai.example.com
+  gateway_public_base_url: https://ai.example.com
+
+database:
+  sql_dsn: postgresql://ph01_ai:CHANGE_ME_AI_DB_PASSWORD@postgres.example.internal:5432/ph01_ai?sslmode=require
+  log_sql_dsn: ""
+  max_idle_conns: 100
+  max_open_conns: 1000
+  max_lifetime_seconds: 60
+
+redis:
+  conn_string: redis://:CHANGE_ME_AI_REDIS_PASSWORD@redis.example.internal:6379/1
+  pool_size: 20
+  sync_frequency_seconds: 60
+
+security:
+  session_secret: 08dced615e665f3b7f005907bf2e30df64793a29078b5ea7c36158bdb80fad33
+  crypto_secret: ac42477972fb1bdacd114e5f18aea30c1e7a50448f028ca8ac9c68604d34ae84
+  tls_insecure_skip_verify: false
+  trust_proxy_headers: true
+  trusted_redirect_domains:
+    - ai.example.com
+
+runtime:
+  debug_enabled: false
+  memory_cache_enabled: true
+  error_log_enabled: true
+  batch_update_enabled: true
+  batch_update_interval_seconds: 5
+  generate_default_token: false
+  update_task: true
+  streaming_timeout_seconds: 300
+  stream_scanner_max_buffer_mb: 128
+  max_request_body_mb: 128
+  azure_default_api_version: 2025-04-01-preview
+
+ph01_auth:
+  base_url: https://ph01-auth-center:8443
+  internal_token: "04e12202af9b65fe416a81ace6ed0f7eab2a40d52e0aa4a03eb70591ad019769"
+  ca_cert: /etc/ph01/certs/mtls/root-ca.pem
+  client_cert: /etc/ph01/certs/mtls/ai-gateway.pem
+  client_key: /etc/ph01/certs/mtls/ai-gateway-key.pem
+  server_name: ph01-auth-center
+
+analytics:
+  google_analytics_id: ""
+  umami_website_id: ""
+  umami_script_url: ""

@@ -1,0 +1,81 @@
+services:
+  ph01-auth-center:
+    image: ${PH01_IMAGE_REGISTRY:-registry.example.com/ph01}/auth-center:${PH01_IMAGE_TAG:-20260505}
+    container_name: ph01-auth-center
+    restart: unless-stopped
+    command: ["-config", "/etc/ph01/auth-center.hcl"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ${PH01_DATA_DIR:-../../data/production}/config/auth-center.hcl:/etc/ph01/auth-center.hcl
+      - ${PH01_DATA_DIR:-../../data/production}/certs/mtls:/etc/ph01/certs/mtls:ro
+    networks:
+      ph01-public:
+      ph01-internal:
+        aliases:
+          - auth-center
+          - ph01-auth-center
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz | grep 'auth-gateway'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ph01-ai-gateway:
+    image: ${PH01_IMAGE_REGISTRY:-registry.example.com/ph01}/ai-gateway:${PH01_IMAGE_TAG:-20260505}
+    container_name: ph01-ai-gateway
+    restart: unless-stopped
+    command: ["--config", "/etc/ph01/ai-gateway.yaml"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ${PH01_DATA_DIR:-../../data/production}/config/ai-gateway.yaml:/etc/ph01/ai-gateway.yaml:ro
+      - ${PH01_DATA_DIR:-../../data/production}/certs/mtls:/etc/ph01/certs/mtls:ro
+      - ${PH01_DATA_DIR:-../../data/production}/runtime/ai-gateway:/data
+      - ${PH01_DATA_DIR:-../../data/production}/logs/ai-gateway:/app/logs
+    depends_on:
+      ph01-auth-center:
+        condition: service_healthy
+    networks:
+      ph01-public:
+      ph01-internal:
+        aliases:
+          - ai-gateway
+          - ph01-ai-gateway
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/api/status | grep '\"success\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ph01-experience-network-manager:
+    image: ${PH01_IMAGE_REGISTRY:-registry.example.com/ph01}/experience-network-manager:${PH01_IMAGE_TAG:-20260505}
+    container_name: ph01-experience-network-manager
+    restart: unless-stopped
+    command: ["-config", "/etc/ph01/experience-hub.json"]
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - ${PH01_DATA_DIR:-../../data/production}/config/experience-hub.json:/etc/ph01/experience-hub.json:ro
+      - ${PH01_DATA_DIR:-../../data/production}/runtime/experience-hub:/data/experience-hub
+      - ${PH01_DATA_DIR:-../../data/production}/certs/experience-network:/etc/ph01/certs/experience-network:ro
+    networks:
+      ph01-public:
+      ph01-internal:
+        aliases:
+          - experience-network-manager
+          - ph01-experience-network-manager
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8090/healthz | grep 'experience-network-manager'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  ph01-public:
+    name: ph01-public
+    driver: bridge
+  ph01-internal:
+    name: ph01-internal
+    driver: bridge
+    internal: true

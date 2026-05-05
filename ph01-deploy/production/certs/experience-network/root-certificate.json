@@ -1,0 +1,8 @@
+{
+  "schema_version": "ph01.experience.root_certificate.v1",
+  "key_id": "ph01-exp-root-20260504",
+  "algorithm": "secp256k1_ecdsa_sha256_rs64",
+  "public_key_hex": "04199e2f57fd4e5b144a3ab0a7292423f5a84b08c39bd607d6ea5bac8d2730c338f2f673883af72d3eaa24020998242bb548a34c28aae239b5e7005463b1081e8a",
+  "created_at": "2026-05-04T07:56:17Z",
+  "fingerprint_sha256": "e051ba74936e1a651af502dafbf2eff531559fc7d60bd116b7e42740eddbab42"
+}

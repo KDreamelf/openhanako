@@ -1,0 +1,11 @@
+{
+  "schema_version": "ph01.experience.key_material_manifest.v1",
+  "generated_at": "2026-05-04T07:56:17Z",
+  "root_key_id": "ph01-exp-root-20260504",
+  "root_public_key_hex": "04199e2f57fd4e5b144a3ab0a7292423f5a84b08c39bd607d6ea5bac8d2730c338f2f673883af72d3eaa24020998242bb548a34c28aae239b5e7005463b1081e8a",
+  "root_fingerprint_sha256": "e051ba74936e1a651af502dafbf2eff531559fc7d60bd116b7e42740eddbab42",
+  "master_certificate_id": "ph01-exp-master-20260504",
+  "master_payload_sha256": "caf61b136c4cda581729a0e2722e8fc872d5279b613b6586e94bb81e2bf872b5",
+  "private_material_directory": "offline-cold-storage-root-key-and-data/production/config/experience-hub.json-master-key",
+  "public_certificate_directory": "data/production/certs/experience-network"
+}
