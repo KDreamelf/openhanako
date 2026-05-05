@@ -172,7 +172,7 @@ const ask = () => {
       rl.question("\n选择模型编号 > ", async (num) => {
         const idx = parseInt(num) - 1;
         if (idx >= 0 && idx < available.length) {
-          await engine.setModel(available[idx].id);
+          await engine.setModel(available[idx].id, available[idx].provider);
           console.log(`\n✿ 已切换到: ${available[idx].name}`);
         } else {
           console.log("\n取消切换");

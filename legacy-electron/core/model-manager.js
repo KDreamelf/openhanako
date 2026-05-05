@@ -17,6 +17,7 @@ import { minimaxOAuthProvider } from "../lib/oauth/minimax-portal.js";
 import { openaiCodexOAuthProvider } from "../lib/oauth/openai-codex.js";
 import { clearConfigCache, loadGlobalProviders, saveGlobalProviders, resolveApiKeyFromAuth } from "../lib/memory/config-loader.js";
 import { refreshPromptToolProviders } from "../lib/llm/prompt-tool-provider.js";
+import { patchCodexResponsesProvider } from "../lib/llm/codex-responses-patch.js";
 
 function isLocalBaseUrl(url) {
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(String(url || ""));
@@ -46,6 +47,10 @@ export class ModelManager {
       path.join(this._hanakoHome, "models.json"),
     );
     refreshPromptToolProviders();
+
+    // 覆盖 Pi SDK 的 openai-codex-responses provider，
+    // 使第三方 Codex 兼容供应商（非 JWT apiKey）不再因 accountId 提取失败而报错
+    patchCodexResponsesProvider();
 
     // 清理历史 OAuth 登出后的残留脏数据
     this._purgeStaleOAuthProviders();
@@ -128,6 +133,7 @@ export class ModelManager {
       registerOAuthProvider(minimaxOAuthProvider);
       registerOAuthProvider(openaiCodexOAuthProvider);
       refreshPromptToolProviders();
+      patchCodexResponsesProvider();
     }
   }
 
@@ -197,6 +203,7 @@ export class ModelManager {
       registerOAuthProvider(minimaxOAuthProvider);
       registerOAuthProvider(openaiCodexOAuthProvider);
       refreshPromptToolProviders();
+      patchCodexResponsesProvider();
       this._availableModels = await this._modelRegistry.getAvailable();
       this._rebindSelectedModels();
     }

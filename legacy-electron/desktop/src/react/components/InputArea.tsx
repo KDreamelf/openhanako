@@ -747,12 +747,12 @@ function ModelSelector({ models }: { models: Array<{ id: string; name: string; i
     return () => document.removeEventListener('click', handler);
   }, [open]);
 
-  const switchModel = useCallback(async (modelId: string) => {
+  const switchModel = useCallback(async (modelId: string, provider?: string) => {
     try {
       await hanaFetch('/api/models/set', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelId }),
+        body: JSON.stringify({ modelId, provider }),
       });
       // Reload models
       const favRes = await hanaFetch('/api/models/favorites');
@@ -778,7 +778,7 @@ function ModelSelector({ models }: { models: Array<{ id: string; name: string; i
             <button
               key={m.id}
               className={'model-option' + (m.isCurrent ? ' active' : '')}
-              onClick={() => switchModel(m.id)}
+              onClick={() => switchModel(m.id, m.provider)}
             >
               {m.name}
             </button>

@@ -227,10 +227,17 @@ export class ConfigCoordinator {
     return synced;
   }
 
-  async setModel(modelId) {
+  async setModel(modelId, provider) {
     const models = this._d.getModels();
-    const preferredProvider = this._d.getAgent()?.config?.api?.provider || "";
+    // 优先使用前端明确传入的 provider，避免读取 config 中可能残留的过时值
+    const preferredProvider = provider || this._d.getAgent()?.config?.api?.provider || "";
     const model = models.setModel(modelId, preferredProvider);
+
+    // 将选中的 provider 持久化到 config，保证后续请求不再走过时的 provider
+    if (model.provider && model.provider !== (this._d.getAgent()?.config?.api?.provider || "")) {
+      this._d.getAgent().updateConfig({ api: { provider: model.provider } });
+    }
+
     const session = this._d.getSession();
     if (session) {
       await session.setModel(model);

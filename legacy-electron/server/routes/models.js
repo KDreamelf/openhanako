@@ -112,12 +112,12 @@ export default async function modelsRoute(app, { engine }) {
   // 切换模型
   app.post("/api/models/set", async (req, reply) => {
     try {
-      const { modelId } = req.body || {};
+      const { modelId, provider } = req.body || {};
       if (!modelId) {
         reply.code(400);
         return { error: t("error.missingParam", { param: "modelId" }) };
       }
-      await engine.setModel(modelId);
+      await engine.setModel(modelId, provider);
       return { ok: true, model: engine.currentModel?.name };
     } catch (err) {
       reply.code(500);

@@ -247,7 +247,7 @@ export class HanaEngine {
   readAgentOrder() { return this._configCoord.readAgentOrder(); }
   saveAgentOrder(o) { return this._configCoord.saveAgentOrder(o); }
   async syncModelsAndRefresh(f) { return this._configCoord.syncModelsAndRefresh(f); }
-  async setModel(id) { return this._configCoord.setModel(id); }
+  async setModel(id, provider) { return this._configCoord.setModel(id, provider); }
   getThinkingLevel() { return this._configCoord.getThinkingLevel(); }
   setThinkingLevel(l) { return this._configCoord.setThinkingLevel(l); }
   getSandbox() { return this._prefs.getSandbox(); }
