@@ -1,0 +1,50 @@
+# PH01 认证中心配置文件（HCL 格式）
+#
+# 生产环境部署前必改：
+#   - 所有密码 / token
+#   - PostgreSQL 连接串
+#   - CORS 域名收紧
+
+# ============== 数据库 ==============
+
+database "auth" {
+  driver = "postgres"
+  dsn    = "host=localhost port=5432 user=hanako password=CHANGE_ME dbname=hanako_auth sslmode=disable"
+}
+
+# ============== Redis ==============
+
+redis "auth" {
+  url = "redis://localhost:6379/0"
+}
+
+# ============== 邮件发送 ==============
+
+# 注册邮箱验证与第二阶段恢复默认使用邮箱验证码。生产环境请改成真实 SMTP。
+# tls_mode 可选：require_starttls(587) / tls(465)。不支持明文 SMTP。
+smtp "recovery" {
+  enabled  = false
+  host     = "smtp.example.com"
+  port     = 587
+  username = "noreply@example.com"
+  password = "CHANGE_ME_SMTP_PASSWORD"
+  from     = "PH01 <noreply@example.com>"
+  tls_mode = "require_starttls"
+}
+
+# ============== AI 网关同步 ==============
+
+ai_gateway_sync "default" {
+  enabled        = true
+  base_url       = "http://localhost:3000"
+  internal_token = "CHANGE_ME_PH01_INTERNAL_SYNC_TOKEN"
+  timeout_ms     = 5000
+}
+
+# ============== 服务配置 ==============
+
+server "auth_gateway" {
+  listen       = ":8080"
+  admin_token  = "CHANGE_ME_ADMIN_TOKEN_FOR_AUTH_GATEWAY"
+  cors_origins = ["*"]  # 生产环境改成明确域名
+}

@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hanako-local-postgres
+    environment:
+      POSTGRES_USER: hanako
+      POSTGRES_PASSWORD: hanako_local
+      POSTGRES_DB: postgres
+    ports:
+      - "15432:5432"
+    volumes:
+      - hanako-local-postgres:/var/lib/postgresql/data
+      - ./dev/postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hanako -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: hanako-local-redis
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mock-openai:
+    image: python:3.12-alpine
+    container_name: hanako-local-mock-openai
+    working_dir: /app
+    command: ["python", "/app/server.py"]
+    ports:
+      - "18080:8080"
+    volumes:
+      - ./dev/mock-openai:/app:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz').read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  hanako-local-postgres:

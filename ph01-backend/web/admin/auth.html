@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PH01 认证中心管理端</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f7fbff;
+  --panel: rgba(255, 255, 255, 0.88);
+  --line: #dbeafe;
+  --line-strong: #b9d7ff;
+  --text: #0b1b35;
+  --muted: #607089;
+  --blue: #1d72f3;
+  --blue-2: #0ea5e9;
+  --blue-soft: #e8f3ff;
+  --danger: #dc2626;
+  --ok: #047857;
+  --shadow: 0 20px 60px rgba(29, 114, 243, 0.12);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text);
+  font: 14px/1.55 "Inter", "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  background:
+    linear-gradient(135deg, rgba(29, 114, 243, 0.14), transparent 34%),
+    radial-gradient(circle at 86% 8%, rgba(14, 165, 233, 0.18), transparent 30%),
+    var(--bg);
+}
+button, input, select, textarea {
+  font: inherit;
+}
+button {
+  border: 0;
+  cursor: pointer;
+}
+input, select, textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text);
+  outline: none;
+}
+input, select { height: 36px; padding: 0 10px; }
+textarea {
+  min-height: 180px;
+  padding: 12px;
+  resize: vertical;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(29, 114, 243, 0.14);
+}
+.shell {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 28px;
+}
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 0 26px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.mark {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(201, 231, 255, 0.75)),
+    linear-gradient(135deg, var(--blue), var(--blue-2));
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  box-shadow: var(--shadow);
+  position: relative;
+}
+.mark::before, .mark::after {
+  content: "";
+  position: absolute;
+  border-radius: 999px;
+  background: var(--blue);
+}
+.mark::before { width: 18px; height: 4px; left: 12px; top: 19px; }
+.mark::after { width: 4px; height: 18px; left: 19px; top: 12px; }
+.brand h1 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: 0;
+}
+.brand p {
+  margin: 2px 0 0;
+  color: var(--muted);
+}
+.session {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+}
+.btn {
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 8px;
+  color: white;
+  background: linear-gradient(135deg, var(--blue), var(--blue-2));
+  box-shadow: 0 10px 24px rgba(29, 114, 243, 0.2);
+  white-space: nowrap;
+}
+.btn.secondary {
+  color: var(--blue);
+  background: var(--blue-soft);
+  box-shadow: none;
+}
+.btn.danger {
+  color: white;
+  background: var(--danger);
+  box-shadow: none;
+}
+.btn.ghost {
+  color: var(--muted);
+  background: transparent;
+  box-shadow: none;
+}
+.layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 18px;
+}
+.side, .panel, .login-card {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+.side {
+  border-radius: 12px;
+  padding: 10px;
+  height: fit-content;
+}
+.nav-btn {
+  width: 100%;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+  text-align: left;
+}
+.nav-btn.active {
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.panel {
+  border-radius: 12px;
+  overflow: hidden;
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px;
+  border-bottom: 1px solid var(--line);
+}
+.panel-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.panel-head p {
+  margin: 2px 0 0;
+  color: var(--muted);
+}
+.panel-body { padding: 18px; }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.field label {
+  display: block;
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.table-wrap {
+  overflow: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 980px;
+}
+th, td {
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+}
+th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(232, 243, 255, 0.72);
+}
+.mono {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 12px;
+}
+.badge.ok { color: var(--ok); background: #e9fbf3; }
+.badge.danger { color: var(--danger); background: #fee2e2; }
+.inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.email-input { min-width: 190px; }
+.toast {
+  min-height: 24px;
+  margin: 0 0 14px;
+  color: var(--danger);
+}
+.toast.ok { color: var(--ok); }
+.login-wrap {
+  min-height: calc(100vh - 120px);
+  display: grid;
+  place-items: center;
+}
+.login-card {
+  width: min(760px, 100%);
+  border-radius: 14px;
+  padding: 28px;
+}
+.login-card h2 {
+  margin: 0 0 8px;
+  font-size: 24px;
+}
+.login-card p {
+  margin: 0 0 18px;
+  color: var(--muted);
+}
+.modal {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(6, 20, 42, 0.42);
+  z-index: 10;
+}
+.modal.show { display: flex; }
+.modal-card {
+  width: min(880px, 100%);
+  max-height: 82vh;
+  overflow: auto;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: white;
+  box-shadow: 0 30px 80px rgba(6, 20, 42, 0.24);
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.pubkey {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfdff;
+}
+.break {
+  word-break: break-all;
+}
+.hidden { display: none !important; }
+@media (max-width: 860px) {
+  .shell { padding: 18px; }
+  .topbar, .session { align-items: flex-start; flex-direction: column; }
+  .layout { grid-template-columns: 1fr; }
+  .side { display: grid; grid-template-columns: repeat(3, 1fr); }
+  .grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand">
+      <div class="mark" aria-hidden="true"></div>
+      <div>
+        <h1>PH01 认证中心</h1>
+        <p>用户、恢复配置与审计日志</p>
+      </div>
+    </div>
+    <div id="sessionBar" class="session hidden">
+      <span id="sessionUser"></span>
+      <button id="logoutBtn" class="btn ghost">退出</button>
+    </div>
+  </header>
+
+  <main id="loginView" class="login-wrap">
+    <section class="login-card">
+      <h2>管理端登录</h2>
+      <p>粘贴由子体客户端生成的签名登录 JSON。</p>
+      <div id="loginToast" class="toast"></div>
+      <textarea id="loginJson" spellcheck="false" placeholder='{"payload":"{\"username\":\"root\"}","pubkey":"04...","signature":"...","timestamp":...,"nonce":"..."}'></textarea>
+      <div class="inline" style="margin-top:14px; justify-content:flex-end;">
+        <button id="loginBtn" class="btn">登录</button>
+      </div>
+    </section>
+  </main>
+
+  <main id="appView" class="layout hidden">
+    <aside class="side">
+      <button class="nav-btn active" data-tab="users"><span class="dot"></span>用户管理</button>
+      <button class="nav-btn" data-tab="config"><span class="dot"></span>系统配置</button>
+      <button class="nav-btn" data-tab="logs"><span class="dot"></span>日志查看</button>
+    </aside>
+
+    <section class="panel" data-page="users">
+      <div class="panel-head">
+        <div>
+          <h2>用户管理</h2>
+          <p>管理用户状态、注册邮箱、公钥和管理员权限。</p>
+        </div>
+        <button id="refreshUsersBtn" class="btn secondary">刷新</button>
+      </div>
+      <div class="panel-body">
+        <div id="usersToast" class="toast"></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>用户名</th>
+                <th>昵称</th>
+                <th>邮箱</th>
+                <th>套餐</th>
+                <th>角色</th>
+                <th>公钥</th>
+                <th>状态</th>
+                <th>注册时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="usersBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel hidden" data-page="config">
+      <div class="panel-head">
+        <div>
+          <h2>系统配置</h2>
+          <p>配置注册邮箱验证码与第二阶段恢复校验共用的 SMTP 授权。</p>
+        </div>
+        <button id="refreshSMTPBtn" class="btn secondary">刷新</button>
+      </div>
+      <div class="panel-body">
+        <div id="smtpToast" class="toast"></div>
+        <div class="grid">
+          <div class="field">
+            <label>启用状态</label>
+            <select id="smtpEnabled">
+              <option value="false">停用</option>
+              <option value="true">启用</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>TLS 模式</label>
+            <select id="smtpTLSMode">
+              <option value="require_starttls">STARTTLS（587）</option>
+              <option value="tls">SSL/TLS（465）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>SMTP 主机</label>
+            <input id="smtpHost" placeholder="smtp.example.com" />
+          </div>
+          <div class="field">
+            <label>端口</label>
+            <input id="smtpPort" type="number" min="1" max="65535" placeholder="587" />
+          </div>
+          <div class="field">
+            <label>用户名</label>
+            <input id="smtpUsername" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label>授权码 / 密码</label>
+            <input id="smtpPassword" type="password" autocomplete="new-password" placeholder="留空则保持现有值" />
+          </div>
+          <div class="field">
+            <label>发件人</label>
+            <input id="smtpFrom" placeholder="PH01 <noreply@example.com>" />
+          </div>
+          <div class="field">
+            <label>测试收件地址</label>
+            <input id="smtpTestTo" placeholder="you@example.com" />
+          </div>
+        </div>
+        <div class="inline" style="margin-top:16px; justify-content:flex-end;">
+          <span id="smtpPasswordState" class="badge"></span>
+          <button id="testSMTPBtn" class="btn secondary">发送测试</button>
+          <button id="saveSMTPBtn" class="btn">保存配置</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel hidden" data-page="logs">
+      <div class="panel-head">
+        <div>
+          <h2>日志查看</h2>
+          <p>查看管理端登录、用户管理和系统配置变更。</p>
+        </div>
+        <button id="refreshLogsBtn" class="btn secondary">刷新</button>
+      </div>
+      <div class="panel-body">
+        <div id="logsToast" class="toast"></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>操作者</th>
+                <th>动作</th>
+                <th>目标</th>
+                <th>详情</th>
+                <th>时间</th>
+              </tr>
+            </thead>
+            <tbody id="logsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="pubkeyModal" class="modal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <strong id="pubkeyTitle">公钥列表</strong>
+      <button id="closePubkeyBtn" class="btn ghost">关闭</button>
+    </div>
+    <div id="pubkeyBody" class="panel-body"></div>
+  </div>
+</div>
+
+<script>
+const state = {
+  token: localStorage.getItem('auth_admin_token') || '',
+  me: null,
+  users: [],
+  smtp: null,
+  logs: [],
+};
+
+const els = {
+  loginView: document.getElementById('loginView'),
+  appView: document.getElementById('appView'),
+  sessionBar: document.getElementById('sessionBar'),
+  sessionUser: document.getElementById('sessionUser'),
+  loginJson: document.getElementById('loginJson'),
+  loginToast: document.getElementById('loginToast'),
+  usersToast: document.getElementById('usersToast'),
+  smtpToast: document.getElementById('smtpToast'),
+  logsToast: document.getElementById('logsToast'),
+  usersBody: document.getElementById('usersBody'),
+  logsBody: document.getElementById('logsBody'),
+  pubkeyModal: document.getElementById('pubkeyModal'),
+  pubkeyTitle: document.getElementById('pubkeyTitle'),
+  pubkeyBody: document.getElementById('pubkeyBody'),
+};
+
+function escapeHTML(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+
+function setToast(id, msg, ok = false) {
+  const el = typeof id === 'string' ? document.getElementById(id) : id;
+  el.textContent = msg || '';
+  el.classList.toggle('ok', ok);
+}
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + state.token,
+  }, opts.headers || {});
+  const resp = await fetch(path, Object.assign({}, opts, { headers }));
+  const text = await resp.text();
+  let data = {};
+  if (text) {
+    try { data = JSON.parse(text); } catch (_) { data = { message: text }; }
+  }
+  if (!resp.ok) {
+    const code = data.error || resp.status;
+    const msg = data.message ? ': ' + data.message : '';
+    throw new Error(code + msg);
+  }
+  return data;
+}
+
+function showApp(show) {
+  els.loginView.classList.toggle('hidden', show);
+  els.appView.classList.toggle('hidden', !show);
+  els.sessionBar.classList.toggle('hidden', !show);
+  if (show && state.me) {
+    els.sessionUser.textContent = `${state.me.username} · ${state.me.role}`;
+  }
+}
+
+async function login() {
+  setToast(els.loginToast, '');
+  let body;
+  try {
+    body = JSON.parse(els.loginJson.value.trim());
+  } catch (_) {
+    setToast(els.loginToast, '登录 JSON 不是合法 JSON');
+    return;
+  }
+  try {
+    const resp = await fetch('/admin/session/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error((data.error || resp.status) + (data.message ? ': ' + data.message : ''));
+    state.token = data.token;
+    state.me = data.user;
+    localStorage.setItem('auth_admin_token', state.token);
+    showApp(true);
+    await Promise.all([loadUsers(), loadSMTP(), loadLogs()]);
+  } catch (err) {
+    setToast(els.loginToast, err.message);
+  }
+}
+
+async function restoreSession() {
+  if (!state.token) return;
+  try {
+    state.me = await api('/admin/session/self');
+    showApp(true);
+    await Promise.all([loadUsers(), loadSMTP(), loadLogs()]);
+  } catch (_) {
+    logout();
+  }
+}
+
+function logout() {
+  state.token = '';
+  state.me = null;
+  localStorage.removeItem('auth_admin_token');
+  showApp(false);
+}
+
+async function loadUsers() {
+  setToast(els.usersToast, '');
+  try {
+    const data = await api('/admin/users?page=1&page_size=200');
+    state.users = data.items || [];
+    renderUsers();
+  } catch (err) {
+    setToast(els.usersToast, err.message);
+  }
+}
+
+function renderUsers() {
+  const canSetRole = state.me && state.me.role === 'root';
+  els.usersBody.innerHTML = state.users.map(u => {
+    const roleCell = canSetRole && u.role !== 'root'
+      ? `<select data-action="role" data-id="${u.id}">
+          <option value="user" ${u.role === 'user' ? 'selected' : ''}>user</option>
+          <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>admin</option>
+        </select>`
+      : `<span class="badge">${escapeHTML(u.role || 'user')}</span>`;
+    return `<tr>
+      <td class="mono">${u.id}</td>
+      <td><strong>${escapeHTML(u.username)}</strong></td>
+      <td>${escapeHTML(u.nickname)}</td>
+      <td>
+        <div class="inline">
+          <input class="email-input" data-email="${u.id}" value="${escapeHTML(u.email || '')}" placeholder="未绑定" />
+          <button class="btn secondary" data-action="email" data-id="${u.id}">保存</button>
+        </div>
+      </td>
+      <td>
+        <select data-action="tier" data-id="${u.id}">
+          <option value="free" ${u.tier === 'free' ? 'selected' : ''}>free</option>
+          <option value="pro" ${u.tier === 'pro' ? 'selected' : ''}>pro</option>
+          <option value="enterprise" ${u.tier === 'enterprise' ? 'selected' : ''}>enterprise</option>
+        </select>
+      </td>
+      <td>${roleCell}</td>
+      <td><button class="btn ghost" data-action="pubkeys" data-id="${u.id}">${(u.pubkeys || []).length}</button></td>
+      <td><span class="badge ${u.disabled ? 'danger' : 'ok'}">${u.disabled ? '已禁用' : '活跃'}</span></td>
+      <td class="mono">${escapeHTML(u.created_at)}</td>
+      <td>
+        <button class="btn ${u.disabled ? 'secondary' : 'danger'}" data-action="disabled" data-id="${u.id}">
+          ${u.disabled ? '启用' : '禁用'}
+        </button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function patchUser(id, body) {
+  const updated = await api(`/admin/users/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+  const idx = state.users.findIndex(u => String(u.id) === String(id));
+  if (idx >= 0) state.users[idx] = updated;
+  renderUsers();
+}
+
+function openPubkeys(id) {
+  const u = state.users.find(item => String(item.id) === String(id));
+  if (!u) return;
+  els.pubkeyTitle.textContent = `公钥列表 · ${u.username}`;
+  els.pubkeyBody.innerHTML = (u.pubkeys || []).map(pk => `<div class="pubkey">
+    <div class="inline" style="justify-content:space-between;">
+      <span class="mono">#${pk.id} · ${escapeHTML(pk.created_at)}</span>
+      <button class="btn danger" data-action="revoke" data-user="${u.id}" data-pk="${pk.id}">撤销</button>
+    </div>
+    <div class="mono break" style="margin-top:8px;">Hash: ${escapeHTML(pk.pubkey_hash)}</div>
+    <div class="mono break" style="margin-top:6px;">Hex: ${escapeHTML(pk.pubkey_hex || '')}</div>
+  </div>`).join('') || '<p>暂无公钥</p>';
+  els.pubkeyModal.classList.add('show');
+}
+
+async function revokePubkey(userID, pkID) {
+  try {
+    await api(`/admin/users/${userID}/pubkeys/${pkID}/revoke`, { method: 'POST' });
+    await loadUsers();
+    openPubkeys(userID);
+  } catch (err) {
+    setToast(els.usersToast, err.message);
+  }
+}
+
+async function loadSMTP() {
+  setToast(els.smtpToast, '');
+  try {
+    state.smtp = await api('/admin/config/smtp');
+    fillSMTP();
+  } catch (err) {
+    setToast(els.smtpToast, err.message);
+  }
+}
+
+function fillSMTP() {
+  const s = state.smtp || {};
+  document.getElementById('smtpEnabled').value = String(!!s.enabled);
+  document.getElementById('smtpTLSMode').value = s.tls_mode || 'require_starttls';
+  document.getElementById('smtpHost').value = s.host || '';
+  document.getElementById('smtpPort').value = s.port || 587;
+  document.getElementById('smtpUsername').value = s.username || '';
+  document.getElementById('smtpPassword').value = '';
+  document.getElementById('smtpFrom').value = s.from || '';
+  document.getElementById('smtpPasswordState').textContent = s.password_set ? '已保存授权码' : '未保存授权码';
+}
+
+function syncSMTPPortWithMode(force) {
+  const mode = document.getElementById('smtpTLSMode').value;
+  const port = document.getElementById('smtpPort');
+  const expected = mode === 'tls' ? 465 : 587;
+  if (force || port.value === '' || port.value === '465' || port.value === '587') {
+    port.value = expected;
+  }
+}
+
+function readSMTPBody(includePassword) {
+  syncSMTPPortWithMode(false);
+  const body = {
+    enabled: document.getElementById('smtpEnabled').value === 'true',
+    tls_mode: document.getElementById('smtpTLSMode').value,
+    host: document.getElementById('smtpHost').value.trim(),
+    port: Number(document.getElementById('smtpPort').value || 0),
+    username: document.getElementById('smtpUsername').value.trim(),
+    from: document.getElementById('smtpFrom').value.trim(),
+  };
+  const password = document.getElementById('smtpPassword').value;
+  if (includePassword && password) body.password = password;
+  return body;
+}
+
+async function saveSMTP() {
+  setToast(els.smtpToast, '');
+  try {
+    state.smtp = await api('/admin/config/smtp', {
+      method: 'PATCH',
+      body: JSON.stringify(readSMTPBody(true)),
+    });
+    fillSMTP();
+    setToast(els.smtpToast, 'SMTP 配置已保存', true);
+  } catch (err) {
+    setToast(els.smtpToast, err.message);
+  }
+}
+
+async function testSMTP() {
+  setToast(els.smtpToast, '');
+  try {
+    await api('/admin/config/smtp/test', {
+      method: 'POST',
+      body: JSON.stringify({ to: document.getElementById('smtpTestTo').value.trim() }),
+    });
+    setToast(els.smtpToast, '测试邮件已发送', true);
+  } catch (err) {
+    setToast(els.smtpToast, err.message);
+  }
+}
+
+async function loadLogs() {
+  setToast(els.logsToast, '');
+  try {
+    const data = await api('/admin/logs?page=1&page_size=100');
+    state.logs = data.items || [];
+    renderLogs();
+  } catch (err) {
+    setToast(els.logsToast, err.message);
+  }
+}
+
+function renderLogs() {
+  els.logsBody.innerHTML = state.logs.map(item => `<tr>
+    <td class="mono">${item.id}</td>
+    <td>${escapeHTML(item.actor_username || '-')}<br><span class="badge">${escapeHTML(item.actor_role || '-')}</span></td>
+    <td class="mono">${escapeHTML(item.action)}</td>
+    <td class="mono">${escapeHTML(item.target)}</td>
+    <td class="mono break">${escapeHTML(item.detail || '')}</td>
+    <td class="mono">${escapeHTML(item.created_at)}</td>
+  </tr>`).join('');
+}
+
+document.getElementById('loginBtn').addEventListener('click', login);
+document.getElementById('logoutBtn').addEventListener('click', logout);
+document.getElementById('refreshUsersBtn').addEventListener('click', loadUsers);
+document.getElementById('refreshSMTPBtn').addEventListener('click', loadSMTP);
+document.getElementById('refreshLogsBtn').addEventListener('click', loadLogs);
+document.getElementById('saveSMTPBtn').addEventListener('click', saveSMTP);
+document.getElementById('testSMTPBtn').addEventListener('click', testSMTP);
+document.getElementById('smtpTLSMode').addEventListener('change', () => syncSMTPPortWithMode(true));
+document.getElementById('closePubkeyBtn').addEventListener('click', () => els.pubkeyModal.classList.remove('show'));
+els.pubkeyModal.addEventListener('click', evt => {
+  if (evt.target === els.pubkeyModal) els.pubkeyModal.classList.remove('show');
+});
+
+document.querySelectorAll('[data-tab]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-tab]').forEach(item => item.classList.toggle('active', item === btn));
+    document.querySelectorAll('[data-page]').forEach(page => page.classList.toggle('hidden', page.dataset.page !== btn.dataset.tab));
+    if (btn.dataset.tab === 'logs') loadLogs();
+  });
+});
+
+els.usersBody.addEventListener('change', async evt => {
+  const target = evt.target;
+  const id = target.dataset.id;
+  if (!id) return;
+  try {
+    if (target.dataset.action === 'tier') await patchUser(id, { tier: target.value });
+    if (target.dataset.action === 'role') await patchUser(id, { role: target.value });
+  } catch (err) {
+    setToast(els.usersToast, err.message);
+  }
+});
+
+els.usersBody.addEventListener('click', async evt => {
+  const target = evt.target.closest('[data-action]');
+  if (!target) return;
+  const id = target.dataset.id;
+  const userItem = state.users.find(u => String(u.id) === String(id));
+  try {
+    if (target.dataset.action === 'email') {
+      const input = document.querySelector(`[data-email="${id}"]`);
+      await patchUser(id, { email: input.value.trim() });
+    }
+    if (target.dataset.action === 'disabled' && userItem) {
+      await patchUser(id, { disabled: !userItem.disabled });
+    }
+    if (target.dataset.action === 'pubkeys') openPubkeys(id);
+  } catch (err) {
+    setToast(els.usersToast, err.message);
+  }
+});
+
+els.pubkeyBody.addEventListener('click', evt => {
+  const target = evt.target.closest('[data-action="revoke"]');
+  if (target) revokePubkey(target.dataset.user, target.dataset.pk);
+});
+
+restoreSession();
+</script>
+</body>
+</html>

@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>legacy ai-gateway · 管理后台</title>
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen">
+<div x-data="aiAdmin()" x-init="init()" class="max-w-6xl mx-auto p-6">
+
+  <header class="flex items-center justify-between mb-6 pb-4 border-b">
+    <div>
+      <h1 class="text-2xl font-bold">Legacy Go ai-gateway 管理后台</h1>
+      <p class="text-sm text-gray-500">旧 Go 原型页面；正式 AI 网关位于 ph01-ai-gateway</p>
+    </div>
+    <div class="flex items-center gap-3">
+      <input type="password" x-model="adminToken" placeholder="Admin Bearer Token"
+             class="border rounded px-3 py-1.5 text-sm w-64" />
+      <button @click="refreshAll()" class="bg-blue-600 text-white text-sm px-4 py-1.5 rounded hover:bg-blue-700">刷新</button>
+    </div>
+  </header>
+
+  <div x-show="error" class="bg-red-100 border border-red-400 text-red-700 px-4 py-2 rounded mb-4" x-text="error"></div>
+
+  <!-- Tab 切换 -->
+  <div class="flex gap-2 mb-4">
+    <button @click="tab='upstreams'" :class="tab==='upstreams' ? 'bg-blue-600 text-white' : 'bg-white border'"
+            class="px-4 py-2 rounded text-sm">上游配置</button>
+    <button @click="tab='mappings'" :class="tab==='mappings' ? 'bg-blue-600 text-white' : 'bg-white border'"
+            class="px-4 py-2 rounded text-sm">模型映射</button>
+    <button @click="tab='tiers'" :class="tab==='tiers' ? 'bg-blue-600 text-white' : 'bg-white border'"
+            class="px-4 py-2 rounded text-sm">套餐策略</button>
+  </div>
+
+  <!-- ============== 上游配置 ============== -->
+  <section x-show="tab==='upstreams'" class="bg-white rounded-lg shadow-sm border">
+    <div class="flex items-center justify-between px-4 py-3 border-b">
+      <h2 class="text-lg font-semibold">LLM 上游</h2>
+      <button @click="newUpstream = { name:'', base_url:'', api_key:'', format:'openai', enabled:true }; showUpstream = true"
+              class="bg-green-600 text-white text-sm px-3 py-1 rounded">+ 新增上游</button>
+    </div>
+    <table class="w-full text-sm">
+      <thead class="bg-gray-100 text-gray-600">
+        <tr>
+          <th class="text-left px-4 py-2">ID</th>
+          <th class="text-left px-4 py-2">名称</th>
+          <th class="text-left px-4 py-2">Base URL</th>
+          <th class="text-left px-4 py-2">协议</th>
+          <th class="text-left px-4 py-2">API Key</th>
+          <th class="text-left px-4 py-2">启用</th>
+          <th class="text-left px-4 py-2">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="u in upstreams" :key="u.id">
+          <tr class="border-t hover:bg-gray-50">
+            <td class="px-4 py-2 font-mono text-xs" x-text="u.id"></td>
+            <td class="px-4 py-2 font-semibold" x-text="u.name"></td>
+            <td class="px-4 py-2 text-xs" x-text="u.base_url"></td>
+            <td class="px-4 py-2"><span class="bg-gray-100 px-2 py-0.5 rounded text-xs" x-text="u.format"></span></td>
+            <td class="px-4 py-2 font-mono text-xs" x-text="u.api_key || '-'"></td>
+            <td class="px-4 py-2">
+              <label class="inline-flex items-center cursor-pointer">
+                <input type="checkbox" :checked="u.enabled" @change="toggleUpstream(u)" class="mr-1">
+                <span class="text-xs" x-text="u.enabled ? '启用' : '禁用'"></span>
+              </label>
+            </td>
+            <td class="px-4 py-2">
+              <button @click="editUpstream = JSON.parse(JSON.stringify(u)); showUpstream = true"
+                      class="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded">编辑</button>
+              <button @click="deleteUpstream(u)"
+                      class="text-xs px-2 py-1 bg-red-100 text-red-700 rounded ml-1">删除</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <div x-show="upstreams.length === 0" class="text-center py-8 text-gray-400">尚未配置任何上游</div>
+  </section>
+
+  <!-- 上游编辑 modal -->
+  <div x-show="showUpstream" @click.self="showUpstream = false"
+       class="fixed inset-0 bg-black/40 flex items-center justify-center" style="display:none">
+    <div class="bg-white rounded-lg shadow-lg max-w-lg w-full mx-4">
+      <div class="px-6 py-4 border-b flex items-center justify-between">
+        <h3 class="text-lg font-semibold" x-text="(editUpstream && editUpstream.id) ? '编辑上游' : '新增上游'"></h3>
+        <button @click="showUpstream = false" class="text-gray-400">✕</button>
+      </div>
+      <div class="p-6 space-y-3" x-data x-init="if (!editUpstream && newUpstream) editUpstream = newUpstream">
+        <template x-if="editUpstream">
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">名称（唯一）</label>
+              <input x-model="editUpstream.name" class="border rounded px-3 py-2 w-full text-sm" placeholder="openai-main">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">Base URL</label>
+              <input x-model="editUpstream.base_url" class="border rounded px-3 py-2 w-full text-sm" placeholder="https://api.openai.com/v1">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">协议格式</label>
+              <select x-model="editUpstream.format" class="border rounded px-3 py-2 w-full text-sm">
+                <option value="openai">openai</option>
+                <option value="anthropic">anthropic</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">API Key</label>
+              <input type="password" x-model="editUpstream.api_key" class="border rounded px-3 py-2 w-full text-sm font-mono">
+            </div>
+          </div>
+        </template>
+      </div>
+      <div class="px-6 py-3 border-t flex justify-end gap-2">
+        <button @click="showUpstream = false" class="px-4 py-1.5 border rounded text-sm">取消</button>
+        <button @click="saveUpstream()" class="px-4 py-1.5 bg-blue-600 text-white rounded text-sm">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============== 模型映射 ============== -->
+  <section x-show="tab==='mappings'" class="bg-white rounded-lg shadow-sm border">
+    <div class="flex items-center justify-between px-4 py-3 border-b">
+      <h2 class="text-lg font-semibold">模型映射 (对外名 → 上游名)</h2>
+      <button @click="newMapping = { public_name:'', upstream_id: upstreams[0]?.id || 0, upstream_name:'', min_tier:'free', enabled:true }; editMapping = newMapping; showMapping = true"
+              class="bg-green-600 text-white text-sm px-3 py-1 rounded">+ 新增映射</button>
+    </div>
+    <table class="w-full text-sm">
+      <thead class="bg-gray-100 text-gray-600">
+        <tr>
+          <th class="text-left px-4 py-2">对外名</th>
+          <th class="text-left px-4 py-2">上游</th>
+          <th class="text-left px-4 py-2">上游 model</th>
+          <th class="text-left px-4 py-2">最低套餐</th>
+          <th class="text-left px-4 py-2">启用</th>
+          <th class="text-left px-4 py-2">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="m in mappings" :key="m.id">
+          <tr class="border-t hover:bg-gray-50">
+            <td class="px-4 py-2 font-semibold" x-text="m.public_name"></td>
+            <td class="px-4 py-2" x-text="m.upstream?.name || ''"></td>
+            <td class="px-4 py-2 font-mono text-xs" x-text="m.upstream_name"></td>
+            <td class="px-4 py-2"><span class="bg-purple-100 text-purple-700 px-2 py-0.5 rounded text-xs" x-text="m.min_tier"></span></td>
+            <td class="px-4 py-2">
+              <input type="checkbox" :checked="m.enabled" @change="toggleMapping(m)">
+            </td>
+            <td class="px-4 py-2">
+              <button @click="editMapping = JSON.parse(JSON.stringify(m)); showMapping = true"
+                      class="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded">编辑</button>
+              <button @click="deleteMapping(m)"
+                      class="text-xs px-2 py-1 bg-red-100 text-red-700 rounded ml-1">删除</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <div x-show="mappings.length === 0" class="text-center py-8 text-gray-400">尚未配置任何模型映射</div>
+  </section>
+
+  <!-- 模型映射编辑 modal -->
+  <div x-show="showMapping" @click.self="showMapping = false"
+       class="fixed inset-0 bg-black/40 flex items-center justify-center" style="display:none">
+    <div class="bg-white rounded-lg shadow-lg max-w-lg w-full mx-4">
+      <div class="px-6 py-4 border-b flex items-center justify-between">
+        <h3 class="text-lg font-semibold" x-text="(editMapping && editMapping.id) ? '编辑映射' : '新增映射'"></h3>
+        <button @click="showMapping = false" class="text-gray-400">✕</button>
+      </div>
+      <div class="p-6 space-y-3">
+        <template x-if="editMapping">
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">对外名（子体看到的）</label>
+              <input x-model="editMapping.public_name" class="border rounded px-3 py-2 w-full text-sm" placeholder="gpt-4o-mini">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">上游</label>
+              <select x-model.number="editMapping.upstream_id" class="border rounded px-3 py-2 w-full text-sm">
+                <template x-for="u in upstreams" :key="u.id">
+                  <option :value="u.id" x-text="`${u.name} (${u.base_url})`"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">上游 model 名</label>
+              <input x-model="editMapping.upstream_name" class="border rounded px-3 py-2 w-full text-sm font-mono" placeholder="gpt-4o-mini-2024-07-18">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">最低套餐</label>
+              <select x-model="editMapping.min_tier" class="border rounded px-3 py-2 w-full text-sm">
+                <option value="free">free</option>
+                <option value="pro">pro</option>
+                <option value="enterprise">enterprise</option>
+              </select>
+            </div>
+          </div>
+        </template>
+      </div>
+      <div class="px-6 py-3 border-t flex justify-end gap-2">
+        <button @click="showMapping = false" class="px-4 py-1.5 border rounded text-sm">取消</button>
+        <button @click="saveMapping()" class="px-4 py-1.5 bg-blue-600 text-white rounded text-sm">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============== 套餐策略 ============== -->
+  <section x-show="tab==='tiers'" class="bg-white rounded-lg shadow-sm border">
+    <div class="flex items-center justify-between px-4 py-3 border-b">
+      <h2 class="text-lg font-semibold">套餐限流策略</h2>
+    </div>
+    <table class="w-full text-sm">
+      <thead class="bg-gray-100 text-gray-600">
+        <tr>
+          <th class="text-left px-4 py-2">套餐</th>
+          <th class="text-left px-4 py-2">每分钟</th>
+          <th class="text-left px-4 py-2">每天 (-1=无限)</th>
+          <th class="text-left px-4 py-2">最大输入 token</th>
+          <th class="text-left px-4 py-2">最大输出 token</th>
+          <th class="text-left px-4 py-2">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="t in tiers" :key="t.tier">
+          <tr class="border-t">
+            <td class="px-4 py-2 font-semibold" x-text="t.tier"></td>
+            <td class="px-4 py-2"><input x-model.number="t.per_minute" class="border rounded px-2 py-1 w-24 text-sm"></td>
+            <td class="px-4 py-2"><input x-model.number="t.per_day" class="border rounded px-2 py-1 w-24 text-sm"></td>
+            <td class="px-4 py-2"><input x-model.number="t.max_tokens_in" class="border rounded px-2 py-1 w-24 text-sm"></td>
+            <td class="px-4 py-2"><input x-model.number="t.max_tokens_out" class="border rounded px-2 py-1 w-24 text-sm"></td>
+            <td class="px-4 py-2">
+              <button @click="saveTier(t)" class="text-xs px-2 py-1 bg-blue-600 text-white rounded">保存</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </section>
+
+</div>
+
+<script>
+function aiAdmin() {
+  return {
+    adminToken: localStorage.getItem('ai_admin_token') || '',
+    tab: 'upstreams',
+    upstreams: [],
+    mappings: [],
+    tiers: [],
+    error: '',
+    showUpstream: false,
+    showMapping: false,
+    editUpstream: null,
+    newUpstream: null,
+    editMapping: null,
+    newMapping: null,
+
+    init() {
+      this.$watch('adminToken', v => localStorage.setItem('ai_admin_token', v));
+      if (this.adminToken) this.refreshAll();
+    },
+
+    async fetch_(path, opts = {}) {
+      const headers = Object.assign({}, opts.headers || {}, {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + this.adminToken,
+      });
+      const resp = await fetch(path, Object.assign({}, opts, { headers }));
+      const data = await resp.json();
+      if (!resp.ok) throw new Error((data.error||'error') + ': ' + (data.message || ''));
+      return data;
+    },
+
+    async refreshAll() {
+      this.error = '';
+      try {
+        const [u, m, t] = await Promise.all([
+          this.fetch_('/admin/upstreams'),
+          this.fetch_('/admin/mappings'),
+          this.fetch_('/admin/tiers'),
+        ]);
+        this.upstreams = u.items || [];
+        this.mappings = m.items || [];
+        this.tiers = t.items || [];
+      } catch (e) {
+        this.error = e.message;
+      }
+    },
+
+    async saveUpstream() {
+      try {
+        if (this.editUpstream.id) {
+          await this.fetch_(`/admin/upstreams/${this.editUpstream.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(this.editUpstream),
+          });
+        } else {
+          await this.fetch_('/admin/upstreams', {
+            method: 'POST',
+            body: JSON.stringify(this.editUpstream),
+          });
+        }
+        this.showUpstream = false;
+        this.editUpstream = null;
+        this.newUpstream = null;
+        await this.refreshAll();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async toggleUpstream(u) {
+      try {
+        await this.fetch_(`/admin/upstreams/${u.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ ...u, enabled: !u.enabled }),
+        });
+        u.enabled = !u.enabled;
+      } catch (e) { this.error = e.message; }
+    },
+
+    async deleteUpstream(u) {
+      if (!confirm(`删除上游 ${u.name}?`)) return;
+      try {
+        await this.fetch_(`/admin/upstreams/${u.id}`, { method: 'DELETE' });
+        await this.refreshAll();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async saveMapping() {
+      try {
+        if (this.editMapping.id) {
+          await this.fetch_(`/admin/mappings/${this.editMapping.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(this.editMapping),
+          });
+        } else {
+          await this.fetch_('/admin/mappings', {
+            method: 'POST',
+            body: JSON.stringify(this.editMapping),
+          });
+        }
+        this.showMapping = false;
+        this.editMapping = null;
+        await this.refreshAll();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async toggleMapping(m) {
+      try {
+        await this.fetch_(`/admin/mappings/${m.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ ...m, enabled: !m.enabled }),
+        });
+        m.enabled = !m.enabled;
+      } catch (e) { this.error = e.message; }
+    },
+
+    async deleteMapping(m) {
+      if (!confirm(`删除映射 ${m.public_name}?`)) return;
+      try {
+        await this.fetch_(`/admin/mappings/${m.id}`, { method: 'DELETE' });
+        await this.refreshAll();
+      } catch (e) { this.error = e.message; }
+    },
+
+    async saveTier(t) {
+      try {
+        await this.fetch_(`/admin/tiers/${t.tier}`, {
+          method: 'PATCH',
+          body: JSON.stringify(t),
+        });
+        alert('套餐策略已保存');
+      } catch (e) { this.error = e.message; }
+    },
+  };
+}
+</script>
+</body>
+</html>

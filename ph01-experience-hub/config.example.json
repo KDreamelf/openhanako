@@ -1,0 +1,13 @@
+{
+  "listen": ":8090",
+  "storage_root": "./data/experience-hub",
+  "admin_token": "CHANGE_ME_EXPERIENCE_HUB_TOKEN",
+  "cors_origins": ["*"],
+  "max_upload_bytes": 536870912,
+  "governance": {
+    "enabled": false,
+    "root_certificate_path": "../certs/public/experience-network/root-certificate.json",
+    "master_certificate_path": "../certs/public/experience-network/master-certificate.json",
+    "master_private_key_hex": "CHANGE_ME_MASTER_PRIVATE_KEY_HEX"
+  }
+}

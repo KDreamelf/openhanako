@@ -1,0 +1,15 @@
+# Hanako P2P Authority 配置文件（HCL 格式）
+#
+# 这个服务持有 P2P 网络治理 Root 私钥，只负责签发特权治理对象。
+# 生产环境不要把真实 private_key_hex 提交到仓库。
+
+root_key {
+  key_id              = "hanako-root-2026-01"
+  private_key_hex_env = "P2P_AUTHORITY_ROOT_PRIVATE_KEY_HEX"
+}
+
+server "p2p_authority" {
+  listen       = ":8082"
+  admin_token  = "CHANGE_ME_ADMIN_TOKEN_FOR_P2P_AUTHORITY"
+  cors_origins = ["*"]
+}
