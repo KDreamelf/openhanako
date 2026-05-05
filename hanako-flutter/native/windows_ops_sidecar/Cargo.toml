@@ -1,0 +1,24 @@
+[package]
+name = "hanako_windows_ops_sidecar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
+libloading = "0.8"
+ocrs = "0.12.2"
+ort = { version = "2.0.0-rc.12", features = ["directml"] }
+rten = "0.24.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+] }
+yolo-rs = "0.2.2"

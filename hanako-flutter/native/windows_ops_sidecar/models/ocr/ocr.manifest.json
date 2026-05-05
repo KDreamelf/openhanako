@@ -1,0 +1,7 @@
+{
+  "engine": "ocrs-rten",
+  "models": {
+    "detection": "text-detection.rten",
+    "recognition": "text-recognition.rten"
+  }
+}

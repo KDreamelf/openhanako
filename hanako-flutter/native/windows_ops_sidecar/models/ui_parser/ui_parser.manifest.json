@@ -1,0 +1,13 @@
+{
+  "engine": "rust-yolo-rs+ocrs",
+  "runtime": {
+    "kind": "rust-native"
+  },
+  "models": {
+    "icon_detector": "weights/icon_detect/model.onnx"
+  },
+  "network": {
+    "runtime_download": false,
+    "offline_required": true
+  }
+}

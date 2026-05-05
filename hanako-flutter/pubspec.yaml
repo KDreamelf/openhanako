@@ -1,0 +1,91 @@
+name: hanako
+description: "Hanako - personal AI agent with memory and soul"
+publish_to: 'none'
+version: 600.42.0+1
+
+environment:
+  sdk: ">=3.10.0 <4.0.0"
+  flutter: ">=3.27.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # 状态管理 & 不可变模型
+  flutter_riverpod: ^2.6.0
+  json_annotation: ^4.9.0
+
+  # ==== 网络 ====
+  dio: ^5.7.0
+  url_launcher: ^6.3.0
+  web_socket_channel: ^3.0.1
+
+  # ==== 数据库 ====
+  drift: ^2.21.0
+  sqlite3: ^2.4.0
+  sqlite3_flutter_libs: ^0.5.24
+
+  # ==== 文件 / 路径 / 配置 ====
+  path: ^1.9.0
+  path_provider: ^2.1.5
+  yaml: ^3.1.2
+  yaml_edit: ^2.2.1
+  shared_preferences: ^2.3.3
+  # flutter_secure_storage: ^9.2.2  # Windows impl 需要 ATL（VS C++/MFC 组件）。
+  #                                    Phase 1 用文件后备，Phase 4 视用户环境再启用。
+
+  # ==== UI / 渲染 ====
+  flutter_markdown: ^0.7.4
+  markdown: ^7.2.2
+  cupertino_icons: ^1.0.8
+  flutter_native_splash: ^2.4.0
+  re_editor: ^0.7.0
+  re_highlight: ^0.0.3
+  desktop_webview_window: ^0.2.3
+
+  # ==== 多窗口 & 桌面 ====
+  desktop_multi_window: ^0.2.0
+  window_manager: ^0.5.0
+  tray_manager: ^0.5.0
+  hotkey_manager: ^0.2.3
+  windows_single_instance: ^1.1.0
+
+  # ==== Headless Server / CLI ====
+  shelf: ^1.4.1
+  shelf_router: ^1.1.4
+  shelf_web_socket: ^2.0.0
+  args: ^2.5.0
+
+  # ==== 后台任务 / 调度 ====
+  cron: ^0.6.1
+
+  # ==== 加密 ====
+  crypto: ^3.0.6
+  pointycastle: ^3.9.1
+
+  # ==== Windows 原生（绕开 flutter_secure_storage 的 ATL 依赖）====
+  win32: ^5.13.0
+  ffi: ^2.1.4
+
+  # ==== 国际化 ====
+  intl: ^0.20.2
+
+  # ==== 日志 / 工具 ====
+  logger: ^2.4.0
+  collection: ^1.18.0
+  uuid: ^4.5.1
+  meta: ^1.16.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.4.13
+  json_serializable: ^6.8.0
+  drift_dev: ^2.21.0
+
+flutter:
+  uses-material-design: true
+  generate: true
