@@ -1,0 +1,1 @@
+[2026-04-30 11:27:09] Codex: [工具调用] {"type":"web_search_call","status":"completed","action":{"type":"search","query":"hashcat download Windows binaries latest 7z hashcat.net files","queries":["hashcat download Windows binaries latest 7z hashcat.net files"]}}

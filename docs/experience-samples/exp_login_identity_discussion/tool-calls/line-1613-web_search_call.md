@@ -1,0 +1,1 @@
+[2026-04-30 11:27:27] Codex: [工具调用] {"type":"web_search_call","status":"completed","action":{"type":"search","query":"hashcat example hashes PBKDF2-HMAC-SHA512 mode","queries":["hashcat example hashes PBKDF2-HMAC-SHA512 mode"]}}

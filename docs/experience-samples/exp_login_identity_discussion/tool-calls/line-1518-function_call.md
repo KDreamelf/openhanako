@@ -1,0 +1,1 @@
+[2026-04-30 11:23:22] Codex: [工具调用] {"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"Get-Content pyproject.toml\",\"workdir\":\"E:\\\\CodeProgram\\\\AI_Project\\\\openhanako\\\\benchmarks\\\\gpu_recovery_bench\",\"yield_time_ms\":1000,\"max_output_tokens\":4000}","call_id":"call_KjSLEk56B6dRYQ3YfJlmkf3X"}

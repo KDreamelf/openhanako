@@ -1,0 +1,1 @@
+[2026-04-30 11:54:48] 系统: [错误] {"type":"error","message":"exceeded retry limit, last status: 429 Too Many Requests, request id: eb351c3b-5f6e-4725-a132-25ec70971f74","codex_error_info":{"response_too_many_failed_attempts":{"http_status_code":429}}}

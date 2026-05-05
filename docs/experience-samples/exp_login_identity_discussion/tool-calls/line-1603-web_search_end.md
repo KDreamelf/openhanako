@@ -1,0 +1,1 @@
+[2026-04-30 11:27:09] 工具: [工具输出] {"type":"web_search_end","call_id":"ws_06a5fffbee72cb440169f33c86f80881988d8067256df176c1","query":"hashcat download Windows binaries latest 7z hashcat.net files","action":{"type":"search","query":"hashcat download Windows binaries latest 7z hashcat.net files","queries":["hashcat download Windows binaries latest 7z hashcat.net files"]}}

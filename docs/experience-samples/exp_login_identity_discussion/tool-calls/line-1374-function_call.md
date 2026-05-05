@@ -1,0 +1,1 @@
+[2026-04-30 11:15:37] Codex: [工具调用] {"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"where.exe hashcat; where.exe python\",\"workdir\":\"E:\\\\CodeProgram\\\\AI_Project\\\\openhanako\",\"yield_time_ms\":1000,\"max_output_tokens\":2000}","call_id":"call_OWC4Xuk6n1hRlJfDgww2FbAB"}

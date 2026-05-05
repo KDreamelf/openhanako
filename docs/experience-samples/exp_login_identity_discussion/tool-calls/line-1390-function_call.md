@@ -1,0 +1,1 @@
+[2026-04-30 11:15:59] Codex: [工具调用] {"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"uv --version\",\"workdir\":\"E:\\\\CodeProgram\\\\AI_Project\\\\openhanako\",\"yield_time_ms\":1000,\"max_output_tokens\":2000}","call_id":"call_4VqaFKSiNq63X1rookHtUeA6"}

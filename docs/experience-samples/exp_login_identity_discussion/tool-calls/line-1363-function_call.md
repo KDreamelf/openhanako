@@ -1,0 +1,1 @@
+[2026-04-30 11:15:08] Codex: [工具调用] {"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"Get-ChildItem -Force benchmarks,tools -ErrorAction SilentlyContinue | Select-Object FullName,Mode,Name\",\"workdir\":\"E:\\\\CodeProgram\\\\AI_Project\\\\openhanako\",\"yield_time_ms\":1000,\"max_output_tokens\":8000}","call_id":"call_tSFmnVIgEivEEmQdjLLhg2Oo"}

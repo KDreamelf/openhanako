@@ -1,0 +1,1 @@
+[2026-04-30 11:24:00] Codex: [工具调用] {"type":"function_call","name":"write_stdin","arguments":"{\"session_id\":84301,\"chars\":\"\",\"yield_time_ms\":10000,\"max_output_tokens\":12000}","call_id":"call_U5d2qC9QmCSN3m3IsrXiQh1N"}

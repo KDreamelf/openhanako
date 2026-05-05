@@ -1,0 +1,128 @@
+# ============================================================
+# Local agent / workspace state
+# ============================================================
+/.agents/
+/.claude/
+/.codex/
+/.trellis/
+**/.agents/
+**/.claude/
+**/.codex/
+
+# ============================================================
+# OS / editor noise
+# ============================================================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.log
+*.code-workspace
+.idea/
+.vscode/
+
+# ============================================================
+# Temporary notes and generated local material
+# ============================================================
+/2026-*.txt
+/临时资料/
+/screenshots/
+/certs/
+/secrets/
+/deploy-secrets/
+/docs/*.7z
+
+# ============================================================
+# Credentials / local configuration
+# ============================================================
+.env
+.env.*
+config.hcl
+**/config.hcl
+config.local.hcl
+**/config.local.hcl
+credentials.json
+secrets.yaml
+secrets.json
+auth.json
+*.pem
+*.key
+*.p12
+*.crt
+
+# ============================================================
+# JavaScript / frontend dependencies and build output
+# ============================================================
+**/node_modules/
+**/.cache/
+**/.npm-cache/
+**/.vite/
+**/.turbo/
+**/.rsbuild/
+**/.next/
+**/.tanstack/tmp/
+**/dist/
+**/coverage/
+
+# ============================================================
+# Flutter / Dart / Pub
+# ============================================================
+**/doc/api/
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.pub-cache/
+**/.pub/
+**/build/
+build/
+**/ios/Flutter/.last_build_id
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+app.*.symbols
+app.*.map.json
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+
+# Generated Dart files are intentionally not ignored by default.
+# **/*.g.dart
+# **/*.freezed.dart
+# **/*.mocks.dart
+
+# ============================================================
+# Go / native build output
+# ============================================================
+*.exe
+*.test
+bin/
+**/bin/
+data/
+**/data/
+*.db
+*.sqlite
+*.sqlite3
+**/target/
+**/.venv/
+**/venv/
+**/.mypy_cache/
+**/.pytest_cache/
+**/__pycache__/
+*.pdb
+
+# ============================================================
+# Legacy Electron runtime output
+# ============================================================
+legacy-electron/agents/
+legacy-electron/user/
+legacy-electron/inbox/
+legacy-electron/tmp/
+legacy-electron/vendor/
+legacy-electron/devlog/
+legacy-electron/desktop/dist-renderer/
+
+# ============================================================
+# External sibling repository kept only for reference
+# ============================================================
+/master-server/

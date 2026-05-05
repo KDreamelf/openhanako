@@ -1,0 +1,163 @@
+# pubspec.yaml 模板（Flutter 全 Dart 重写 · Option A）
+# 复制到新项目根目录后按需调整版本号
+# 启动 Phase 0 时跑 `flutter pub upgrade --major-versions` 拉最新
+
+name: hanako
+description: Hanako - personal AI agent with memory and soul
+publish_to: none
+version: 600.42.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # ==== 多窗口 & 桌面 ====
+  desktop_multi_window: ^0.2.0       # 主推（leanflutter）
+  window_manager: ^0.4.3             # 与 desktop_multi_window 配合
+  tray_manager: ^0.5.0               # 系统托盘
+  hotkey_manager: ^0.2.3             # 全局快捷键
+  auto_updater: ^1.0.0               # 自动更新（替代 electron-updater）
+  windows_single_instance: ^1.1.0    # Win 单实例锁
+  # 备选: window_manager_plus（若主推插件出严重 bug）
+
+  # ==== 状态管理 & 路由 ====
+  flutter_riverpod: ^2.6.0
+  riverpod_annotation: ^2.6.0
+  go_router: ^14.4.0
+
+  # ==== 不可变模型 ====
+  freezed_annotation: ^2.4.4
+  json_annotation: ^4.9.0
+
+  # ==== 网络 ====
+  dio: ^5.7.0
+  web_socket_channel: ^3.0.1
+  url_launcher: ^6.3.0
+  http: ^1.2.2                       # 备用，OAuth callback server 起 HttpServer 用
+
+  # ==== 数据库（Drift + SQLite）====
+  drift: ^2.21.0
+  sqlite3: ^2.4.0
+  sqlite3_flutter_libs: ^0.5.24      # Win 自带 dll，macOS/Linux 自带 dylib
+
+  # ==== 文件 / 路径 / 配置 ====
+  path: ^1.9.0
+  path_provider: ^2.1.5
+  yaml: ^3.1.2
+  yaml_edit: ^2.2.1                  # 原文修改保留注释（防 N-BUG-7）
+  shared_preferences: ^2.3.3
+  flutter_secure_storage: ^9.2.2     # OAuth token 跨平台安全存储
+
+  # ==== UI / 渲染 ====
+  flutter_markdown: ^0.7.4
+  markdown: ^7.2.2                   # 自定义 inline parser
+  re_editor: ^0.4.0                  # CodeMirror 替代
+  re_highlight: ^0.0.3               # syntax highlighting
+  flutter_svg: ^2.0.10
+  cached_network_image: ^3.4.1
+  lottie: ^3.1.3                     # Splash 动画
+  flutter_native_splash: ^2.4.0      # 冷启动静态画面
+
+  # ==== Markdown 扩展 ====
+  flutter_math_fork: ^0.7.3          # LaTeX 数学公式
+
+  # ==== 文件 / 拖拽 ====
+  super_drag_and_drop: ^0.9.0
+  file_picker: ^8.1.2
+  file_selector: ^1.0.3
+
+  # ==== 内嵌浏览器（Browser 窗口）====
+  desktop_webview_window: ^0.2.3
+
+  # ==== 国际化 ====
+  intl: ^0.19.0
+
+  # ==== 日志 / 工具 ====
+  logger: ^2.4.0
+  collection: ^1.18.0
+
+  # ==== 运行时辅助 ====
+  process_run: ^1.2.0                # 跨平台进程
+  package_info_plus: ^8.1.0
+  device_info_plus: ^11.1.0
+
+  # ==== Bridge / IM ====
+  teledart: ^0.7.0                   # Telegram bot
+
+  # ==== Headless Server (bin/server.dart) ====
+  shelf: ^1.4.1
+  shelf_router: ^1.1.4
+  shelf_web_socket: ^2.0.0
+  shelf_static: ^1.1.3
+
+  # ==== CLI (bin/hanako.dart) ====
+  args: ^2.5.0                       # CLI 命令解析
+  cli_util: ^0.4.2                   # 终端工具
+
+  # ==== 后台任务 / 定时 ====
+  cron: ^0.6.1                       # Desk 自动化
+
+  # ==== 加密 / 签名 / WeCom 加解密 ====
+  crypto: ^3.0.6
+  pointycastle: ^3.9.1               # AES（WeCom 加解密）
+
+  # ==== 文档解析（功能降级版）====
+  excel: ^4.0.6                      # exceljs 替代
+  archive: ^3.6.1                    # DOCX (zip) 解压
+  xml: ^6.5.0                        # DOCX content.xml 解析
+
+  # ==== 网页爬取（duck-duck-scrape 替代）====
+  html: ^0.15.5                      # DDG html 结果解析
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  build_runner: ^2.4.13
+  riverpod_generator: ^2.6.0
+  freezed: ^2.5.7
+  json_serializable: ^6.8.0
+  drift_dev: ^2.21.0
+  custom_lint: ^0.6.7
+  riverpod_lint: ^2.6.0
+  flutter_distributor: ^1.0.0        # 三平台打包工具
+
+flutter:
+  uses-material-design: true
+  generate: true                     # i18n 代码生成
+  assets:
+    - assets/icons/
+    - assets/lottie/
+    - assets/themes/
+
+# ==== 同级 l10n.yaml（单独建文件）====
+# arb-dir: lib/l10n
+# template-arb-file: app_zh.arb
+# output-localization-file: app_localizations.dart
+
+# ==== 同级 build.yaml（控制代码生成顺序）====
+# targets:
+#   $default:
+#     builders:
+#       drift_dev:
+#         enabled: true
+#       freezed:
+#         enabled: true
+#       json_serializable:
+#         enabled: true
+#       riverpod_generator:
+#         enabled: true
+
+# ==== 自定义 lint 规则 ====
+# analysis_options.yaml 中加：
+# custom_lint:
+#   rules:
+#     - flutter_in_core: error      # 自写规则：lib/core/* 禁止 import package:flutter/*

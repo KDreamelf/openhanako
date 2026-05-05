@@ -1,0 +1,1 @@
+[2026-04-30 11:16:20] Codex: [工具调用] {"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"New-Item -ItemType Directory -Force benchmarks\\\\gpu_recovery_bench | Out-Null\",\"workdir\":\"E:\\\\CodeProgram\\\\AI_Project\\\\openhanako\",\"yield_time_ms\":1000,\"max_output_tokens\":2000}","call_id":"call_nph5Hl98SbkXUdD5eebP5jQ4"}

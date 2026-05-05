@@ -1,0 +1,1 @@
+[2026-04-30 11:27:27] 工具: [工具输出] {"type":"web_search_end","call_id":"ws_06a3077dc9ebbedf0169f33c960408819b8d020ca2c5e6eba4","query":"hashcat example hashes PBKDF2-HMAC-SHA512 mode","action":{"type":"search","query":"hashcat example hashes PBKDF2-HMAC-SHA512 mode","queries":["hashcat example hashes PBKDF2-HMAC-SHA512 mode"]}}
