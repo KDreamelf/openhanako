@@ -37,6 +37,8 @@ Thumbs.db
 # ============================================================
 .env
 .env.*
+!.env.example
+!**/.env.example
 config.hcl
 **/config.hcl
 config.local.hcl
@@ -98,8 +100,11 @@ app.*.map.json
 *.test
 bin/
 **/bin/
-data/
-**/data/
+/data/
+/legacy-p2p-authority/data/
+/ph01-ai-gateway/data/
+/ph01-backend/data/
+/ph01-experience-hub/data/
 *.db
 *.sqlite
 *.sqlite3
