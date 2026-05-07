@@ -15,6 +15,16 @@ import { getUserModels, getUserGroups } from '@/lib/api'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { cn } from '@/lib/utils'
 import { useStatus } from '@/hooks/use-status'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import {
   Collapsible,
@@ -136,6 +146,9 @@ export function ApiKeysMutateDrawer({
   const { status } = useStatus()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [validationSubmitAttempts, setValidationSubmitAttempts] = useState(0)
+  const [validationDialogOpen, setValidationDialogOpen] = useState(false)
+  const [validationMessage, setValidationMessage] = useState('')
   const defaultUseAutoGroup = status?.default_use_auto_group === true
 
   // Fetch models
@@ -211,6 +224,8 @@ export function ApiKeysMutateDrawer({
           id: currentRow.id,
         })
         if (result.success) {
+          setValidationSubmitAttempts(0)
+          setValidationMessage('')
           toast.success(t(SUCCESS_MESSAGES.API_KEY_UPDATED))
           onOpenChange(false)
           triggerRefresh()
@@ -239,6 +254,8 @@ export function ApiKeysMutateDrawer({
         }
 
         if (successCount > 0) {
+          setValidationSubmitAttempts(0)
+          setValidationMessage('')
           toast.success(
             t('Successfully created {{count}} API Key(s)', {
               count: successCount,
@@ -257,11 +274,28 @@ export function ApiKeysMutateDrawer({
 
   const onInvalidSubmit = (errors: FieldErrors<ApiKeyFormValues>) => {
     const message = getFirstFormErrorMessage(errors)
-    toast.error(
-      message
-        ? `${t('Please check the form fields')}: ${t(message)}`
-        : t('Please check the form fields')
-    )
+    const translatedMessage = message
+      ? t(message)
+      : t('Unknown validation error')
+    const fullMessage = `${t('Please check the form fields')}: ${translatedMessage}`
+
+    setValidationMessage(fullMessage)
+
+    if (validationSubmitAttempts === 0) {
+      toast.error(fullMessage)
+    } else {
+      setValidationDialogOpen(true)
+    }
+
+    setValidationSubmitAttempts((attempts) => attempts + 1)
+  }
+
+  const submitForm = form.handleSubmit(onSubmit, onInvalidSubmit)
+
+  const forceSubmit = () => {
+    setValidationDialogOpen(false)
+    setValidationSubmitAttempts(0)
+    onSubmit(form.getValues() as ApiKeyFormValues)
   }
 
   const handleSetExpiry = (months: number, days: number, hours: number) => {
@@ -295,6 +329,9 @@ export function ApiKeysMutateDrawer({
         onOpenChange(v)
         if (!v) {
           form.reset()
+          setValidationSubmitAttempts(0)
+          setValidationDialogOpen(false)
+          setValidationMessage('')
         }
       }}
     >
@@ -316,7 +353,7 @@ export function ApiKeysMutateDrawer({
         <Form {...form}>
           <form
             id='api-key-form'
-            onSubmit={form.handleSubmit(onSubmit, onInvalidSubmit)}
+            onSubmit={submitForm}
             className='min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-3 py-3 sm:space-y-4 sm:px-4 sm:py-4'
           >
             <ApiKeyFormSection
@@ -632,14 +669,47 @@ export function ApiKeysMutateDrawer({
             </Button>
           </SheetClose>
           <Button
-            form='api-key-form'
-            type='submit'
+            type='button'
+            onClick={submitForm}
             disabled={isSubmitting}
             className='w-full sm:w-auto'
           >
             {isSubmitting ? t('Saving...') : t('Save changes')}
           </Button>
         </SheetFooter>
+        <AlertDialog
+          open={validationDialogOpen}
+          onOpenChange={setValidationDialogOpen}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                {t('Form submission blocked')}
+              </AlertDialogTitle>
+              <AlertDialogDescription asChild>
+                <div className='space-y-3 text-start'>
+                  <p>{t('The frontend validation blocked this submission.')}</p>
+                  <pre className='bg-muted text-foreground max-h-40 overflow-auto rounded-md border p-3 text-xs whitespace-pre-wrap'>
+                    {validationMessage || t('Unknown validation error')}
+                  </pre>
+                  <p>
+                    {t(
+                      'You can force submit to let the backend validate and return the final result.'
+                    )}
+                  </p>
+                </div>
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={isSubmitting}>
+                {t('Cancel')}
+              </AlertDialogCancel>
+              <AlertDialogAction onClick={forceSubmit} disabled={isSubmitting}>
+                {isSubmitting ? t('Saving...') : t('Force submit')}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </SheetContent>
     </Sheet>
   )
