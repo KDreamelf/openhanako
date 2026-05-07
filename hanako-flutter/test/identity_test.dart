@@ -498,6 +498,8 @@ void main() {
       expect(outcome.success, isTrue);
       expect(outcome.identity!.publicKeyHash, originalHash);
       expect(repo.current!.publicKeyHash, originalHash);
+      expect(outcome.usedLlm, isFalse);
+      expect(outcome.hammingDistance, 0);
     });
 
     test('loginWithStory → 确定性恢复失败后回退 LLM 语义解析', () async {
@@ -541,6 +543,8 @@ void main() {
       expect(llmCalls, 1);
       expect(outcome.success, isTrue);
       expect(outcome.identity!.publicKeyHash, reg.identity.publicKeyHash);
+      expect(outcome.usedLlm, isTrue);
+      expect(outcome.hammingDistance, 0);
     });
 
     test('LLM 失败 → fallback=true，账号仍然生成', () async {

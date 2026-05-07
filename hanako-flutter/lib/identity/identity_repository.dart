@@ -227,7 +227,10 @@ class IdentityRepository {
     onProgress,
   }) async {
     if (!parsed.isWellFormed) {
-      return LoginOutcome.malformedMatrix(parsed.rawResponse);
+      return LoginOutcome.malformedMatrix(
+        parsed.rawResponse,
+        usedLlm: parsed.usedLlm,
+      );
     }
 
     setKnownPublicKeyHashes(targetPublicKeyHashes);
@@ -247,6 +250,8 @@ class IdentityRepository {
         attempted: outcome.attempted,
         timedOut: outcome.timedOut,
         elapsedMs: outcome.elapsedMs,
+        hammingDistance: outcome.hammingDistance,
+        usedLlm: parsed.usedLlm,
       );
     }
     final seed = outcome.seed!;
@@ -265,6 +270,8 @@ class IdentityRepository {
       identity,
       attempted: outcome.attempted,
       elapsedMs: outcome.elapsedMs,
+      hammingDistance: outcome.hammingDistance,
+      usedLlm: parsed.usedLlm,
     );
   }
 
@@ -303,6 +310,8 @@ class LoginOutcome {
     this.timedOut = false,
     this.attempted = 0,
     this.elapsedMs = 0,
+    this.hammingDistance = 0,
+    this.usedLlm = false,
     this.rawResponse,
   });
 
@@ -310,24 +319,38 @@ class LoginOutcome {
     HanakoIdentity identity, {
     required int attempted,
     required int elapsedMs,
+    required int hammingDistance,
+    required bool usedLlm,
   }) => LoginOutcome._(
     identity: identity,
     attempted: attempted,
     elapsedMs: elapsedMs,
+    hammingDistance: hammingDistance,
+    usedLlm: usedLlm,
   );
 
-  factory LoginOutcome.malformedMatrix(String rawResponse) =>
-      LoginOutcome._(malformed: true, rawResponse: rawResponse);
+  factory LoginOutcome.malformedMatrix(
+    String rawResponse, {
+    bool usedLlm = false,
+  }) => LoginOutcome._(
+    malformed: true,
+    rawResponse: rawResponse,
+    usedLlm: usedLlm,
+  );
 
   factory LoginOutcome.failed({
     required int attempted,
     required bool timedOut,
     required int elapsedMs,
+    required int hammingDistance,
+    required bool usedLlm,
   }) => LoginOutcome._(
     failed: true,
     attempted: attempted,
     timedOut: timedOut,
     elapsedMs: elapsedMs,
+    hammingDistance: hammingDistance,
+    usedLlm: usedLlm,
   );
 
   final HanakoIdentity? identity;
@@ -338,6 +361,8 @@ class LoginOutcome {
   final bool timedOut;
   final int attempted;
   final int elapsedMs;
+  final int hammingDistance;
+  final bool usedLlm;
 
   /// LLM 原始响应（malformed 时保留供调试）。
   final String? rawResponse;

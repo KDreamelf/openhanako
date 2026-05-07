@@ -48,18 +48,21 @@ class RecoveryOutcome {
     this.seed, {
     required this.attempted,
     required this.elapsedMs,
+    required this.hammingDistance,
   }) : failed = false,
        timedOut = false;
   RecoveryOutcome.failed({
     required this.attempted,
     required this.timedOut,
     required this.elapsedMs,
+    required this.hammingDistance,
   }) : seed = null,
        failed = true;
 
   final MnemonicSeed? seed;
   final int attempted;
   final int elapsedMs;
+  final int hammingDistance;
   final bool failed;
   final bool timedOut;
 
@@ -110,6 +113,7 @@ class Recovery {
         attempted: 0,
         timedOut: false,
         elapsedMs: 0,
+        hammingDistance: 0,
       );
     }
     for (final col in matrix) {
@@ -118,6 +122,7 @@ class Recovery {
           attempted: 0,
           timedOut: false,
           elapsedMs: 0,
+          hammingDistance: 0,
         );
       }
     }
@@ -147,6 +152,7 @@ class Recovery {
           attempted: attemptedCounter.value,
           timedOut: true,
           elapsedMs: elapsed,
+          hammingDistance: d,
         );
       }
       // 进度通知
@@ -174,6 +180,7 @@ class Recovery {
             hit,
             attempted: attemptedCounter.value,
             elapsedMs: sw.elapsedMilliseconds,
+            hammingDistance: d,
           );
         }
         // 假阳性（不太可能，但防一手）：继续搜
@@ -184,6 +191,7 @@ class Recovery {
       attempted: attemptedCounter.value,
       timedOut: sw.elapsedMilliseconds >= hardDeadline.inMilliseconds,
       elapsedMs: sw.elapsedMilliseconds,
+      hammingDistance: dMaxHard,
     );
   }
 

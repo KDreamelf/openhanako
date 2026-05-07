@@ -330,6 +330,9 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
             : '未能恢复当前身份；请检查故事锚点和顺序。',
         attempted: outcome.attempted,
         elapsedMs: outcome.elapsedMs,
+        hammingDistance: outcome.hammingDistance,
+        usedLlm: outcome.usedLlm,
+        score: _memoryAccuracyScore(outcome),
       );
     }
 
@@ -351,6 +354,9 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
           : '验证通过：这段故事可以复原当前身份，并通过云端身份确认。',
       attempted: outcome.attempted,
       elapsedMs: outcome.elapsedMs,
+      hammingDistance: outcome.hammingDistance,
+      usedLlm: outcome.usedLlm,
+      score: _memoryAccuracyScore(outcome),
       publicKeyHash: identity.publicKeyHash,
     );
   }
@@ -1831,12 +1837,47 @@ class _Shortcut {
   final String label;
 }
 
+int _memoryAccuracyScore(LoginOutcome outcome) {
+  if (!outcome.success) return 0;
+  final distance = outcome.hammingDistance.clamp(0, 12).toInt();
+  var score = outcome.usedLlm ? 88 : 100;
+  score -= distance * 7;
+  if (outcome.usedLlm && distance == 0) {
+    score -= 3;
+  }
+  if (outcome.elapsedMs > 15000) {
+    score -= 3;
+  } else if (outcome.elapsedMs > 5000) {
+    score -= 1;
+  }
+  return score.clamp(20, 100).toInt();
+}
+
+String _memoryScoreLabel(int score) {
+  if (score >= 95) return '完美复述';
+  if (score >= 85) return '稳定记忆';
+  if (score >= 70) return '轻微偏差';
+  if (score >= 50) return '需要练习';
+  if (score > 0) return '遗忘边缘';
+  return '未通过';
+}
+
+Color _memoryScoreColor(int score, ColorScheme c) {
+  if (score >= 90) return Colors.green.shade600;
+  if (score >= 75) return Colors.teal.shade600;
+  if (score >= 55) return Colors.orange.shade700;
+  return c.error;
+}
+
 class _StoryVerificationResult {
   const _StoryVerificationResult({
     required this.success,
     required this.message,
     required this.attempted,
     required this.elapsedMs,
+    required this.hammingDistance,
+    required this.usedLlm,
+    required this.score,
     this.publicKeyHash,
   });
 
@@ -1844,6 +1885,9 @@ class _StoryVerificationResult {
   final String message;
   final int attempted;
   final int elapsedMs;
+  final int hammingDistance;
+  final bool usedLlm;
+  final int score;
   final String? publicKeyHash;
 }
 
@@ -1906,6 +1950,7 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
         _result = result;
         _attempted = result.attempted;
         _elapsedMs = result.elapsedMs;
+        _distance = result.hammingDistance;
         _busy = false;
       });
     } catch (e) {
@@ -1962,6 +2007,9 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
                   message: result.message,
                   attempted: result.attempted,
                   elapsedMs: result.elapsedMs,
+                  hammingDistance: result.hammingDistance,
+                  usedLlm: result.usedLlm,
+                  score: result.score,
                   publicKeyHash: result.publicKeyHash,
                 ),
               ],
@@ -1972,6 +2020,9 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
                   message: '验证失败：$_error',
                   attempted: _attempted ?? 0,
                   elapsedMs: _elapsedMs ?? 0,
+                  hammingDistance: _distance ?? 0,
+                  usedLlm: false,
+                  score: 0,
                 ),
               ],
             ],
@@ -2018,6 +2069,9 @@ class _VerificationStatusBox extends StatelessWidget {
     required this.message,
     required this.attempted,
     required this.elapsedMs,
+    required this.hammingDistance,
+    required this.usedLlm,
+    required this.score,
     this.publicKeyHash,
   });
 
@@ -2025,13 +2079,16 @@ class _VerificationStatusBox extends StatelessWidget {
   final String message;
   final int attempted;
   final int elapsedMs;
+  final int hammingDistance;
+  final bool usedLlm;
+  final int score;
   final String? publicKeyHash;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final c = theme.colorScheme;
-    final color = success ? c.primary : c.error;
+    final color = _memoryScoreColor(score, c);
     final hash = publicKeyHash;
     return Container(
       width: double.infinity,
@@ -2045,6 +2102,42 @@ class _VerificationStatusBox extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '记忆准确度',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: c.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              Text(
+                '$score',
+                style: theme.textTheme.headlineSmall?.copyWith(
+                  color: color,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              Text(
+                '/100',
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: c.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              value: score / 100,
+              minHeight: 10,
+              color: color,
+              backgroundColor: color.withValues(alpha: 0.14),
+            ),
+          ),
+          const SizedBox(height: 10),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -2064,7 +2157,13 @@ class _VerificationStatusBox extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Text(
-            '尝试 $attempted 次 · ${(elapsedMs / 1000).toStringAsFixed(1)} 秒',
+            [
+              _memoryScoreLabel(score),
+              usedLlm ? 'LLM 语义恢复' : '确定性恢复',
+              '距离 $hammingDistance',
+              '尝试 $attempted 次',
+              '${(elapsedMs / 1000).toStringAsFixed(1)} 秒',
+            ].join(' · '),
             style: theme.textTheme.bodySmall?.copyWith(
               color: c.onSurfaceVariant,
             ),
