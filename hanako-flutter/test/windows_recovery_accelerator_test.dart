@@ -31,5 +31,30 @@ void main() {
     expect(outcome.publicKeyHex, pair.publicKeyHex);
     expect(outcome.hammingDistance, 0);
     expect(outcome.backend, startsWith('cuda:'));
+
+    var progressEvents = 0;
+    final progressOutcome = await accelerator.tryRecover(
+      matrix: [
+        for (final id in ids)
+          [
+            id,
+            (id + 1) % hanakoWordlistSize,
+            (id + 2) % hanakoWordlistSize,
+            (id + 3) % hanakoWordlistSize,
+            (id + 4) % hanakoWordlistSize,
+          ],
+      ],
+      targetPublicKeyHashes: {
+        '0000000000000000000000000000000000000000000000000000000000000000',
+      },
+      dMaxHard: 4,
+      hardDeadline: const Duration(seconds: 30),
+      workerCount: 1,
+      onProgress: (attempted, elapsedMs, currentHammingDistance) {
+        progressEvents++;
+      },
+    );
+    expect(progressOutcome.found, isFalse);
+    expect(progressEvents, greaterThan(0));
   });
 }

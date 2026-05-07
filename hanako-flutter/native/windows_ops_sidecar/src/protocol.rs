@@ -17,6 +17,8 @@ pub struct RpcRequest {
 pub struct RpcResponse {
     pub id: u64,
     pub ok: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub progress: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -31,14 +33,20 @@ pub struct RpcError {
     pub details: Option<Value>,
 }
 
-pub fn dispatch(line: &str) -> RpcResponse {
+pub fn dispatch_with_progress<F>(line: &str, emit_progress: &mut F) -> RpcResponse
+where
+    F: FnMut(u64, Value),
+{
     match serde_json::from_str::<RpcRequest>(line) {
-        Ok(request) => handle_request(request),
+        Ok(request) => handle_request(request, emit_progress),
         Err(err) => error(0, "bad_request", format!("无法解析请求: {err}"), None),
     }
 }
 
-fn handle_request(request: RpcRequest) -> RpcResponse {
+fn handle_request<F>(request: RpcRequest, emit_progress: &mut F) -> RpcResponse
+where
+    F: FnMut(u64, Value),
+{
     match request.method.as_str() {
         "ping" => ok(
             request.id,
@@ -161,7 +169,9 @@ fn handle_request(request: RpcRequest) -> RpcResponse {
                 Some(json!({"method": "recovery.status"})),
             ),
         },
-        "recovery.search" => match recovery::search_request(&request.params) {
+        "recovery.search" => match recovery::search_request(&request.params, &mut |progress| {
+            emit_progress(request.id, progress);
+        }) {
             Ok(result) => ok(request.id, result),
             Err(err) => error(
                 request.id,
@@ -183,6 +193,7 @@ fn ok(id: u64, result: Value) -> RpcResponse {
     RpcResponse {
         id,
         ok: true,
+        progress: false,
         result: Some(result),
         error: None,
     }
@@ -192,6 +203,7 @@ fn error(id: u64, code: &str, message: String, details: Option<Value>) -> RpcRes
     RpcResponse {
         id,
         ok: false,
+        progress: false,
         result: None,
         error: Some(RpcError {
             code: code.to_owned(),
@@ -199,6 +211,20 @@ fn error(id: u64, code: &str, message: String, details: Option<Value>) -> RpcRes
             details,
         }),
     }
+}
+
+pub fn progress(id: u64, result: Value) -> RpcResponse {
+    RpcResponse {
+        id,
+        ok: true,
+        progress: true,
+        result: Some(result),
+        error: None,
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub fn encode_png_base64(bytes: &[u8]) -> String {

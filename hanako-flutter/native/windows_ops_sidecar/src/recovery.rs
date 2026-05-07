@@ -3,7 +3,6 @@ use anyhow::{Context, Result, bail};
 use k256::SecretKey;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use pbkdf2::pbkdf2_hmac;
-use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -16,7 +15,8 @@ use std::time::{Duration, Instant};
 const MNEMONIC_LEN: usize = 12;
 const ENTROPY_BYTES: usize = 16;
 const PBKDF2_ROUNDS: u32 = 2048;
-const CUDA_BATCH_SIZE: usize = 1024;
+const CUDA_BATCH_SIZE: usize = 8192;
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Deserialize)]
 struct RecoverySearchRequest {
@@ -63,22 +63,19 @@ pub fn status_request(_params: &Value) -> Result<Value> {
     }))
 }
 
-pub fn search_request(params: &Value) -> Result<Value> {
+pub fn search_request<F>(params: &Value, on_progress: &mut F) -> Result<Value>
+where
+    F: FnMut(Value),
+{
     let request: RecoverySearchRequest = serde_json::from_value(params.clone())
         .context("recovery.search 请求参数应为 JSON object")?;
     validate_request(&request)?;
+    let _ = request.worker_count;
 
-    let result = if let Ok(result) = search_cuda(&request) {
+    let result = if let Ok(result) = search_cuda(&request, on_progress) {
         result
-    } else if let Some(worker_count) = request.worker_count {
-        let threads = worker_count.max(1);
-        ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .context("创建恢复搜索线程池失败")?
-            .install(|| search_cpu(&request))
     } else {
-        search_cpu(&request)
+        search_cpu(&request, on_progress)
     };
 
     Ok(json!({
@@ -137,9 +134,13 @@ fn validate_request(request: &RecoverySearchRequest) -> Result<()> {
     Ok(())
 }
 
-fn search_cuda(request: &RecoverySearchRequest) -> Result<SearchResult> {
+fn search_cuda<F>(request: &RecoverySearchRequest, on_progress: &mut F) -> Result<SearchResult>
+where
+    F: FnMut(Value),
+{
     let backend = CudaBackend::new()?;
     let started = Instant::now();
+    let mut progress = ProgressReporter::new(&started, on_progress);
     let deadline = Duration::from_millis(request.deadline_ms);
     let k = request.matrix[0].len();
     let base_ids = request
@@ -159,9 +160,11 @@ fn search_cuda(request: &RecoverySearchRequest) -> Result<SearchResult> {
     let mut last_distance = 0;
     let mut batch_ids = Vec::<Vec<u16>>::with_capacity(CUDA_BATCH_SIZE);
     let mut batch_mnemonics = Vec::<Vec<u8>>::with_capacity(CUDA_BATCH_SIZE);
+    progress.emit(attempted, last_distance, true);
 
     for d in 0..=request.d_max_hard {
         last_distance = d;
+        progress.emit(attempted, last_distance, true);
         if started.elapsed() >= deadline {
             timed_out = true;
             break;
@@ -194,6 +197,7 @@ fn search_cuda(request: &RecoverySearchRequest) -> Result<SearchResult> {
                     s /= rank_base;
                 }
                 attempted += 1;
+                progress.emit(attempted, d, false);
 
                 if ids_to_entropy(&ids).is_none() {
                     continue;
@@ -213,6 +217,7 @@ fn search_cuda(request: &RecoverySearchRequest) -> Result<SearchResult> {
                     if found.is_some() {
                         break;
                     }
+                    progress.emit(attempted, d, true);
                 }
             }
             if timed_out || found.is_some() {
@@ -228,6 +233,7 @@ fn search_cuda(request: &RecoverySearchRequest) -> Result<SearchResult> {
                 &mut batch_ids,
                 &mut batch_mnemonics,
             )?;
+            progress.emit(attempted, d, true);
         }
         if timed_out || found.is_some() {
             break;
@@ -256,29 +262,32 @@ fn flush_cuda_batch(
     batch_mnemonics: &mut Vec<Vec<u8>>,
 ) -> Result<Option<FoundSeed>> {
     let seeds = backend.pbkdf2_batch(batch_mnemonics)?;
-    for (ids, seed) in batch_ids.iter().zip(seeds.iter()) {
-        let Some((public_key_hex, public_key_hash)) = derive_public_key_from_seed(seed) else {
-            continue;
-        };
-        if target_hashes.contains(&public_key_hash) {
-            let hit = FoundSeed {
+    let hit = batch_ids
+        .par_iter()
+        .zip(seeds.par_iter())
+        .find_map_any(|(ids, seed)| {
+            let (public_key_hex, public_key_hash) = derive_public_key_from_seed(seed)?;
+            if !target_hashes.contains(&public_key_hash) {
+                return None;
+            }
+            Some(FoundSeed {
                 ids: ids.clone(),
                 public_key_hex,
                 public_key_hash,
                 hamming_distance,
-            };
-            batch_ids.clear();
-            batch_mnemonics.clear();
-            return Ok(Some(hit));
-        }
-    }
+            })
+        });
     batch_ids.clear();
     batch_mnemonics.clear();
-    Ok(None)
+    Ok(hit)
 }
 
-fn search_cpu(request: &RecoverySearchRequest) -> SearchResult {
+fn search_cpu<F>(request: &RecoverySearchRequest, on_progress: &mut F) -> SearchResult
+where
+    F: FnMut(Value),
+{
     let started = Instant::now();
+    let mut progress = ProgressReporter::new(&started, on_progress);
     let deadline = Duration::from_millis(request.deadline_ms);
     let k = request.matrix[0].len();
     let base_ids = request
@@ -296,9 +305,11 @@ fn search_cpu(request: &RecoverySearchRequest) -> SearchResult {
     let timed_out = Arc::new(AtomicBool::new(false));
     let found = Arc::new(Mutex::new(None::<FoundSeed>));
     let mut last_distance = 0;
+    progress.emit(0, 0, true);
 
     for d in 0..=request.d_max_hard {
         last_distance = d;
+        progress.emit(attempted.load(Ordering::Relaxed), d, true);
         if started.elapsed() >= deadline {
             timed_out.store(true, Ordering::Relaxed);
             break;
@@ -366,6 +377,7 @@ fn search_cpu(request: &RecoverySearchRequest) -> SearchResult {
         if timed_out.load(Ordering::Relaxed) {
             break;
         }
+        progress.emit(attempted.load(Ordering::Relaxed), d, true);
     }
 
     SearchResult {
@@ -375,6 +387,40 @@ fn search_cpu(request: &RecoverySearchRequest) -> SearchResult {
         elapsed_ms: started.elapsed().as_millis(),
         hamming_distance: last_distance,
         timed_out: timed_out.load(Ordering::Relaxed),
+    }
+}
+
+struct ProgressReporter<'a, F>
+where
+    F: FnMut(Value),
+{
+    started: &'a Instant,
+    last_emit: Instant,
+    on_progress: &'a mut F,
+}
+
+impl<'a, F> ProgressReporter<'a, F>
+where
+    F: FnMut(Value),
+{
+    fn new(started: &'a Instant, on_progress: &'a mut F) -> Self {
+        Self {
+            started,
+            last_emit: Instant::now() - PROGRESS_EMIT_INTERVAL,
+            on_progress,
+        }
+    }
+
+    fn emit(&mut self, attempted: u64, hamming_distance: usize, force: bool) {
+        if !force && self.last_emit.elapsed() < PROGRESS_EMIT_INTERVAL {
+            return;
+        }
+        (self.on_progress)(json!({
+            "attempted": attempted,
+            "elapsed_ms": self.started.elapsed().as_millis(),
+            "hamming_distance": hamming_distance,
+        }));
+        self.last_emit = Instant::now();
     }
 }
 
@@ -520,7 +566,8 @@ mod tests {
             worker_count: Some(1),
         };
 
-        let result = search_cpu(&request);
+        let mut noop = |_| {};
+        let result = search_cpu(&request, &mut noop);
 
         let hit = result.found.expect("rank-0 matrix should be found");
         assert_eq!(hit.ids, ids);
@@ -554,12 +601,101 @@ mod tests {
             worker_count: Some(2),
         };
 
-        let result = search_cpu(&request);
+        let mut noop = |_| {};
+        let result = search_cpu(&request, &mut noop);
 
         let hit = result.found.expect("D=2 matrix should be found");
         assert_eq!(hit.ids, ids);
         assert_eq!(hit.hamming_distance, 2);
         assert!(!result.timed_out);
+    }
+
+    #[test]
+    fn recovery_search_reports_progress() {
+        let wordlist = test_wordlist();
+        let ids = first_valid_ids();
+        let matrix = ids
+            .iter()
+            .map(|id| vec![*id, (*id + 1) % 2048, (*id + 2) % 2048])
+            .collect();
+        let request = RecoverySearchRequest {
+            matrix,
+            wordlist,
+            target_hashes: vec![
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ],
+            d_max_hard: 2,
+            deadline_ms: 30_000,
+            worker_count: Some(2),
+        };
+
+        let mut progress_count = 0usize;
+        let result = search_cpu(&request, &mut |_| {
+            progress_count += 1;
+        });
+
+        assert!(result.found.is_none());
+        assert!(progress_count > 0);
+    }
+
+    #[test]
+    fn cuda_recovery_search_reports_progress_when_available() {
+        if !CudaBackend::status().available {
+            return;
+        }
+        let wordlist = test_wordlist();
+        let ids = first_valid_ids();
+        let matrix = ids
+            .iter()
+            .map(|id| vec![*id, (*id + 1) % 2048, (*id + 2) % 2048])
+            .collect();
+        let request = RecoverySearchRequest {
+            matrix,
+            wordlist,
+            target_hashes: vec![
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ],
+            d_max_hard: 2,
+            deadline_ms: 30_000,
+            worker_count: Some(2),
+        };
+
+        let mut progress_count = 0usize;
+        let result = search_cuda(&request, &mut |_| {
+            progress_count += 1;
+        })
+        .expect("cuda search should run when status is available");
+
+        assert!(result.found.is_none());
+        assert!(progress_count > 0);
+    }
+
+    #[test]
+    fn recovery_search_request_reports_progress() {
+        let wordlist = test_wordlist();
+        let ids = first_valid_ids();
+        let matrix = ids
+            .iter()
+            .map(|id| vec![*id, (*id + 1) % 2048, (*id + 2) % 2048])
+            .collect::<Vec<_>>();
+        let params = json!({
+            "matrix": matrix,
+            "wordlist": wordlist,
+            "target_hashes": [
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            ],
+            "d_max_hard": 2,
+            "deadline_ms": 30_000
+        });
+
+        let mut progress_count = 0usize;
+        let result = search_request(&params, &mut |_| {
+            progress_count += 1;
+        })
+        .expect("search request should run");
+
+        assert_eq!(result["found"], false);
+        assert!(progress_count > 0);
     }
 
     fn test_wordlist() -> Vec<String> {

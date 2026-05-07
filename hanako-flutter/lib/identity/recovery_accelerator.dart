@@ -29,5 +29,7 @@ abstract class RecoveryAccelerator {
     required int dMaxHard,
     required Duration hardDeadline,
     int? workerCount,
+    void Function(int attempted, int elapsedMs, int currentHammingDistance)?
+    onProgress,
   });
 }

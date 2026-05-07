@@ -25,7 +25,16 @@ fn main() -> Result<()> {
             continue;
         }
 
-        let response = protocol::dispatch(&line);
+        let response = protocol::dispatch_with_progress(&line, &mut |id, result| {
+            let response = protocol::progress(id, result);
+            match serde_json::to_string(&response) {
+                Ok(payload) => {
+                    let _ = writeln!(stdout, "{payload}");
+                    let _ = stdout.flush();
+                }
+                Err(err) => eprintln!("progress encode failed: {err}"),
+            }
+        });
         let payload = serde_json::to_string(&response)?;
         writeln!(stdout, "{payload}")?;
         stdout.flush()?;

@@ -206,13 +206,12 @@ void main() {
 
     test('StoryParser 默认第一阶段输出 top-5 矩阵', () async {
       final parser = StoryParser(
-        caller:
-            ({
-              required String systemPrompt,
-              required String userPrompt,
-              int? maxTokens,
-            }) async =>
-                '{"columns":[[1,2,3,4,5],[6,7,8,9,10],[11,12,13,14,15],[16,17,18,19,20],[21,22,23,24,25],[26,27,28,29,30],[31,32,33,34,35],[36,37,38,39,40],[41,42,43,44,45],[46,47,48,49,50],[51,52,53,54,55],[56,57,58,59,60]]}',
+        caller: _semanticCaller(
+          () => [
+            for (var row = 0; row < 12; row++)
+              [row * 5 + 1, row * 5 + 2, row * 5 + 3, row * 5 + 4, row * 5 + 5],
+          ],
+        ),
       );
 
       final parsed = await parser.parse('测试故事');
@@ -221,8 +220,8 @@ void main() {
       expect(parsed.columns.first, [1, 2, 3, 4, 5]);
     });
 
-    test('StoryParser 会把矩阵行数错误反馈给 LLM 重试', () async {
-      var calls = 0;
+    test('StoryParser 会把锚点数量错误反馈给 LLM 重试', () async {
+      var anchorCalls = 0;
       final parser = StoryParser(
         caller:
             ({
@@ -230,30 +229,29 @@ void main() {
               required String userPrompt,
               int? maxTokens,
             }) async {
-              calls++;
-              if (calls == 1) {
+              if (systemPrompt.contains('锚点提取器')) {
+                anchorCalls++;
+              }
+              if (anchorCalls == 1) {
                 return jsonEncode({
-                  'columns': [
-                    for (var row = 0; row < 14; row++)
-                      [row, row + 1, row + 2, row + 3, row + 4],
-                  ],
+                  'anchors': [for (var row = 0; row < 14; row++) '锚$row'],
                 });
               }
-              expect(systemPrompt, contains('语义匹配器'));
-              expect(userPrompt, contains('不符合协议'));
-              expect(userPrompt, contains('你输出了 14 行'));
-              expect(userPrompt, contains('不是让程序替你裁剪矩阵'));
-              return jsonEncode({
-                'columns': [
-                  for (var row = 0; row < 12; row++) List.filled(5, row),
-                ],
-              });
+              if (anchorCalls == 2 && systemPrompt.contains('锚点提取器')) {
+                expect(userPrompt, contains('不符合协议'));
+                expect(userPrompt, contains('你输出了 14 个'));
+                expect(userPrompt, contains('重新判断 12 个记忆锚点'));
+                return jsonEncode({
+                  'anchors': [for (var row = 0; row < 12; row++) '锚$row'],
+                });
+              }
+              return jsonEncode({'candidates': List.filled(5, 0)});
             },
       );
 
       final parsed = await parser.parse('多出背景词的复述故事');
 
-      expect(calls, 2);
+      expect(anchorCalls, 2);
       expect(parsed.isWellFormed, isTrue);
       expect(parsed.columns, hasLength(12));
       expect(parsed.columns.first, List.filled(5, 0));
@@ -320,15 +318,13 @@ void main() {
       final words = hanakoWordlist.take(13).toList(growable: false);
       var called = false;
       final parser = StoryParser(
-        caller:
-            ({
-              required String systemPrompt,
-              required String userPrompt,
-              int? maxTokens,
-            }) async {
-              called = true;
-              return '{"columns":[[1,2],[3,4],[5,6],[7,8],[9,10],[11,12],[13,14],[15,16],[17,18],[19,20],[21,22],[23,24]]}';
-            },
+        caller: _semanticCaller(
+          () => [
+            for (var row = 0; row < 12; row++)
+              [row * 2 + 1, row * 2 + 2, row * 2 + 1, row * 2 + 1, row * 2 + 1],
+          ],
+          onCall: (systemPrompt, userPrompt) => called = true,
+        ),
       );
 
       final parsed = await parser.parse(words.join('，'));
@@ -342,15 +338,13 @@ void main() {
       final words = hanakoWordlist.take(12).toList(growable: false);
       var called = false;
       final parser = StoryParser(
-        caller:
-            ({
-              required String systemPrompt,
-              required String userPrompt,
-              int? maxTokens,
-            }) async {
-              called = true;
-              return '{"columns":[[1,2],[3,4],[5,6],[7,8],[9,10],[11,12],[13,14],[15,16],[17,18],[19,20],[21,22],[23,24]]}';
-            },
+        caller: _semanticCaller(
+          () => [
+            for (var row = 0; row < 12; row++)
+              [row * 2 + 1, row * 2 + 2, row * 2 + 1, row * 2 + 1, row * 2 + 1],
+          ],
+          onCall: (systemPrompt, userPrompt) => called = true,
+        ),
       );
 
       final story = [
@@ -368,13 +362,12 @@ void main() {
     test('StoryParser 可为 RFA 深度恢复显式输出 top-3 矩阵', () async {
       final parser = StoryParser(
         candidatesPerColumn: 3,
-        caller:
-            ({
-              required String systemPrompt,
-              required String userPrompt,
-              int? maxTokens,
-            }) async =>
-                '{"columns":[[1,2,3],[4,5,6],[7,8,9],[10,11,12],[13,14,15],[16,17,18],[19,20,21],[22,23,24],[25,26,27],[28,29,30],[31,32,33],[34,35,36]]}',
+        caller: _semanticCaller(
+          () => [
+            for (var row = 0; row < 12; row++)
+              [row * 3 + 1, row * 3 + 2, row * 3 + 3],
+          ],
+        ),
       );
 
       final parsed = await parser.parse('测试故事');
@@ -562,7 +555,7 @@ void main() {
       expect(outcome.parsedColumns.first, [idByWord(reg.words.first)]);
     });
 
-    test('loginWithStory → 优先使用恢复加速后端', () async {
+    test('loginWithStory → 精确恢复快速路径不走恢复加速后端', () async {
       var targetIds = <int>[];
       final accelerator = _FakeRecoveryAccelerator(() => targetIds);
       final repo2 = IdentityRepository(
@@ -582,11 +575,11 @@ void main() {
         hardDeadline: const Duration(seconds: 5),
       );
 
-      expect(accelerator.calls, 1);
+      expect(accelerator.calls, 0);
       expect(outcome.success, isTrue);
       expect(outcome.identity!.publicKeyHash, reg.identity.publicKeyHash);
-      expect(outcome.attempted, 7);
-      expect(accelerator.lastDMaxHard, 0);
+      expect(outcome.hammingDistance, 0);
+      expect(accelerator.lastDMaxHard, isNull);
     });
 
     test('loginWithStory → top-5 语义矩阵由时间预算控制搜索深度', () async {
@@ -596,16 +589,9 @@ void main() {
         keystore: FileSecureKeystore(hanaHome: tmp),
         composer: repo.composer,
         parser: StoryParser(
-          caller:
-              ({
-                required String systemPrompt,
-                required String userPrompt,
-                int? maxTokens,
-              }) async {
-                return jsonEncode({
-                  'columns': [for (final id in targetIds) List.filled(5, id)],
-                });
-              },
+          caller: _semanticCaller(
+            () => [for (final id in targetIds) List.filled(5, id)],
+          ),
         ),
         recoveryAccelerator: accelerator,
       );
@@ -627,25 +613,20 @@ void main() {
     });
 
     test('loginWithStory → 确定性恢复失败后回退 LLM 语义解析', () async {
-      var llmCalls = 0;
+      var anchorCalls = 0;
       var targetIds = <int>[];
       final repo2 = IdentityRepository(
         keystore: FileSecureKeystore(hanaHome: tmp),
         composer: repo.composer,
         parser: StoryParser(
-          caller:
-              ({
-                required String systemPrompt,
-                required String userPrompt,
-                int? maxTokens,
-              }) async {
-                llmCalls++;
-                return jsonEncode({
-                  'columns': [
-                    for (final id in targetIds) [id, id],
-                  ],
-                });
-              },
+          caller: _semanticCaller(
+            () => [for (final id in targetIds) List.filled(5, id)],
+            onCall: (systemPrompt, _) {
+              if (systemPrompt.contains('锚点提取器')) {
+                anchorCalls++;
+              }
+            },
+          ),
         ),
       );
 
@@ -664,7 +645,7 @@ void main() {
         hardDeadline: const Duration(seconds: 5),
       );
 
-      expect(llmCalls, 1);
+      expect(anchorCalls, 1);
       expect(outcome.success, isTrue);
       expect(outcome.identity!.publicKeyHash, reg.identity.publicKeyHash);
       expect(outcome.usedLlm, isTrue);
@@ -695,6 +676,30 @@ void main() {
   });
 }
 
+StoryLlmCaller _semanticCaller(
+  List<List<int>> Function() rows, {
+  void Function(String systemPrompt, String userPrompt)? onCall,
+}) {
+  var nextRow = 0;
+  return ({
+    required String systemPrompt,
+    required String userPrompt,
+    int? maxTokens,
+  }) async {
+    onCall?.call(systemPrompt, userPrompt);
+    if (systemPrompt.contains('锚点提取器')) {
+      nextRow = 0;
+      return jsonEncode({
+        'anchors': [for (var row = 0; row < 12; row++) '锚$row'],
+      });
+    }
+    final matrix = rows();
+    final row = matrix[nextRow % matrix.length];
+    nextRow++;
+    return jsonEncode({'candidates': row});
+  };
+}
+
 class _FakeRecoveryAccelerator implements RecoveryAccelerator {
   _FakeRecoveryAccelerator(this._ids);
 
@@ -709,9 +714,12 @@ class _FakeRecoveryAccelerator implements RecoveryAccelerator {
     required int dMaxHard,
     required Duration hardDeadline,
     int? workerCount,
+    void Function(int attempted, int elapsedMs, int currentHammingDistance)?
+    onProgress,
   }) async {
     calls++;
     lastDMaxHard = dMaxHard;
+    onProgress?.call(3, 5, 0);
     final ids = _ids();
     final seed = tryMnemonicFromIds(ids)!;
     final pair = HanakoKeyPair.fromPrivateKeyBytes(seed.privateKeyBytes);

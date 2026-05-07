@@ -305,8 +305,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
 
   Future<_StoryVerificationResult> _runStoryRecovery(
     String story,
-    void Function(int attempted, int elapsedMs, int currentHammingDistance)
-    onProgress,
+    void Function(StoryRecoveryProgress progress) onProgress,
   ) async {
     final eng = ref.read(engineProvider);
     final repo = ref.read(identityRepositoryProvider);
@@ -317,7 +316,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       storyOrWords: story,
       softDeadline: const Duration(minutes: 5),
       hardDeadline: const Duration(minutes: 10),
-      onProgress: onProgress,
+      onRecoveryProgress: onProgress,
     );
     ref.read(identityRevisionProvider.notifier).state++;
     if (!outcome.success) {
@@ -335,6 +334,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
         score: _memoryAccuracyScore(outcome),
         candidateMatrix: outcome.parsedColumns,
         candidatesPerColumn: outcome.candidatesPerColumn,
+        anchors: outcome.anchors,
       );
     }
 
@@ -362,6 +362,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       publicKeyHash: identity.publicKeyHash,
       candidateMatrix: outcome.parsedColumns,
       candidatesPerColumn: outcome.candidatesPerColumn,
+      anchors: outcome.anchors,
     );
   }
 
@@ -1884,6 +1885,7 @@ class _StoryVerificationResult {
     required this.score,
     required this.candidateMatrix,
     required this.candidatesPerColumn,
+    required this.anchors,
     this.publicKeyHash,
   });
 
@@ -1896,6 +1898,7 @@ class _StoryVerificationResult {
   final int score;
   final List<List<int>> candidateMatrix;
   final int candidatesPerColumn;
+  final List<String> anchors;
   final String? publicKeyHash;
 }
 
@@ -1904,8 +1907,7 @@ class _StoryVerificationDialog extends StatefulWidget {
 
   final Future<_StoryVerificationResult> Function(
     String story,
-    void Function(int attempted, int elapsedMs, int currentHammingDistance)
-    onProgress,
+    void Function(StoryRecoveryProgress progress) onProgress,
   )
   onVerify;
 
@@ -1919,9 +1921,14 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
   bool _busy = false;
   _StoryVerificationResult? _result;
   String? _error;
+  StoryRecoveryProgressStage? _phase;
   int? _attempted;
   int? _elapsedMs;
   int? _distance;
+  List<List<int>> _liveMatrix = const [];
+  List<String> _liveAnchors = const [];
+  int _liveCandidatesPerColumn = 0;
+  bool _liveUsedLlm = false;
 
   @override
   void dispose() {
@@ -1936,21 +1943,35 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
       _busy = true;
       _result = null;
       _error = null;
+      _phase = null;
       _attempted = null;
       _elapsedMs = null;
       _distance = null;
+      _liveMatrix = const [];
+      _liveAnchors = const [];
+      _liveCandidatesPerColumn = 0;
+      _liveUsedLlm = false;
     });
     try {
-      final result = await widget.onVerify(story, (
-        attempted,
-        elapsedMs,
-        currentHammingDistance,
-      ) {
+      final result = await widget.onVerify(story, (progress) {
         if (!mounted) return;
         setState(() {
-          _attempted = attempted;
-          _elapsedMs = elapsedMs;
-          _distance = currentHammingDistance;
+          _phase = progress.stage;
+          switch (progress.stage) {
+            case StoryRecoveryProgressStage.aiSemanticAnalysis:
+              break;
+            case StoryRecoveryProgressStage.matrixReady:
+              _liveMatrix = progress.columns;
+              _liveAnchors = progress.anchors;
+              _liveCandidatesPerColumn = progress.candidatesPerColumn;
+              _liveUsedLlm = progress.usedLlm;
+              break;
+            case StoryRecoveryProgressStage.matrixRecovery:
+              _attempted = progress.attempted;
+              _elapsedMs = progress.elapsedMs;
+              _distance = progress.currentHammingDistance;
+              break;
+          }
         });
       });
       if (!mounted) return;
@@ -1959,6 +1980,10 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
         _attempted = result.attempted;
         _elapsedMs = result.elapsedMs;
         _distance = result.hammingDistance;
+        _liveMatrix = result.candidateMatrix;
+        _liveAnchors = result.anchors;
+        _liveCandidatesPerColumn = result.candidatesPerColumn;
+        _liveUsedLlm = result.usedLlm;
         _busy = false;
       });
     } catch (e) {
@@ -1997,7 +2022,7 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
                   border: OutlineInputBorder(),
                 ),
               ),
-              if (_busy) ...[
+              if (_busy && _phase != null) ...[
                 const SizedBox(height: 16),
                 const LinearProgressIndicator(),
                 const SizedBox(height: 10),
@@ -2007,6 +2032,17 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
                     color: c.onSurfaceVariant,
                   ),
                 ),
+                if (_liveAnchors.isNotEmpty || _liveMatrix.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  _CandidateMatrixTable(
+                    matrix: _liveMatrix,
+                    anchors: _liveAnchors,
+                    candidatesPerColumn: _liveCandidatesPerColumn,
+                    usedLlm: _liveUsedLlm,
+                    hammingDistance: _distance ?? 0,
+                    attempted: _attempted ?? 0,
+                  ),
+                ],
               ],
               if (result != null) ...[
                 const SizedBox(height: 16),
@@ -2020,9 +2056,17 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
                   score: result.score,
                   publicKeyHash: result.publicKeyHash,
                 ),
-                if (result.candidateMatrix.isNotEmpty) ...[
+                if (result.candidateMatrix.isNotEmpty ||
+                    result.anchors.isNotEmpty) ...[
                   const SizedBox(height: 12),
-                  _CandidateMatrixTable(result: result),
+                  _CandidateMatrixTable(
+                    matrix: result.candidateMatrix,
+                    anchors: result.anchors,
+                    candidatesPerColumn: result.candidatesPerColumn,
+                    usedLlm: result.usedLlm,
+                    hammingDistance: result.hammingDistance,
+                    attempted: result.attempted,
+                  ),
                 ],
               ],
               if (_error != null) ...[
@@ -2062,6 +2106,17 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
   }
 
   String _progressText() {
+    final phase = _phase;
+    if (phase == StoryRecoveryProgressStage.aiSemanticAnalysis) {
+      return '正在进行AI语义分析';
+    }
+    if (phase == StoryRecoveryProgressStage.matrixReady) {
+      final completedRows = _liveMatrix.where((row) => row.isNotEmpty).length;
+      if (completedRows < _liveAnchors.length) {
+        return '已提取故事锚点，正在并发生成候选词 · $completedRows/${_liveAnchors.length}';
+      }
+      return '候选矩阵已生成，准备开始矩阵恢复';
+    }
     final parts = <String>['正在恢复'];
     final attempted = _attempted;
     final elapsedMs = _elapsedMs;
@@ -2076,24 +2131,34 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
 }
 
 class _CandidateMatrixTable extends StatelessWidget {
-  const _CandidateMatrixTable({required this.result});
+  const _CandidateMatrixTable({
+    required this.matrix,
+    required this.anchors,
+    required this.candidatesPerColumn,
+    required this.usedLlm,
+    required this.hammingDistance,
+    required this.attempted,
+  });
 
-  final _StoryVerificationResult result;
+  final List<List<int>> matrix;
+  final List<String> anchors;
+  final int candidatesPerColumn;
+  final bool usedLlm;
+  final int hammingDistance;
+  final int attempted;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final c = theme.colorScheme;
-    final matrix = result.candidateMatrix;
-    final k = result.candidatesPerColumn > 0
-        ? result.candidatesPerColumn
+    final k = candidatesPerColumn > 0
+        ? candidatesPerColumn
         : (matrix.isEmpty ? 0 : matrix.first.length);
-    final theoretical = _boundedSearchSpace(
-      matrix.length,
-      k,
-      result.hammingDistance,
-    );
-    final fullSpace = _boundedSearchSpace(matrix.length, k, matrix.length);
+    final rows = matrix.length > anchors.length
+        ? matrix.length
+        : anchors.length;
+    final theoretical = _boundedSearchSpace(rows, k, hammingDistance);
+    final fullSpace = _boundedSearchSpace(rows, k, rows);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(12),
@@ -2106,7 +2171,7 @@ class _CandidateMatrixTable extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            result.usedLlm ? 'LLM 语义候选矩阵' : '确定性候选矩阵',
+            usedLlm ? 'LLM 语义候选矩阵' : '确定性候选矩阵',
             style: theme.textTheme.titleSmall?.copyWith(
               fontWeight: FontWeight.w700,
             ),
@@ -2114,10 +2179,10 @@ class _CandidateMatrixTable extends StatelessWidget {
           const SizedBox(height: 4),
           Text(
             [
-              '${matrix.length} × $k',
-              'D≤${result.hammingDistance} 理论 $theoretical',
+              '$rows × $k',
+              'D≤$hammingDistance 理论 $theoretical',
               '全矩阵 $fullSpace',
-              '实际 ${result.attempted}',
+              '实际 $attempted',
             ].join(' · '),
             style: theme.textTheme.bodySmall?.copyWith(
               color: c.onSurfaceVariant,
@@ -2138,6 +2203,12 @@ class _CandidateMatrixTable extends StatelessWidget {
                       style: theme.textTheme.labelSmall,
                       isHeader: true,
                     ),
+                    if (anchors.isNotEmpty)
+                      _MatrixCell(
+                        text: '锚点',
+                        style: theme.textTheme.labelSmall,
+                        isHeader: true,
+                      ),
                     for (var rank = 0; rank < k; rank++)
                       _MatrixCell(
                         text: '候选 ${rank + 1}',
@@ -2146,16 +2217,23 @@ class _CandidateMatrixTable extends StatelessWidget {
                       ),
                   ],
                 ),
-                for (var row = 0; row < matrix.length; row++)
+                for (var row = 0; row < rows; row++)
                   TableRow(
                     children: [
                       _MatrixCell(
                         text: '${row + 1}',
                         style: theme.textTheme.bodySmall,
                       ),
+                      if (anchors.isNotEmpty)
+                        _MatrixCell(
+                          text: row < anchors.length ? anchors[row] : '-',
+                          style: theme.textTheme.bodySmall,
+                        ),
                       for (var rank = 0; rank < k; rank++)
                         _MatrixCell(
-                          text: _candidateLabel(matrix[row], rank),
+                          text: row < matrix.length
+                              ? _candidateLabel(matrix[row], rank)
+                              : '-',
                           style: theme.textTheme.bodySmall,
                         ),
                     ],

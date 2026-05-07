@@ -15,6 +15,8 @@ class WindowsRecoveryAccelerator implements RecoveryAccelerator {
     required int dMaxHard,
     required Duration hardDeadline,
     int? workerCount,
+    void Function(int attempted, int elapsedMs, int currentHammingDistance)?
+    onProgress,
   }) async {
     if (!Platform.isWindows) {
       throw UnsupportedError('Windows 原生恢复后端仅在 Windows 上可用');
@@ -33,7 +35,17 @@ class WindowsRecoveryAccelerator implements RecoveryAccelerator {
       params['worker_count'] = workerCount;
     }
     try {
-      final result = await client.call('recovery.search', params: params);
+      final result = await client.call(
+        'recovery.search',
+        params: params,
+        onProgress: onProgress == null
+            ? null
+            : (progress) => onProgress(
+                _intValue(progress['attempted']),
+                _intValue(progress['elapsed_ms']),
+                _intValue(progress['hamming_distance']),
+              ),
+      );
       return _parseOutcome(result);
     } finally {
       await client.dispose();

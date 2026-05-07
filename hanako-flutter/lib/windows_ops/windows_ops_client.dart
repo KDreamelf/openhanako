@@ -22,7 +22,7 @@ class WindowsOpsClient {
   Process? _process;
   StreamSubscription<String>? _stdoutSubscription;
   StreamSubscription<String>? _stderrSubscription;
-  final Map<int, Completer<Map<String, dynamic>>> _pending = {};
+  final Map<int, _PendingWindowsOpsRequest> _pending = {};
   int _nextId = 1;
 
   bool get isRunning => _process != null;
@@ -58,8 +58,8 @@ class WindowsOpsClient {
 
   Future<void> dispose() async {
     for (final pending in _pending.values) {
-      if (!pending.isCompleted) {
-        pending.completeError(StateError('Windows ops sidecar 已关闭'));
+      if (!pending.completer.isCompleted) {
+        pending.completer.completeError(StateError('Windows ops sidecar 已关闭'));
       }
     }
     _pending.clear();
@@ -76,6 +76,7 @@ class WindowsOpsClient {
   Future<Map<String, dynamic>> call(
     String method, {
     Map<String, dynamic> params = const <String, dynamic>{},
+    void Function(Map<String, dynamic> progress)? onProgress,
   }) async {
     await ensureStarted();
     final process = _process;
@@ -85,7 +86,10 @@ class WindowsOpsClient {
 
     final id = _nextId++;
     final completer = Completer<Map<String, dynamic>>();
-    _pending[id] = completer;
+    _pending[id] = _PendingWindowsOpsRequest(
+      completer: completer,
+      onProgress: onProgress,
+    );
 
     process.stdin.writeln(
       jsonEncode(<String, dynamic>{
@@ -215,10 +219,7 @@ class WindowsOpsClient {
     return call('ocr.recognize', params: params);
   }
 
-  Future<Map<String, dynamic>> ocrStatus({
-    String? root,
-    bool load = true,
-  }) {
+  Future<Map<String, dynamic>> ocrStatus({String? root, bool load = true}) {
     final params = <String, dynamic>{};
     if (root != null) {
       params['root'] = root;
@@ -284,26 +285,38 @@ class WindowsOpsClient {
       return;
     }
 
-    final completer = _pending.remove(id);
-    if (completer == null) {
+    final pending = _pending[id];
+    if (pending == null) {
       return;
     }
+
+    if (decoded['progress'] == true) {
+      final result = decoded['result'];
+      if (result is Map<String, dynamic>) {
+        pending.onProgress?.call(result);
+      } else if (result is Map) {
+        pending.onProgress?.call(result.cast<String, dynamic>());
+      }
+      return;
+    }
+
+    _pending.remove(id);
 
     if (decoded['ok'] == true) {
       final result = decoded['result'];
       if (result is Map<String, dynamic>) {
-        completer.complete(result);
+        pending.completer.complete(result);
       } else if (result is Map) {
-        completer.complete(result.cast<String, dynamic>());
+        pending.completer.complete(result.cast<String, dynamic>());
       } else {
-        completer.complete(<String, dynamic>{});
+        pending.completer.complete(<String, dynamic>{});
       }
       return;
     }
 
     final error = decoded['error'];
     if (error is Map) {
-      completer.completeError(
+      pending.completer.completeError(
         WindowsOpsException(
           code: error['code']?.toString() ?? 'windows_ops_error',
           message: error['message']?.toString() ?? 'Windows ops sidecar 报错',
@@ -313,7 +326,7 @@ class WindowsOpsClient {
       return;
     }
 
-    completer.completeError(
+    pending.completer.completeError(
       const WindowsOpsException(
         code: 'windows_ops_error',
         message: 'Windows ops sidecar 报错',
@@ -327,8 +340,8 @@ class WindowsOpsClient {
       message: 'Windows ops sidecar 已退出',
     );
     for (final pending in _pending.values) {
-      if (!pending.isCompleted) {
-        pending.completeError(exception);
+      if (!pending.completer.isCompleted) {
+        pending.completer.completeError(exception);
       }
     }
     _pending.clear();
@@ -406,6 +419,13 @@ class WindowsOpsClient {
     final executable = File(Platform.resolvedExecutable);
     return executable.parent;
   }
+}
+
+class _PendingWindowsOpsRequest {
+  _PendingWindowsOpsRequest({required this.completer, this.onProgress});
+
+  final Completer<Map<String, dynamic>> completer;
+  final void Function(Map<String, dynamic> progress)? onProgress;
 }
 
 class WindowsOpsException implements Exception {

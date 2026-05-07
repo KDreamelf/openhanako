@@ -58,6 +58,55 @@ class IdentityRegistration {
   List<String> get words => identity.mnemonic!.words;
 }
 
+enum StoryRecoveryProgressStage {
+  aiSemanticAnalysis,
+  matrixReady,
+  matrixRecovery,
+}
+
+class StoryRecoveryProgress {
+  StoryRecoveryProgress.aiSemanticAnalysis()
+    : stage = StoryRecoveryProgressStage.aiSemanticAnalysis,
+      attempted = null,
+      elapsedMs = null,
+      currentHammingDistance = null,
+      columns = const [],
+      anchors = const [],
+      candidatesPerColumn = 0,
+      usedLlm = true;
+
+  StoryRecoveryProgress.matrixReady({
+    required List<List<int>> columns,
+    required List<String> anchors,
+    required this.candidatesPerColumn,
+    required this.usedLlm,
+  }) : stage = StoryRecoveryProgressStage.matrixReady,
+       attempted = null,
+       elapsedMs = null,
+       currentHammingDistance = null,
+       columns = _copyMatrix(columns),
+       anchors = List<String>.unmodifiable(anchors);
+
+  StoryRecoveryProgress.matrixRecovery({
+    required this.attempted,
+    required this.elapsedMs,
+    required this.currentHammingDistance,
+  }) : stage = StoryRecoveryProgressStage.matrixRecovery,
+       columns = const [],
+       anchors = const [],
+       candidatesPerColumn = 0,
+       usedLlm = true;
+
+  final StoryRecoveryProgressStage stage;
+  final int? attempted;
+  final int? elapsedMs;
+  final int? currentHammingDistance;
+  final List<List<int>> columns;
+  final List<String> anchors;
+  final int candidatesPerColumn;
+  final bool usedLlm;
+}
+
 class IdentityRepository {
   IdentityRepository({
     required this.keystore,
@@ -153,6 +202,7 @@ class IdentityRepository {
     Duration hardDeadline = const Duration(minutes: 10),
     void Function(int attempted, int elapsedMs, int currentHammingDistance)?
     onProgress,
+    void Function(StoryRecoveryProgress progress)? onRecoveryProgress,
   }) async {
     final identity = _current ?? await unlock(pin: pin);
     return loginWithStory(
@@ -163,6 +213,7 @@ class IdentityRepository {
       softDeadline: softDeadline,
       hardDeadline: hardDeadline,
       onProgress: onProgress,
+      onRecoveryProgress: onRecoveryProgress,
     );
   }
 
@@ -186,8 +237,57 @@ class IdentityRepository {
     Duration hardDeadline = const Duration(minutes: 10),
     void Function(int attempted, int elapsedMs, int currentHammingDistance)?
     onProgress,
+    void Function(StoryRecoveryProgress progress)? onRecoveryProgress,
   }) async {
-    final parsed = await parser.parse(storyOrWords);
+    void emitAiProgress() {
+      onRecoveryProgress?.call(StoryRecoveryProgress.aiSemanticAnalysis());
+    }
+
+    void emitMatrixProgress(StoryParseResult result) {
+      if (!result.usedLlm) return;
+      onRecoveryProgress?.call(
+        StoryRecoveryProgress.matrixReady(
+          columns: result.columns,
+          anchors: result.anchors,
+          candidatesPerColumn: result.candidatesPerColumn,
+          usedLlm: result.usedLlm,
+        ),
+      );
+    }
+
+    var activeAnchors = const <String>[];
+
+    void emitAnchorProgress(List<String> anchors) {
+      activeAnchors = List<String>.unmodifiable(anchors);
+      onRecoveryProgress?.call(
+        StoryRecoveryProgress.matrixReady(
+          columns: [for (final _ in anchors) const <int>[]],
+          anchors: anchors,
+          candidatesPerColumn: parser.candidatesPerColumn,
+          usedLlm: true,
+        ),
+      );
+    }
+
+    void emitCandidateProgress(List<String> anchors, List<List<int>> columns) {
+      onRecoveryProgress?.call(
+        StoryRecoveryProgress.matrixReady(
+          columns: columns,
+          anchors: anchors,
+          candidatesPerColumn: parser.candidatesPerColumn,
+          usedLlm: true,
+        ),
+      );
+    }
+
+    final parsed = await parser.parse(
+      storyOrWords,
+      onLlm: emitAiProgress,
+      onAnchorsReady: emitAnchorProgress,
+      onCandidateMatrixProgress: (columns) =>
+          emitCandidateProgress(activeAnchors, columns),
+    );
+    emitMatrixProgress(parsed);
     final firstOutcome = await _recoverParsedStory(
       parsed: parsed,
       pin: pin,
@@ -196,6 +296,7 @@ class IdentityRepository {
       softDeadline: softDeadline,
       hardDeadline: hardDeadline,
       onProgress: onProgress,
+      onRecoveryProgress: onRecoveryProgress,
     );
     if (firstOutcome.success || parsed.usedLlm) {
       return firstOutcome;
@@ -203,7 +304,15 @@ class IdentityRepository {
 
     // 确定性解析只说明故事里能扫出 12 个字典词，不代表用户复述完全正确。
     // 如果这条快速路径恢复失败，继续走 LLM 语义匹配处理同义词、错记和顺序小偏差。
-    final semanticParsed = await parser.parse(storyOrWords, forceLlm: true);
+    final semanticParsed = await parser.parse(
+      storyOrWords,
+      forceLlm: true,
+      onLlm: emitAiProgress,
+      onAnchorsReady: emitAnchorProgress,
+      onCandidateMatrixProgress: (columns) =>
+          emitCandidateProgress(activeAnchors, columns),
+    );
+    emitMatrixProgress(semanticParsed);
     return _recoverParsedStory(
       parsed: semanticParsed,
       pin: pin,
@@ -212,6 +321,7 @@ class IdentityRepository {
       softDeadline: softDeadline,
       hardDeadline: hardDeadline,
       onProgress: onProgress,
+      onRecoveryProgress: onRecoveryProgress,
     );
   }
 
@@ -228,6 +338,7 @@ class IdentityRepository {
       int currentHammingDistance,
     )?
     onProgress,
+    required void Function(StoryRecoveryProgress progress)? onRecoveryProgress,
   }) async {
     if (!parsed.isWellFormed) {
       return LoginOutcome.malformedMatrix(
@@ -235,19 +346,24 @@ class IdentityRepository {
         usedLlm: parsed.usedLlm,
         parsedColumns: parsed.columns,
         candidatesPerColumn: parsed.candidatesPerColumn,
+        anchors: parsed.anchors,
       );
     }
 
     setKnownPublicKeyHashes(targetPublicKeyHashes);
     final dMaxHard = _hardHammingLimit(parsed.candidatesPerColumn);
-    final accelerated = await _tryAcceleratedRecovery(
-      parsed: parsed,
-      targetPublicKeyHashes: targetPublicKeyHashes,
-      checker: checker,
-      dMaxHard: dMaxHard,
-      hardDeadline: hardDeadline,
-      onProgress: onProgress,
-    );
+    final useAccelerator = parsed.candidatesPerColumn > 1;
+    final accelerated = useAccelerator
+        ? await _tryAcceleratedRecovery(
+            parsed: parsed,
+            targetPublicKeyHashes: targetPublicKeyHashes,
+            checker: checker,
+            dMaxHard: dMaxHard,
+            hardDeadline: hardDeadline,
+            onProgress: onProgress,
+            onRecoveryProgress: onRecoveryProgress,
+          )
+        : null;
     if (accelerated != null) {
       if (!accelerated.success) {
         return LoginOutcome.failed(
@@ -258,6 +374,7 @@ class IdentityRepository {
           usedLlm: parsed.usedLlm,
           parsedColumns: parsed.columns,
           candidatesPerColumn: parsed.candidatesPerColumn,
+          anchors: parsed.anchors,
           rawResponse: parsed.rawResponse,
         );
       }
@@ -270,10 +387,12 @@ class IdentityRepository {
         usedLlm: parsed.usedLlm,
         parsedColumns: parsed.columns,
         candidatesPerColumn: parsed.candidatesPerColumn,
+        anchors: parsed.anchors,
         rawResponse: parsed.rawResponse,
       );
     }
 
+    final reportMatrixProgress = parsed.candidatesPerColumn > 1;
     final recovery = Recovery(
       checker: checker ?? ((pub) async => targetPublicKeyHashes.isNotEmpty),
       kPerColumn: parsed.candidatesPerColumn,
@@ -281,10 +400,24 @@ class IdentityRepository {
       dMaxHard: dMaxHard,
       softDeadline: softDeadline,
       hardDeadline: hardDeadline,
-      onProgress: onProgress == null
+      onProgress:
+          !reportMatrixProgress ||
+              (onProgress == null && onRecoveryProgress == null)
           ? null
-          : (p) =>
-                onProgress(p.attempted, p.elapsedMs, p.currentHammingDistance),
+          : (p) {
+              onProgress?.call(
+                p.attempted,
+                p.elapsedMs,
+                p.currentHammingDistance,
+              );
+              onRecoveryProgress?.call(
+                StoryRecoveryProgress.matrixRecovery(
+                  attempted: p.attempted,
+                  elapsedMs: p.elapsedMs,
+                  currentHammingDistance: p.currentHammingDistance,
+                ),
+              );
+            },
     );
     final outcome = await recovery.tryRecover(parsed.columns);
     if (!outcome.success) {
@@ -296,6 +429,7 @@ class IdentityRepository {
         usedLlm: parsed.usedLlm,
         parsedColumns: parsed.columns,
         candidatesPerColumn: parsed.candidatesPerColumn,
+        anchors: parsed.anchors,
         rawResponse: parsed.rawResponse,
       );
     }
@@ -308,6 +442,7 @@ class IdentityRepository {
       usedLlm: parsed.usedLlm,
       parsedColumns: parsed.columns,
       candidatesPerColumn: parsed.candidatesPerColumn,
+      anchors: parsed.anchors,
       rawResponse: parsed.rawResponse,
     );
   }
@@ -324,20 +459,36 @@ class IdentityRepository {
       int currentHammingDistance,
     )?
     onProgress,
+    required void Function(StoryRecoveryProgress progress)? onRecoveryProgress,
   }) async {
     final accelerator = recoveryAccelerator;
     if (accelerator == null || targetPublicKeyHashes.isEmpty) {
       return null;
     }
-    onProgress?.call(0, 0, 0);
+    void emitProgress(
+      int attempted,
+      int elapsedMs,
+      int currentHammingDistance,
+    ) {
+      onProgress?.call(attempted, elapsedMs, currentHammingDistance);
+      onRecoveryProgress?.call(
+        StoryRecoveryProgress.matrixRecovery(
+          attempted: attempted,
+          elapsedMs: elapsedMs,
+          currentHammingDistance: currentHammingDistance,
+        ),
+      );
+    }
+
     try {
       final outcome = await accelerator.tryRecover(
         matrix: parsed.columns,
         targetPublicKeyHashes: targetPublicKeyHashes,
         dMaxHard: dMaxHard,
         hardDeadline: hardDeadline,
+        onProgress: emitProgress,
       );
-      onProgress?.call(
+      emitProgress(
         outcome.attempted,
         outcome.elapsedMs,
         outcome.hammingDistance,
@@ -467,6 +618,7 @@ class LoginOutcome {
     this.usedLlm = false,
     this.parsedColumns = const [],
     this.candidatesPerColumn = 0,
+    this.anchors = const [],
     this.rawResponse,
   });
 
@@ -478,6 +630,7 @@ class LoginOutcome {
     required bool usedLlm,
     List<List<int>> parsedColumns = const [],
     int candidatesPerColumn = 0,
+    List<String> anchors = const [],
     String? rawResponse,
   }) => LoginOutcome._(
     identity: identity,
@@ -487,6 +640,7 @@ class LoginOutcome {
     usedLlm: usedLlm,
     parsedColumns: _copyMatrix(parsedColumns),
     candidatesPerColumn: candidatesPerColumn,
+    anchors: List<String>.unmodifiable(anchors),
     rawResponse: rawResponse,
   );
 
@@ -495,12 +649,14 @@ class LoginOutcome {
     bool usedLlm = false,
     List<List<int>> parsedColumns = const [],
     int candidatesPerColumn = 0,
+    List<String> anchors = const [],
   }) => LoginOutcome._(
     malformed: true,
     rawResponse: rawResponse,
     usedLlm: usedLlm,
     parsedColumns: _copyMatrix(parsedColumns),
     candidatesPerColumn: candidatesPerColumn,
+    anchors: List<String>.unmodifiable(anchors),
   );
 
   factory LoginOutcome.failed({
@@ -511,6 +667,7 @@ class LoginOutcome {
     required bool usedLlm,
     List<List<int>> parsedColumns = const [],
     int candidatesPerColumn = 0,
+    List<String> anchors = const [],
     String? rawResponse,
   }) => LoginOutcome._(
     failed: true,
@@ -521,6 +678,7 @@ class LoginOutcome {
     usedLlm: usedLlm,
     parsedColumns: _copyMatrix(parsedColumns),
     candidatesPerColumn: candidatesPerColumn,
+    anchors: List<String>.unmodifiable(anchors),
     rawResponse: rawResponse,
   );
 
@@ -536,6 +694,7 @@ class LoginOutcome {
   final bool usedLlm;
   final List<List<int>> parsedColumns;
   final int candidatesPerColumn;
+  final List<String> anchors;
 
   /// LLM 原始响应（malformed 时保留供调试）。
   final String? rawResponse;

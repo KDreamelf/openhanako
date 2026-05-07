@@ -40,6 +40,7 @@ class StoryParseResult {
     required this.rawResponse,
     required this.candidatesPerColumn,
     required this.usedLlm,
+    this.anchors = const [],
   });
 
   /// 12 × K 矩阵。每行（外层）是按用户故事顺序的一个意象，每列内是该意象
@@ -54,6 +55,9 @@ class StoryParseResult {
 
   /// 本次结果是否来自 LLM 语义匹配。
   final bool usedLlm;
+
+  /// LLM 第一阶段抽取出的 12 个故事锚点。确定性路径可为空或为精确词。
+  final List<String> anchors;
 
   /// 是否符合协议（12 列 × K 候选 + 全部 ID 在字典范围内）。
   bool get isWellFormed {
@@ -81,7 +85,8 @@ class StoryParser {
   final StoryLlmCaller caller;
   final int candidatesPerColumn;
 
-  String get systemPromptForTesting => _buildSystemPrompt();
+  String get systemPromptForTesting =>
+      '${_buildAnchorPrompt()}\n${_buildCandidateSystemPrompt('凳子')}';
 
   /// 恢复期入口：用户输入 → 12×K 矩阵。
   ///
@@ -89,6 +94,9 @@ class StoryParser {
   Future<StoryParseResult> parse(
     String storyOrWords, {
     bool forceLlm = false,
+    void Function()? onLlm,
+    void Function(List<String> anchors)? onAnchorsReady,
+    void Function(List<List<int>> columns)? onCandidateMatrixProgress,
   }) async {
     if (!forceLlm) {
       final exactWords =
@@ -99,37 +107,108 @@ class StoryParser {
       }
     }
 
-    final raw = await caller(
-      systemPrompt: _buildSystemPrompt(),
+    onLlm?.call();
+    var anchorsRaw = await caller(
+      systemPrompt: _buildAnchorPrompt(),
       userPrompt: storyOrWords,
-      maxTokens: 1500,
+      maxTokens: 800,
     );
-    final cols = _extractMatrix(raw);
-    if (cols.isNotEmpty && cols.length != kStoryParserColumns) {
+    var anchors = _extractAnchors(anchorsRaw);
+    if (anchors.isNotEmpty && anchors.length != kStoryParserColumns) {
       final retryRaw = await caller(
-        systemPrompt: _buildSystemPrompt(),
-        userPrompt: _buildRetryUserPrompt(
+        systemPrompt: _buildAnchorPrompt(),
+        userPrompt: _buildAnchorRetryUserPrompt(
           storyOrWords: storyOrWords,
-          columns: cols,
-          rawResponse: raw,
+          anchors: anchors,
+          rawResponse: anchorsRaw,
         ),
-        maxTokens: 1500,
+        maxTokens: 800,
       );
-      final retryCols = _extractMatrix(retryRaw);
-      if (retryCols.length == kStoryParserColumns) {
-        return StoryParseResult(
-          columns: retryCols,
-          rawResponse: retryRaw,
-          candidatesPerColumn: candidatesPerColumn,
-          usedLlm: true,
-        );
+      final retryAnchors = _extractAnchors(retryRaw);
+      if (retryAnchors.length == kStoryParserColumns) {
+        anchorsRaw = retryRaw;
+        anchors = retryAnchors;
       }
     }
+    if (anchors.length != kStoryParserColumns) {
+      return StoryParseResult(
+        columns: const [],
+        rawResponse: _debugRawResponse(
+          anchorsRaw: anchorsRaw,
+          anchors: anchors,
+        ),
+        candidatesPerColumn: candidatesPerColumn,
+        usedLlm: true,
+        anchors: anchors,
+      );
+    }
+    onAnchorsReady?.call(List<String>.unmodifiable(anchors));
+
+    final partial = List<List<int>>.generate(
+      anchors.length,
+      (_) => const <int>[],
+    );
+    final candidateRows = await Future.wait([
+      for (var index = 0; index < anchors.length; index++)
+        _generateCandidateRow(
+          storyOrWords: storyOrWords,
+          anchors: anchors,
+          index: index,
+        ).then((row) {
+          partial[index] = List<int>.unmodifiable(row.row);
+          onCandidateMatrixProgress?.call(_copyMatrix(partial));
+          return row;
+        }),
+    ]);
+    final cols = [for (final candidate in candidateRows) candidate.row];
     return StoryParseResult(
       columns: cols,
-      rawResponse: raw,
+      rawResponse: _debugRawResponse(
+        anchorsRaw: anchorsRaw,
+        anchors: anchors,
+        candidateRows: candidateRows,
+      ),
       candidatesPerColumn: candidatesPerColumn,
       usedLlm: true,
+      anchors: anchors,
+    );
+  }
+
+  Future<_CandidateRowResult> _generateCandidateRow({
+    required String storyOrWords,
+    required List<String> anchors,
+    required int index,
+  }) async {
+    final raw = await caller(
+      systemPrompt: _buildCandidateSystemPrompt(anchors[index]),
+      userPrompt: _buildCandidateUserPrompt(
+        storyOrWords: storyOrWords,
+        anchors: anchors,
+        index: index,
+      ),
+      maxTokens: 500,
+    );
+    final row = _extractCandidateRow(raw);
+    if (row.length == candidatesPerColumn) {
+      return _CandidateRowResult(index: index, rawResponse: raw, row: row);
+    }
+
+    final retryRaw = await caller(
+      systemPrompt: _buildCandidateSystemPrompt(anchors[index]),
+      userPrompt: _buildCandidateRetryUserPrompt(
+        storyOrWords: storyOrWords,
+        anchors: anchors,
+        index: index,
+        row: row,
+        rawResponse: raw,
+      ),
+      maxTokens: 500,
+    );
+    final retryRow = _extractCandidateRow(retryRaw);
+    return _CandidateRowResult(
+      index: index,
+      rawResponse: retryRaw,
+      row: retryRow,
     );
   }
 
@@ -139,19 +218,35 @@ class StoryParser {
       rawResponse: jsonEncode({'columns': exactWords}),
       candidatesPerColumn: 1,
       usedLlm: false,
+      anchors: [
+        for (final row in exactWords)
+          if (row.isNotEmpty) wordById(row.first) ?? '',
+      ],
     );
   }
 
+  String _buildAnchorPrompt() {
+    return '''
+你是一个记忆故事锚点提取器，只负责从用户复述中提取有序锚点，不生成候选词，不输出字典 ID。
+
+任务规则：
+1. 用户给你的是一段记忆故事或一组关键词，里面隐含 $kStoryParserColumns 个核心记忆锚点。
+2. **严格按故事中锚点出现的顺序**输出，不要按你的理解重新排序。
+3. 输出的是用户复述里的短词或短语；可以是"凳子"、"石台"、"冷风"这类近义/错记词，不要提前改成字典词。
+4. 如果同一句里有两个可作为记忆锚点的名词，必须拆成相邻两项；例如"立夏的凉粉摊"应输出"立夏"和"凉粉"两个锚点。
+5. 如果故事里出现超过 $kStoryParserColumns 个名词，优先保留具体物体、地点、食物、节令、角色和明显被动作串联的实体；把"涟漪/阳光/人群"这类结果、背景、氛围词降级，除非它们明显就是唯一锚点。
+6. 如果不足 $kStoryParserColumns 个锚点，按故事语义补出最可能被省略的短语，但不要编造无关实体。
+7. 只输出严格 JSON：{"anchors":["词1","词2",...]}，anchors 恰好 $kStoryParserColumns 个字符串。
+8. 不要输出任何解释、Markdown、前缀、注释。
+''';
+  }
+
   /// 系统提示词。字典本体随提示词一并发给 LLM。
-  String _buildSystemPrompt() {
+  String _buildCandidateSystemPrompt(String anchor) {
     final rowShape = List.filled(candidatesPerColumn, 'id').join(',');
-    final exampleRows = <String>[];
-    for (var row = 0; row < kStoryParserColumns; row++) {
-      final values = <int>[];
-      for (var col = 0; col < candidatesPerColumn; col++) {
-        values.add((row * 137 + col * 29 + 12) % hanakoWordlistSize);
-      }
-      exampleRows.add('[${values.join(',')}]');
+    final exampleValues = <int>[];
+    for (var col = 0; col < candidatesPerColumn; col++) {
+      exampleValues.add((137 + col * 29 + 12) % hanakoWordlistSize);
     }
     final dictJson = StringBuffer('{');
     for (var i = 0; i < hanakoWordlistSize; i++) {
@@ -161,45 +256,37 @@ class StoryParser {
     dictJson.write('}');
 
     return '''
-你是一个语义匹配器，负责把用户描述的"故事"或"词组"映射到中文名词字典中的 ID。
+你是一个语义候选生成器，负责把单个故事锚点映射到中文名词字典中的 ID。
 
 任务规则：
-1. 用户给你的内容是一段故事或一组关键词；故事里隐含 $kStoryParserColumns 个核心意象。
-2. **按故事中意象出现的顺序**，把每个意象转成字典中最接近的 $candidatesPerColumn 个候选 ID（按相似度从高到低）。
+1. 当前只处理一个锚点，不要处理故事里的其他锚点。
+2. 把该锚点转成字典中最接近的 $candidatesPerColumn 个候选 ID（按相似度从高到低）。
 3. 同义词必须映射（如"西红柿"→"番茄"，"太空"→"宇宙"，"风琴"→"钢琴"）。
 4. 如果用户写的是近义词或错记词，要把"用户写出的词"和"最可能的原始记忆词"都放进候选。例如"凳子"应同时考虑"凳子/板凳/长凳/椅子"，"石台"应优先考虑"石坛/石碑/石桥"，"冷风"应考虑"寒风/凉风/冬风"。
-5. 如果同一句里有两个可作为记忆锚点的名词，必须拆成相邻两列；例如"立夏的凉粉摊"应输出"立夏"和"凉粉"两个位置，不能合并成一列。
-6. 如果故事里出现超过 $kStoryParserColumns 个名词，优先保留具体物体、地点、食物、节令和角色锚点；把"涟漪/阳光/人群"这类结果、背景、氛围词降级，除非它们明显就是唯一锚点。
-7. 候选词的语义要尽量贴近，避免硬塞无关词。
-8. 如果你确实只能想到不足 $candidatesPerColumn 个候选，用最相似的那个重复填满。
-9. 只输出严格的 JSON：{"columns":[[$rowShape],[$rowShape],...]}，恰好 $kStoryParserColumns 个数组，每个数组恰好 $candidatesPerColumn 个整数。
-10. 不要输出任何解释、Markdown、前缀、注释。
+5. 候选词的语义要尽量贴近，避免硬塞无关词。
+6. 如果你确实只能想到不足 $candidatesPerColumn 个候选，用最相似的那个重复填满。
+7. 只输出严格的 JSON：{"candidates":[$rowShape]}，candidates 恰好 $candidatesPerColumn 个整数。
+8. 不要输出任何解释、Markdown、前缀、注释。
+
+当前锚点：$anchor
 
 输出格式示例：
-{"columns":[${exampleRows.join(',')}]}
+{"candidates":[${exampleValues.join(',')}]}
 
 字典：$dictJson
 ''';
   }
 
-  String _buildRetryUserPrompt({
+  String _buildAnchorRetryUserPrompt({
     required String storyOrWords,
-    required List<List<int>> columns,
+    required List<String> anchors,
     required String rawResponse,
   }) {
-    final matrixLines = <String>[];
-    for (var row = 0; row < columns.length; row++) {
-      final entries = columns[row]
-          .map((id) => '$id:${wordById(id) ?? '?'}')
-          .join(', ');
-      matrixLines.add('${row + 1}. [$entries]');
-    }
     return '''
-你上一次输出的候选矩阵不符合协议，本次不能继续恢复。
+你上一次输出的锚点列表不符合协议，本次不能继续恢复。
 
 错误信息：
-- columns 必须恰好 $kStoryParserColumns 行，但你输出了 ${columns.length} 行。
-- 每行必须恰好 $candidatesPerColumn 个整数 ID。
+- anchors 必须恰好 $kStoryParserColumns 个字符串，但你输出了 ${anchors.length} 个。
 
 原始故事：
 $storyOrWords
@@ -207,58 +294,156 @@ $storyOrWords
 上一次原始响应：
 $rawResponse
 
-上一次解析出的矩阵（ID:词）：
-${matrixLines.join('\n')}
+上一次解析出的锚点：
+${[for (var i = 0; i < anchors.length; i++) '${i + 1}. ${anchors[i]}'].join('\n')}
 
-请基于原始故事和上一次错误输出，重新完成同一个语义匹配任务。
-注意：这不是让程序替你裁剪矩阵，而是要求你自己重新判断 12 个记忆锚点。
-只输出恰好 $kStoryParserColumns × $candidatesPerColumn 的严格 JSON。
+请基于原始故事和上一次错误输出，重新判断 12 个记忆锚点。
+只输出严格 JSON：{"anchors":["词1","词2",...]}，anchors 恰好 $kStoryParserColumns 个字符串。
 ''';
   }
 
-  /// 从 LLM 文本里抽出矩阵。容忍包裹的 ```json 代码块、前后空白等噪声。
-  List<List<int>> _extractMatrix(String raw) {
-    // 找 JSON 主体
+  String _buildCandidateUserPrompt({
+    required String storyOrWords,
+    required List<String> anchors,
+    required int index,
+  }) {
+    return '''
+原始故事：
+$storyOrWords
+
+已抽取锚点：
+${[for (var i = 0; i < anchors.length; i++) '${i + 1}. ${anchors[i]}'].join('\n')}
+
+当前只处理第 ${index + 1} 个锚点：${anchors[index]}
+请只为这个锚点生成候选 ID，不要处理其他锚点。
+''';
+  }
+
+  String _buildCandidateRetryUserPrompt({
+    required String storyOrWords,
+    required List<String> anchors,
+    required int index,
+    required List<int> row,
+    required String rawResponse,
+  }) {
+    final entries = row.map((id) => '$id:${wordById(id) ?? '?'}').join(', ');
+    return '''
+你上一次输出的候选列表不符合协议，本次不能继续恢复。
+
+错误信息：
+- 当前锚点必须输出恰好 $candidatesPerColumn 个整数 ID，但你输出了 ${row.length} 个有效 ID。
+
+原始故事：
+$storyOrWords
+
+已抽取锚点：
+${[for (var i = 0; i < anchors.length; i++) '${i + 1}. ${anchors[i]}'].join('\n')}
+
+上一次原始响应：
+$rawResponse
+
+当前锚点：
+${index + 1}. ${anchors[index]}
+
+上一次解析出的候选（ID:词）：
+[$entries]
+
+请只为当前锚点重新生成候选 ID。
+只输出严格 JSON：{"candidates":[id,id,...]}，candidates 恰好 $candidatesPerColumn 个整数。
+''';
+  }
+
+  String _debugRawResponse({
+    required String anchorsRaw,
+    required List<String> anchors,
+    List<_CandidateRowResult>? candidateRows,
+  }) {
+    return jsonEncode({
+      'anchors': anchors,
+      'anchors_raw': anchorsRaw,
+      if (candidateRows != null)
+        'candidate_rows': [
+          for (final row in candidateRows)
+            {
+              'index': row.index,
+              'anchor': anchors[row.index],
+              'row': row.row,
+              'raw': row.rawResponse,
+            },
+        ],
+    });
+  }
+
+  List<String> _extractAnchors(String raw) {
     final braceStart = raw.indexOf('{');
     final braceEnd = raw.lastIndexOf('}');
     if (braceStart < 0 || braceEnd <= braceStart) {
-      return _emptyMatrix();
+      return const [];
     }
     final jsonStr = raw.substring(braceStart, braceEnd + 1);
     Map<String, dynamic> obj;
     try {
       obj = jsonDecode(jsonStr) as Map<String, dynamic>;
     } catch (_) {
-      return _emptyMatrix();
+      return const [];
     }
-    final cols = obj['columns'];
-    if (cols is! List) return _emptyMatrix();
+    final rawAnchors = obj['anchors'] ?? obj['items'];
+    if (rawAnchors is! List) return const [];
 
-    final out = <List<int>>[];
-    for (final c in cols) {
-      if (c is! List) continue;
-      final row = <int>[];
-      for (final v in c) {
-        if (v is int) {
-          row.add(v);
-        } else if (v is num) {
-          row.add(v.toInt());
-        }
+    final anchors = <String>[];
+    for (final item in rawAnchors) {
+      String? text;
+      if (item is String) {
+        text = item;
+      } else if (item is Map) {
+        final value = item['anchor'] ?? item['text'] ?? item['word'];
+        if (value != null) text = value.toString();
       }
-      // 不足 K 个时，用 rank-0 重复补足；超过 K 个时截断。
-      if (row.isEmpty) continue;
-      while (row.length < candidatesPerColumn) {
-        row.add(row.first);
+      final normalized = text?.trim();
+      if (normalized != null && normalized.isNotEmpty) {
+        anchors.add(normalized);
       }
-      if (row.length > candidatesPerColumn) {
-        row.removeRange(candidatesPerColumn, row.length);
-      }
-      out.add(row);
     }
-    return out;
+    return anchors;
   }
 
-  List<List<int>> _emptyMatrix() => const [];
+  /// 从 LLM 文本里抽出单个候选行。容忍包裹的 ```json 代码块、前后空白等噪声。
+  List<int> _extractCandidateRow(String raw) {
+    final braceStart = raw.indexOf('{');
+    final braceEnd = raw.lastIndexOf('}');
+    if (braceStart < 0 || braceEnd <= braceStart) {
+      return const [];
+    }
+    final jsonStr = raw.substring(braceStart, braceEnd + 1);
+    Map<String, dynamic> obj;
+    try {
+      obj = jsonDecode(jsonStr) as Map<String, dynamic>;
+    } catch (_) {
+      return const [];
+    }
+    var values = obj['candidates'] ?? obj['ids'];
+    if (values == null) {
+      final columns = obj['columns'];
+      if (columns is List && columns.isNotEmpty) {
+        values = columns.first;
+      }
+    }
+    if (values is! List) return const [];
+
+    final row = <int>[];
+    for (final v in values) {
+      int? id;
+      if (v is int) {
+        id = v;
+      } else if (v is num) {
+        id = v.toInt();
+      }
+      if (id != null && id >= 0 && id < hanakoWordlistSize) {
+        row.add(id);
+      }
+    }
+    return row;
+  }
 
   /// 用户直接输入 12 个准确助记词时不依赖 LLM，保证未部署 AI 网关时仍可恢复登录。
   List<List<int>>? _tryParseExactWords(String input) {
@@ -319,6 +504,24 @@ class _WordEntry {
 
   final String word;
   final int id;
+}
+
+class _CandidateRowResult {
+  const _CandidateRowResult({
+    required this.index,
+    required this.rawResponse,
+    required this.row,
+  });
+
+  final int index;
+  final String rawResponse;
+  final List<int> row;
+}
+
+List<List<int>> _copyMatrix(List<List<int>> matrix) {
+  return List<List<int>>.unmodifiable([
+    for (final row in matrix) List<int>.unmodifiable(row),
+  ]);
 }
 
 final List<_WordEntry> _wordEntriesByLength = List.unmodifiable(
