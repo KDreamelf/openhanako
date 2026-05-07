@@ -356,22 +356,20 @@ class LocalToolRegistry {
   ) async {
     final command = _requiredString(args, 'command');
     final timeoutSeconds = _boundedInt(args['timeout_seconds'], 30, 1, 120);
-    final shell = Platform.isWindows ? 'cmd.exe' : '/bin/sh';
-    final shellArgs = Platform.isWindows
-        ? <String>['/c', command]
-        : <String>['-lc', command];
+    final invocation = _resolveShellInvocation(command);
     final proc = await Process.start(
-      shell,
-      shellArgs,
+      invocation.executable,
+      invocation.args,
       workingDirectory: _defaultCwd(cwd),
       runInShell: false,
     );
+    const outputDecoder = Utf8Decoder(allowMalformed: true);
     final stdoutFuture = proc.stdout
-        .transform(utf8.decoder)
+        .transform(outputDecoder)
         .join()
         .then(_truncateOutput);
     final stderrFuture = proc.stderr
-        .transform(utf8.decoder)
+        .transform(outputDecoder)
         .join()
         .then(_truncateOutput);
     final exitCode = await proc.exitCode.timeout(
@@ -388,6 +386,127 @@ class LocalToolRegistry {
       'stderr': await stderrFuture,
       'timed_out': exitCode == -1,
     };
+  }
+
+  static _ShellInvocation _resolveShellInvocation(String command) {
+    if (!Platform.isWindows) {
+      return _ShellInvocation('/bin/sh', <String>['-lc', command]);
+    }
+
+    return _tryPowerShellInvocation(command) ??
+        _ShellInvocation('cmd.exe', <String>['/c', command]);
+  }
+
+  static _ShellInvocation? _tryPowerShellInvocation(String command) {
+    final executable = _readWindowsCommandToken(command, 0);
+    if (executable == null || !_isPowerShellExecutable(executable.value)) {
+      return null;
+    }
+
+    final prefixArgs = <String>[];
+    var offset = executable.end;
+    while (true) {
+      final token = _readWindowsCommandToken(command, offset);
+      if (token == null) return null;
+
+      final value = token.value.toLowerCase();
+      if (value == '-command' ||
+          value == '-c' ||
+          value == '/command' ||
+          value == '/c') {
+        final rawScript = command.substring(token.end).trim();
+        if (rawScript.isEmpty) return null;
+        return _ShellInvocation(executable.value, <String>[
+          ...prefixArgs,
+          '-Command',
+          _wrapPowerShellScript(_stripCommandOuterQuotes(rawScript)),
+        ]);
+      }
+
+      if (value == '-encodedcommand' ||
+          value == '-enc' ||
+          value == '/encodedcommand' ||
+          value == '/enc' ||
+          value == '-file' ||
+          value == '-f' ||
+          value == '/file' ||
+          value == '/f') {
+        return null;
+      }
+
+      prefixArgs.add(token.value);
+      offset = token.end;
+    }
+  }
+
+  static _CommandToken? _readWindowsCommandToken(String input, int offset) {
+    var i = offset;
+    while (i < input.length && input.codeUnitAt(i) <= 0x20) {
+      i++;
+    }
+    if (i >= input.length) return null;
+
+    final token = StringBuffer();
+    var inQuotes = false;
+    final start = i;
+    while (i < input.length) {
+      final char = input[i];
+      if (char == r'\') {
+        final next = i + 1 < input.length ? input[i + 1] : '';
+        if (next == '"') {
+          token.write('"');
+          i += 2;
+          continue;
+        }
+      }
+      if (char == '"') {
+        inQuotes = !inQuotes;
+        i++;
+        continue;
+      }
+      if (!inQuotes && char.codeUnitAt(0) <= 0x20) break;
+      token.write(char);
+      i++;
+    }
+    return _CommandToken(token.toString(), start, i);
+  }
+
+  static bool _isPowerShellExecutable(String executable) {
+    final baseName = executable.split(RegExp(r'[\\/]')).last.toLowerCase();
+    return baseName == 'powershell' ||
+        baseName == 'powershell.exe' ||
+        baseName == 'pwsh' ||
+        baseName == 'pwsh.exe';
+  }
+
+  static String _stripCommandOuterQuotes(String value) {
+    var text = value.trim();
+    if (text.length >= 4 && text.startsWith(r'\"') && text.endsWith(r'\"')) {
+      text = text.substring(2, text.length - 2);
+    }
+    if (text.length >= 2) {
+      final first = text[0];
+      final last = text[text.length - 1];
+      if ((first == '"' && last == '"') || (first == "'" && last == "'")) {
+        return text.substring(1, text.length - 1);
+      }
+    }
+    return text;
+  }
+
+  static String _wrapPowerShellScript(String script) {
+    final escaped = script.replaceAll("'", "''");
+    return <String>[
+      r"$ErrorActionPreference = 'Stop'",
+      'try {',
+      "  Invoke-Expression '$escaped'",
+      r'  if ($global:LASTEXITCODE -is [int] -and $global:LASTEXITCODE -ne 0) { exit $global:LASTEXITCODE }',
+      '  exit 0',
+      '} catch {',
+      r'  [Console]::Error.WriteLine(($_ | Out-String))',
+      '  exit 1',
+      '}',
+    ].join('; ');
   }
 
   static Future<Map<String, dynamic>> _webFetch(
@@ -1260,6 +1379,21 @@ class _ToolSpec {
   final String name;
   final String description;
   final Map<String, dynamic> parameters;
+}
+
+class _ShellInvocation {
+  const _ShellInvocation(this.executable, this.args);
+
+  final String executable;
+  final List<String> args;
+}
+
+class _CommandToken {
+  const _CommandToken(this.value, this.start, this.end);
+
+  final String value;
+  final int start;
+  final int end;
 }
 
 final _knownToolNames = <String>{

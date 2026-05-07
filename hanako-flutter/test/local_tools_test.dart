@@ -69,4 +69,20 @@ void main() {
     expect(results, hasLength(1));
     expect(results.single['line'], 1);
   });
+
+  test('Windows PowerShell 非终止错误会作为命令失败返回', () async {
+    if (!Platform.isWindows) return;
+
+    final raw = await LocalToolRegistry.execute(LocalToolNames.bash, {
+      'command':
+          'powershell -NoProfile -Command "Start-Process __hanako_missing_executable__"',
+      'timeout_seconds': 5,
+    });
+    final body = jsonDecode(raw) as Map<String, dynamic>;
+
+    expect(body['ok'], false);
+    expect(body['exit_code'], isNot(0));
+    expect(body['stderr'], contains('Start-Process'));
+    expect(body['timed_out'], false);
+  });
 }
