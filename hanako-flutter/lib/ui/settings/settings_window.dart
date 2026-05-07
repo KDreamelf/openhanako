@@ -1925,6 +1925,10 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
   int? _attempted;
   int? _elapsedMs;
   int? _distance;
+  int? _combinationId;
+  List<int> _candidateRanks = const [];
+  List<int> _wordIds = const [];
+  List<int> _activePositions = const [];
   List<List<int>> _liveMatrix = const [];
   List<String> _liveAnchors = const [];
   int _liveCandidatesPerColumn = 0;
@@ -1947,6 +1951,10 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
       _attempted = null;
       _elapsedMs = null;
       _distance = null;
+      _combinationId = null;
+      _candidateRanks = const [];
+      _wordIds = const [];
+      _activePositions = const [];
       _liveMatrix = const [];
       _liveAnchors = const [];
       _liveCandidatesPerColumn = 0;
@@ -1970,6 +1978,10 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
               _attempted = progress.attempted;
               _elapsedMs = progress.elapsedMs;
               _distance = progress.currentHammingDistance;
+              _combinationId = progress.combinationId;
+              _candidateRanks = progress.candidateRanks;
+              _wordIds = progress.wordIds;
+              _activePositions = progress.activePositions;
               break;
           }
         });
@@ -1980,6 +1992,10 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
         _attempted = result.attempted;
         _elapsedMs = result.elapsedMs;
         _distance = result.hammingDistance;
+        _combinationId = result.attempted;
+        _candidateRanks = const [];
+        _wordIds = const [];
+        _activePositions = const [];
         _liveMatrix = result.candidateMatrix;
         _liveAnchors = result.anchors;
         _liveCandidatesPerColumn = result.candidatesPerColumn;
@@ -2041,6 +2057,11 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
                     usedLlm: _liveUsedLlm,
                     hammingDistance: _distance ?? 0,
                     attempted: _attempted ?? 0,
+                    elapsedMs: _elapsedMs ?? 0,
+                    combinationId: _combinationId,
+                    candidateRanks: _candidateRanks,
+                    wordIds: _wordIds,
+                    activePositions: _activePositions,
                   ),
                 ],
               ],
@@ -2066,6 +2087,7 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
                     usedLlm: result.usedLlm,
                     hammingDistance: result.hammingDistance,
                     attempted: result.attempted,
+                    elapsedMs: result.elapsedMs,
                   ),
                 ],
               ],
@@ -2122,9 +2144,13 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
     final elapsedMs = _elapsedMs;
     final distance = _distance;
     if (attempted != null) parts.add('已尝试 $attempted 次');
+    if (_combinationId != null) parts.add('组合 #$_combinationId');
     if (distance != null) parts.add('距离 $distance');
     if (elapsedMs != null) {
       parts.add('耗时 ${(elapsedMs / 1000).toStringAsFixed(1)} 秒');
+      if (attempted != null) {
+        parts.add('吞吐 ${_formatAttemptRate(attempted, elapsedMs)}');
+      }
     }
     return parts.join(' · ');
   }
@@ -2138,6 +2164,11 @@ class _CandidateMatrixTable extends StatelessWidget {
     required this.usedLlm,
     required this.hammingDistance,
     required this.attempted,
+    required this.elapsedMs,
+    this.combinationId,
+    this.candidateRanks = const [],
+    this.wordIds = const [],
+    this.activePositions = const [],
   });
 
   final List<List<int>> matrix;
@@ -2146,6 +2177,11 @@ class _CandidateMatrixTable extends StatelessWidget {
   final bool usedLlm;
   final int hammingDistance;
   final int attempted;
+  final int elapsedMs;
+  final int? combinationId;
+  final List<int> candidateRanks;
+  final List<int> wordIds;
+  final List<int> activePositions;
 
   @override
   Widget build(BuildContext context) {
@@ -2159,6 +2195,15 @@ class _CandidateMatrixTable extends StatelessWidget {
         : anchors.length;
     final theoretical = _boundedSearchSpace(rows, k, hammingDistance);
     final fullSpace = _boundedSearchSpace(rows, k, rows);
+    final rowOrder = _matrixRowOrder(rows, candidateRanks, activePositions);
+    final rankOrder = _matrixRankOrder(k, candidateRanks, rowOrder);
+    final activeRows = rowOrder
+        .where(
+          (row) => _isActiveMatrixRow(row, candidateRanks, activePositions),
+        )
+        .map((row) => row + 1)
+        .take(4)
+        .join('、');
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(12),
@@ -2183,6 +2228,10 @@ class _CandidateMatrixTable extends StatelessWidget {
               'D≤$hammingDistance 理论 $theoretical',
               '全矩阵 $fullSpace',
               '实际 $attempted',
+              if (combinationId != null) '组合 #$combinationId',
+              if (elapsedMs > 0)
+                '吞吐 ${_formatAttemptRate(attempted, elapsedMs)}',
+              if (activeRows.isNotEmpty) '活跃 $activeRows',
             ].join(' · '),
             style: theme.textTheme.bodySmall?.copyWith(
               color: c.onSurfaceVariant,
@@ -2209,32 +2258,55 @@ class _CandidateMatrixTable extends StatelessWidget {
                         style: theme.textTheme.labelSmall,
                         isHeader: true,
                       ),
-                    for (var rank = 0; rank < k; rank++)
+                    for (final rank in rankOrder)
                       _MatrixCell(
                         text: '候选 ${rank + 1}',
                         style: theme.textTheme.labelSmall,
                         isHeader: true,
+                        isActive: _rankIsActive(rank, candidateRanks),
                       ),
                   ],
                 ),
-                for (var row = 0; row < rows; row++)
+                for (final row in rowOrder)
                   TableRow(
                     children: [
                       _MatrixCell(
                         text: '${row + 1}',
                         style: theme.textTheme.bodySmall,
+                        isActive: _isActiveMatrixRow(
+                          row,
+                          candidateRanks,
+                          activePositions,
+                        ),
                       ),
                       if (anchors.isNotEmpty)
                         _MatrixCell(
                           text: row < anchors.length ? anchors[row] : '-',
                           style: theme.textTheme.bodySmall,
+                          isActive: _isActiveMatrixRow(
+                            row,
+                            candidateRanks,
+                            activePositions,
+                          ),
                         ),
-                      for (var rank = 0; rank < k; rank++)
+                      for (final rank in rankOrder)
                         _MatrixCell(
                           text: row < matrix.length
                               ? _candidateLabel(matrix[row], rank)
                               : '-',
                           style: theme.textTheme.bodySmall,
+                          isSelected: _isSelectedCandidate(
+                            row: row,
+                            rank: rank,
+                            matrix: matrix,
+                            candidateRanks: candidateRanks,
+                            wordIds: wordIds,
+                          ),
+                          isActive: _isActiveMatrixRow(
+                            row,
+                            candidateRanks,
+                            activePositions,
+                          ),
                         ),
                     ],
                   ),
@@ -2248,21 +2320,43 @@ class _CandidateMatrixTable extends StatelessWidget {
 }
 
 class _MatrixCell extends StatelessWidget {
-  const _MatrixCell({required this.text, this.style, this.isHeader = false});
+  const _MatrixCell({
+    required this.text,
+    this.style,
+    this.isHeader = false,
+    this.isSelected = false,
+    this.isActive = false,
+  });
 
   final String text;
   final TextStyle? style;
   final bool isHeader;
+  final bool isSelected;
+  final bool isActive;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
+    final c = Theme.of(context).colorScheme;
+    final color = isSelected
+        ? (isActive ? c.primaryContainer : c.secondaryContainer)
+        : (isActive ? c.surfaceContainerHighest : null);
+    final foreground = isSelected
+        ? (isActive ? c.onPrimaryContainer : c.onSecondaryContainer)
+        : null;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 140),
+      curve: Curves.easeOutCubic,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: color,
+        border: isSelected ? Border.all(color: c.primary, width: 1.2) : null,
+      ),
       child: SelectableText(
         text,
         style: style?.copyWith(
           fontWeight: isHeader ? FontWeight.w700 : style?.fontWeight,
           fontFamily: isHeader ? null : 'monospace',
+          color: foreground,
         ),
       ),
     );
@@ -2369,6 +2463,7 @@ class _VerificationStatusBox extends StatelessWidget {
               '距离 $hammingDistance',
               '尝试 $attempted 次',
               '${(elapsedMs / 1000).toStringAsFixed(1)} 秒',
+              if (elapsedMs > 0) _formatAttemptRate(attempted, elapsedMs),
             ].join(' · '),
             style: theme.textTheme.bodySmall?.copyWith(
               color: c.onSurfaceVariant,
@@ -2570,6 +2665,107 @@ String _candidateLabel(List<int> row, int rank) {
   final id = row[rank];
   final word = wordById(id) ?? '?';
   return '$id $word';
+}
+
+List<int> _matrixRowOrder(
+  int rows,
+  List<int> candidateRanks,
+  List<int> activePositions,
+) {
+  final seen = <int>{};
+  final ordered = <int>[];
+
+  void add(int row) {
+    if (row < 0 || row >= rows || !seen.add(row)) return;
+    ordered.add(row);
+  }
+
+  for (final row in activePositions) {
+    add(row);
+  }
+  if (ordered.isEmpty) {
+    for (var row = 0; row < candidateRanks.length && row < rows; row++) {
+      if (candidateRanks[row] > 0) add(row);
+    }
+  }
+  for (var row = 0; row < rows; row++) {
+    add(row);
+  }
+  return ordered;
+}
+
+List<int> _matrixRankOrder(
+  int k,
+  List<int> candidateRanks,
+  List<int> rowOrder,
+) {
+  final seen = <int>{};
+  final ordered = <int>[];
+
+  void add(int rank) {
+    if (rank < 0 || rank >= k || !seen.add(rank)) return;
+    ordered.add(rank);
+  }
+
+  for (final row in rowOrder) {
+    if (row >= 0 && row < candidateRanks.length && candidateRanks[row] > 0) {
+      add(candidateRanks[row]);
+    }
+  }
+  for (var rank = 0; rank < k; rank++) {
+    add(rank);
+  }
+  return ordered;
+}
+
+bool _isActiveMatrixRow(
+  int row,
+  List<int> candidateRanks,
+  List<int> activePositions,
+) {
+  if (activePositions.contains(row)) return true;
+  return row >= 0 && row < candidateRanks.length && candidateRanks[row] > 0;
+}
+
+bool _rankIsActive(int rank, List<int> candidateRanks) {
+  return rank > 0 && candidateRanks.contains(rank);
+}
+
+bool _isSelectedCandidate({
+  required int row,
+  required int rank,
+  required List<List<int>> matrix,
+  required List<int> candidateRanks,
+  required List<int> wordIds,
+}) {
+  if (row < 0 ||
+      row >= matrix.length ||
+      rank < 0 ||
+      rank >= matrix[row].length) {
+    return false;
+  }
+  if (row < candidateRanks.length) {
+    return candidateRanks[row] == rank;
+  }
+  if (row < wordIds.length) {
+    return matrix[row][rank] == wordIds[row];
+  }
+  return false;
+}
+
+String _formatAttemptRate(int attempted, int elapsedMs) {
+  if (attempted <= 0 || elapsedMs <= 0) return '0 次/秒';
+  final rate = attempted * 1000 / elapsedMs;
+  if (rate >= 100000000) {
+    return '${(rate / 100000000).toStringAsFixed(2)} 亿次/秒';
+  }
+  if (rate >= 10000) {
+    return '${(rate / 10000).toStringAsFixed(1)} 万次/秒';
+  }
+  if (rate >= 1000) {
+    return '${rate.toStringAsFixed(0)} 次/秒';
+  }
+  return '${rate.toStringAsFixed(1)} 次/秒';
 }
 
 int _boundedSearchSpace(int rows, int k, int maxDistance) {

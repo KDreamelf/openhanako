@@ -15,8 +15,7 @@ class WindowsRecoveryAccelerator implements RecoveryAccelerator {
     required int dMaxHard,
     required Duration hardDeadline,
     int? workerCount,
-    void Function(int attempted, int elapsedMs, int currentHammingDistance)?
-    onProgress,
+    void Function(AcceleratedRecoveryProgress progress)? onProgress,
   }) async {
     if (!Platform.isWindows) {
       throw UnsupportedError('Windows 原生恢复后端仅在 Windows 上可用');
@@ -41,9 +40,17 @@ class WindowsRecoveryAccelerator implements RecoveryAccelerator {
         onProgress: onProgress == null
             ? null
             : (progress) => onProgress(
-                _intValue(progress['attempted']),
-                _intValue(progress['elapsed_ms']),
-                _intValue(progress['hamming_distance']),
+                AcceleratedRecoveryProgress(
+                  attempted: _intValue(progress['attempted']),
+                  elapsedMs: _intValue(progress['elapsed_ms']),
+                  currentHammingDistance: _intValue(
+                    progress['hamming_distance'],
+                  ),
+                  combinationId: _nullableIntValue(progress['combination_id']),
+                  candidateRanks: _intList(progress['candidate_ranks']),
+                  wordIds: _intList(progress['word_ids']),
+                  activePositions: _intList(progress['active_positions']),
+                ),
               ),
       );
       return _parseOutcome(result);
@@ -70,5 +77,20 @@ class WindowsRecoveryAccelerator implements RecoveryAccelerator {
     if (value is int) return value;
     if (value is num) return value.toInt();
     return int.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  int? _nullableIntValue(Object? value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return int.tryParse(value.toString());
+  }
+
+  List<int> _intList(Object? value) {
+    if (value is! List) return const [];
+    return value
+        .map(_nullableIntValue)
+        .whereType<int>()
+        .toList(growable: false);
   }
 }

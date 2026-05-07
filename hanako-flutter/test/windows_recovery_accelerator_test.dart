@@ -33,6 +33,7 @@ void main() {
     expect(outcome.backend, startsWith('cuda:'));
 
     var progressEvents = 0;
+    var progressWithSnapshot = 0;
     final progressOutcome = await accelerator.tryRecover(
       matrix: [
         for (final id in ids)
@@ -50,11 +51,16 @@ void main() {
       dMaxHard: 4,
       hardDeadline: const Duration(seconds: 30),
       workerCount: 1,
-      onProgress: (attempted, elapsedMs, currentHammingDistance) {
+      onProgress: (progress) {
         progressEvents++;
+        if (progress.candidateRanks.length == ids.length &&
+            progress.wordIds.length == ids.length) {
+          progressWithSnapshot++;
+        }
       },
     );
     expect(progressOutcome.found, isFalse);
     expect(progressEvents, greaterThan(0));
+    expect(progressWithSnapshot, greaterThan(0));
   });
 }

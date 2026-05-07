@@ -17,6 +17,7 @@ const ENTROPY_BYTES: usize = 16;
 const PBKDF2_ROUNDS: u32 = 2048;
 const CUDA_BATCH_SIZE: usize = 8192;
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
+const CPU_PROGRESS_SNAPSHOT_INTERVAL: u64 = 2048;
 
 #[derive(Debug, Deserialize)]
 struct RecoverySearchRequest {
@@ -160,11 +161,13 @@ where
     let mut last_distance = 0;
     let mut batch_ids = Vec::<Vec<u16>>::with_capacity(CUDA_BATCH_SIZE);
     let mut batch_mnemonics = Vec::<Vec<u8>>::with_capacity(CUDA_BATCH_SIZE);
-    progress.emit(attempted, last_distance, true);
+    let mut current_ids = base_ids.clone();
+    let mut current_ranks = vec![0usize; MNEMONIC_LEN];
+    progress.emit(attempted, last_distance, true, &current_ids, &current_ranks);
 
     for d in 0..=request.d_max_hard {
         last_distance = d;
-        progress.emit(attempted, last_distance, true);
+        progress.emit(attempted, last_distance, true, &current_ids, &current_ranks);
         if started.elapsed() >= deadline {
             timed_out = true;
             break;
@@ -181,29 +184,30 @@ where
 
         for c_idx in 0..c_idx_max {
             let cols = combo_at(MNEMONIC_LEN, d, c_idx);
-            let mut ids = base_ids.clone();
             for s_idx in 0..subst_max {
                 if s_idx % 256 == 0 && started.elapsed() >= deadline {
                     timed_out = true;
                     break;
                 }
 
-                ids.copy_from_slice(&base_ids);
+                current_ids.copy_from_slice(&base_ids);
+                current_ranks.fill(0);
                 let mut s = s_idx;
                 let rank_base = (k - 1) as u64;
                 for &column in &cols {
                     let rank = ((s % rank_base) + 1) as usize;
-                    ids[column] = request.matrix[column][rank];
+                    current_ids[column] = request.matrix[column][rank];
+                    current_ranks[column] = rank;
                     s /= rank_base;
                 }
                 attempted += 1;
-                progress.emit(attempted, d, false);
+                progress.emit(attempted, d, false, &current_ids, &current_ranks);
 
-                if ids_to_entropy(&ids).is_none() {
+                if ids_to_entropy(&current_ids).is_none() {
                     continue;
                 }
-                if let Some(bytes) = mnemonic_bytes(&ids, &request.wordlist) {
-                    batch_ids.push(ids.clone());
+                if let Some(bytes) = mnemonic_bytes(&current_ids, &request.wordlist) {
+                    batch_ids.push(current_ids.clone());
                     batch_mnemonics.push(bytes);
                 }
                 if batch_ids.len() >= CUDA_BATCH_SIZE {
@@ -217,7 +221,7 @@ where
                     if found.is_some() {
                         break;
                     }
-                    progress.emit(attempted, d, true);
+                    progress.emit(attempted, d, true, &current_ids, &current_ranks);
                 }
             }
             if timed_out || found.is_some() {
@@ -233,7 +237,7 @@ where
                 &mut batch_ids,
                 &mut batch_mnemonics,
             )?;
-            progress.emit(attempted, d, true);
+            progress.emit(attempted, d, true, &current_ids, &current_ranks);
         }
         if timed_out || found.is_some() {
             break;
@@ -304,12 +308,33 @@ where
     let attempted = Arc::new(AtomicU64::new(0));
     let timed_out = Arc::new(AtomicBool::new(false));
     let found = Arc::new(Mutex::new(None::<FoundSeed>));
+    let last_attempt = Arc::new(Mutex::new(AttemptSnapshot {
+        combination_id: 0,
+        ids: base_ids.clone(),
+        ranks: vec![0usize; MNEMONIC_LEN],
+    }));
     let mut last_distance = 0;
-    progress.emit(0, 0, true);
+    let snapshot = last_attempt.lock().map(|guard| guard.clone()).ok();
+    let snapshot = snapshot.as_ref();
+    progress.emit_with_combination_id(
+        0,
+        0,
+        true,
+        snapshot.map(|value| value.combination_id).unwrap_or(0),
+        snapshot
+            .map(|value| value.ids.as_slice())
+            .unwrap_or(&base_ids),
+        snapshot.map(|value| value.ranks.as_slice()).unwrap_or(&[]),
+    );
 
     for d in 0..=request.d_max_hard {
         last_distance = d;
-        progress.emit(attempted.load(Ordering::Relaxed), d, true);
+        emit_cpu_progress(
+            &mut progress,
+            attempted.load(Ordering::Relaxed),
+            d,
+            &last_attempt,
+        );
         if started.elapsed() >= deadline {
             timed_out.store(true, Ordering::Relaxed);
             break;
@@ -333,6 +358,7 @@ where
 
             let cols = combo_at(MNEMONIC_LEN, d, c_idx);
             let mut ids = base_ids.clone();
+            let mut ranks = vec![0usize; MNEMONIC_LEN];
 
             for s_idx in 0..subst_max {
                 if s_idx % 256 == 0 {
@@ -346,14 +372,25 @@ where
                 }
 
                 ids.copy_from_slice(&base_ids);
+                ranks.fill(0);
                 let mut s = s_idx;
                 let rank_base = (k - 1) as u64;
                 for &column in &cols {
                     let rank = ((s % rank_base) + 1) as usize;
                     ids[column] = request.matrix[column][rank];
+                    ranks[column] = rank;
                     s /= rank_base;
                 }
-                attempted.fetch_add(1, Ordering::Relaxed);
+                let combination_id = attempted.fetch_add(1, Ordering::Relaxed) + 1;
+                if combination_id % CPU_PROGRESS_SNAPSHOT_INTERVAL == 0 {
+                    if let Ok(mut guard) = last_attempt.lock() {
+                        *guard = AttemptSnapshot {
+                            combination_id,
+                            ids: ids.clone(),
+                            ranks: ranks.clone(),
+                        };
+                    }
+                }
 
                 if ids_to_entropy(&ids).is_none() {
                     continue;
@@ -364,6 +401,13 @@ where
 
                 if let Ok(mut guard) = found.lock() {
                     if guard.is_none() {
+                        if let Ok(mut snapshot) = last_attempt.lock() {
+                            *snapshot = AttemptSnapshot {
+                                combination_id,
+                                ids: ids.clone(),
+                                ranks: ranks.clone(),
+                            };
+                        }
                         *guard = Some(hit);
                     }
                 }
@@ -377,7 +421,12 @@ where
         if timed_out.load(Ordering::Relaxed) {
             break;
         }
-        progress.emit(attempted.load(Ordering::Relaxed), d, true);
+        emit_cpu_progress(
+            &mut progress,
+            attempted.load(Ordering::Relaxed),
+            d,
+            &last_attempt,
+        );
     }
 
     SearchResult {
@@ -399,6 +448,13 @@ where
     on_progress: &'a mut F,
 }
 
+#[derive(Clone)]
+struct AttemptSnapshot {
+    combination_id: u64,
+    ids: Vec<u16>,
+    ranks: Vec<usize>,
+}
+
 impl<'a, F> ProgressReporter<'a, F>
 where
     F: FnMut(Value),
@@ -411,7 +467,33 @@ where
         }
     }
 
-    fn emit(&mut self, attempted: u64, hamming_distance: usize, force: bool) {
+    fn emit(
+        &mut self,
+        attempted: u64,
+        hamming_distance: usize,
+        force: bool,
+        word_ids: &[u16],
+        candidate_ranks: &[usize],
+    ) {
+        self.emit_with_combination_id(
+            attempted,
+            hamming_distance,
+            force,
+            attempted,
+            word_ids,
+            candidate_ranks,
+        );
+    }
+
+    fn emit_with_combination_id(
+        &mut self,
+        attempted: u64,
+        hamming_distance: usize,
+        force: bool,
+        combination_id: u64,
+        word_ids: &[u16],
+        candidate_ranks: &[usize],
+    ) {
         if !force && self.last_emit.elapsed() < PROGRESS_EMIT_INTERVAL {
             return;
         }
@@ -419,9 +501,41 @@ where
             "attempted": attempted,
             "elapsed_ms": self.started.elapsed().as_millis(),
             "hamming_distance": hamming_distance,
+            "combination_id": combination_id,
+            "word_ids": word_ids,
+            "candidate_ranks": candidate_ranks,
+            "active_positions": active_positions(candidate_ranks),
         }));
         self.last_emit = Instant::now();
     }
+}
+
+fn emit_cpu_progress<F>(
+    progress: &mut ProgressReporter<'_, F>,
+    attempted: u64,
+    hamming_distance: usize,
+    last_attempt: &Arc<Mutex<AttemptSnapshot>>,
+) where
+    F: FnMut(Value),
+{
+    if let Ok(snapshot) = last_attempt.lock() {
+        progress.emit_with_combination_id(
+            attempted,
+            hamming_distance,
+            true,
+            snapshot.combination_id,
+            &snapshot.ids,
+            &snapshot.ranks,
+        );
+    }
+}
+
+fn active_positions(candidate_ranks: &[usize]) -> Vec<usize> {
+    candidate_ranks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, rank)| if *rank > 0 { Some(index) } else { None })
+        .collect()
 }
 
 fn verify_candidate(
@@ -630,12 +744,19 @@ mod tests {
         };
 
         let mut progress_count = 0usize;
-        let result = search_cpu(&request, &mut |_| {
+        let mut snapshot_count = 0usize;
+        let result = search_cpu(&request, &mut |progress| {
             progress_count += 1;
+            if progress["candidate_ranks"].as_array().map(Vec::len) == Some(MNEMONIC_LEN)
+                && progress["word_ids"].as_array().map(Vec::len) == Some(MNEMONIC_LEN)
+            {
+                snapshot_count += 1;
+            }
         });
 
         assert!(result.found.is_none());
         assert!(progress_count > 0);
+        assert!(snapshot_count > 0);
     }
 
     #[test]
@@ -661,13 +782,20 @@ mod tests {
         };
 
         let mut progress_count = 0usize;
-        let result = search_cuda(&request, &mut |_| {
+        let mut snapshot_count = 0usize;
+        let result = search_cuda(&request, &mut |progress| {
             progress_count += 1;
+            if progress["candidate_ranks"].as_array().map(Vec::len) == Some(MNEMONIC_LEN)
+                && progress["word_ids"].as_array().map(Vec::len) == Some(MNEMONIC_LEN)
+            {
+                snapshot_count += 1;
+            }
         })
         .expect("cuda search should run when status is available");
 
         assert!(result.found.is_none());
         assert!(progress_count > 0);
+        assert!(snapshot_count > 0);
     }
 
     #[test]
@@ -689,13 +817,20 @@ mod tests {
         });
 
         let mut progress_count = 0usize;
-        let result = search_request(&params, &mut |_| {
+        let mut snapshot_count = 0usize;
+        let result = search_request(&params, &mut |progress| {
             progress_count += 1;
+            if progress["candidate_ranks"].as_array().map(Vec::len) == Some(MNEMONIC_LEN)
+                && progress["word_ids"].as_array().map(Vec::len) == Some(MNEMONIC_LEN)
+            {
+                snapshot_count += 1;
+            }
         })
         .expect("search request should run");
 
         assert_eq!(result["found"], false);
         assert!(progress_count > 0);
+        assert!(snapshot_count > 0);
     }
 
     fn test_wordlist() -> Vec<String> {

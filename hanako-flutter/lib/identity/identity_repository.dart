@@ -70,8 +70,12 @@ class StoryRecoveryProgress {
       attempted = null,
       elapsedMs = null,
       currentHammingDistance = null,
+      combinationId = null,
       columns = const [],
       anchors = const [],
+      candidateRanks = const [],
+      wordIds = const [],
+      activePositions = const [],
       candidatesPerColumn = 0,
       usedLlm = true;
 
@@ -84,16 +88,27 @@ class StoryRecoveryProgress {
        attempted = null,
        elapsedMs = null,
        currentHammingDistance = null,
+       combinationId = null,
        columns = _copyMatrix(columns),
-       anchors = List<String>.unmodifiable(anchors);
+       anchors = List<String>.unmodifiable(anchors),
+       candidateRanks = const [],
+       wordIds = const [],
+       activePositions = const [];
 
   StoryRecoveryProgress.matrixRecovery({
     required this.attempted,
     required this.elapsedMs,
     required this.currentHammingDistance,
+    this.combinationId,
+    List<int> candidateRanks = const [],
+    List<int> wordIds = const [],
+    List<int> activePositions = const [],
   }) : stage = StoryRecoveryProgressStage.matrixRecovery,
        columns = const [],
        anchors = const [],
+       candidateRanks = List<int>.unmodifiable(candidateRanks),
+       wordIds = List<int>.unmodifiable(wordIds),
+       activePositions = List<int>.unmodifiable(activePositions),
        candidatesPerColumn = 0,
        usedLlm = true;
 
@@ -101,8 +116,12 @@ class StoryRecoveryProgress {
   final int? attempted;
   final int? elapsedMs;
   final int? currentHammingDistance;
+  final int? combinationId;
   final List<List<int>> columns;
   final List<String> anchors;
+  final List<int> candidateRanks;
+  final List<int> wordIds;
+  final List<int> activePositions;
   final int candidatesPerColumn;
   final bool usedLlm;
 }
@@ -415,6 +434,10 @@ class IdentityRepository {
                   attempted: p.attempted,
                   elapsedMs: p.elapsedMs,
                   currentHammingDistance: p.currentHammingDistance,
+                  combinationId: p.combinationId,
+                  candidateRanks: p.candidateRanks,
+                  wordIds: p.wordIds,
+                  activePositions: p.activePositions,
                 ),
               );
             },
@@ -465,17 +488,21 @@ class IdentityRepository {
     if (accelerator == null || targetPublicKeyHashes.isEmpty) {
       return null;
     }
-    void emitProgress(
-      int attempted,
-      int elapsedMs,
-      int currentHammingDistance,
-    ) {
-      onProgress?.call(attempted, elapsedMs, currentHammingDistance);
+    void emitProgress(AcceleratedRecoveryProgress progress) {
+      onProgress?.call(
+        progress.attempted,
+        progress.elapsedMs,
+        progress.currentHammingDistance,
+      );
       onRecoveryProgress?.call(
         StoryRecoveryProgress.matrixRecovery(
-          attempted: attempted,
-          elapsedMs: elapsedMs,
-          currentHammingDistance: currentHammingDistance,
+          attempted: progress.attempted,
+          elapsedMs: progress.elapsedMs,
+          currentHammingDistance: progress.currentHammingDistance,
+          combinationId: progress.combinationId,
+          candidateRanks: progress.candidateRanks,
+          wordIds: progress.wordIds,
+          activePositions: progress.activePositions,
         ),
       );
     }
@@ -489,9 +516,11 @@ class IdentityRepository {
         onProgress: emitProgress,
       );
       emitProgress(
-        outcome.attempted,
-        outcome.elapsedMs,
-        outcome.hammingDistance,
+        AcceleratedRecoveryProgress(
+          attempted: outcome.attempted,
+          elapsedMs: outcome.elapsedMs,
+          currentHammingDistance: outcome.hammingDistance,
+        ),
       );
       if (!outcome.found) {
         return _RecoveredSeedResult.failed(

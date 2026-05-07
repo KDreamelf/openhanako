@@ -317,10 +317,20 @@ class RecoveryProgress {
     required this.currentHammingDistance,
     required this.attempted,
     required this.elapsedMs,
-  });
+    this.combinationId,
+    List<int> candidateRanks = const [],
+    List<int> wordIds = const [],
+    List<int> activePositions = const [],
+  }) : candidateRanks = List<int>.unmodifiable(candidateRanks),
+       wordIds = List<int>.unmodifiable(wordIds),
+       activePositions = List<int>.unmodifiable(activePositions);
   final int currentHammingDistance;
   final int attempted;
   final int elapsedMs;
+  final int? combinationId;
+  final List<int> candidateRanks;
+  final List<int> wordIds;
+  final List<int> activePositions;
 }
 
 /// 共享配置（调用方在 tryRecover 之前用 [setKnownHashes] 注入目标哈希）。

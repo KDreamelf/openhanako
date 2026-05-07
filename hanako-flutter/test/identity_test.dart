@@ -714,12 +714,20 @@ class _FakeRecoveryAccelerator implements RecoveryAccelerator {
     required int dMaxHard,
     required Duration hardDeadline,
     int? workerCount,
-    void Function(int attempted, int elapsedMs, int currentHammingDistance)?
-    onProgress,
+    void Function(AcceleratedRecoveryProgress progress)? onProgress,
   }) async {
     calls++;
     lastDMaxHard = dMaxHard;
-    onProgress?.call(3, 5, 0);
+    onProgress?.call(
+      AcceleratedRecoveryProgress(
+        attempted: 3,
+        elapsedMs: 5,
+        currentHammingDistance: 0,
+        combinationId: 3,
+        candidateRanks: List<int>.filled(12, 0),
+        wordIds: matrix.map((row) => row.first).toList(growable: false),
+      ),
+    );
     final ids = _ids();
     final seed = tryMnemonicFromIds(ids)!;
     final pair = HanakoKeyPair.fromPrivateKeyBytes(seed.privateKeyBytes);
