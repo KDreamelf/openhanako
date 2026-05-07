@@ -193,6 +193,7 @@ const EditChannelModal = (props) => {
     thinking_to_content: false,
     proxy: '',
     pass_through_body_enabled: false,
+    markdown_ast_tool_calls_enabled: false,
     system_prompt: '',
     system_prompt_override: false,
     settings: '',
@@ -516,6 +517,7 @@ const EditChannelModal = (props) => {
     thinking_to_content: false,
     proxy: '',
     pass_through_body_enabled: false,
+    markdown_ast_tool_calls_enabled: false,
     system_prompt: '',
   });
   const showApiConfigCard = true; // 控制是否显示 API 配置卡片
@@ -523,19 +525,29 @@ const EditChannelModal = (props) => {
 
   // 处理渠道额外设置的更新
   const handleChannelSettingsChange = (key, value) => {
+    const updates = { [key]: value };
+    if (key === 'markdown_ast_tool_calls_enabled' && value) {
+      updates.pass_through_body_enabled = false;
+    }
+    if (key === 'pass_through_body_enabled' && value) {
+      updates.markdown_ast_tool_calls_enabled = false;
+    }
+
     // 更新内部状态
-    setChannelSettings((prev) => ({ ...prev, [key]: value }));
+    setChannelSettings((prev) => ({ ...prev, ...updates }));
 
     // 同步更新到表单字段
     if (formApiRef.current) {
-      formApiRef.current.setValue(key, value);
+      Object.entries(updates).forEach(([field, fieldValue]) => {
+        formApiRef.current.setValue(field, fieldValue);
+      });
     }
 
     // 同步更新inputs状态
-    setInputs((prev) => ({ ...prev, [key]: value }));
+    setInputs((prev) => ({ ...prev, ...updates }));
 
     // 生成setting JSON并更新
-    const newSettings = { ...channelSettings, [key]: value };
+    const newSettings = { ...channelSettings, ...updates };
     const settingsJson = JSON.stringify(newSettings);
     handleInputChange('setting', settingsJson);
   };
@@ -867,6 +879,8 @@ const EditChannelModal = (props) => {
           data.proxy = parsedSettings.proxy || '';
           data.pass_through_body_enabled =
             parsedSettings.pass_through_body_enabled || false;
+          data.markdown_ast_tool_calls_enabled =
+            parsedSettings.markdown_ast_tool_calls_enabled || false;
           data.system_prompt = parsedSettings.system_prompt || '';
           data.system_prompt_override =
             parsedSettings.system_prompt_override || false;
@@ -876,6 +890,7 @@ const EditChannelModal = (props) => {
           data.thinking_to_content = false;
           data.proxy = '';
           data.pass_through_body_enabled = false;
+          data.markdown_ast_tool_calls_enabled = false;
           data.system_prompt = '';
           data.system_prompt_override = false;
         }
@@ -884,6 +899,7 @@ const EditChannelModal = (props) => {
         data.thinking_to_content = false;
         data.proxy = '';
         data.pass_through_body_enabled = false;
+        data.markdown_ast_tool_calls_enabled = false;
         data.system_prompt = '';
         data.system_prompt_override = false;
       }
@@ -993,6 +1009,7 @@ const EditChannelModal = (props) => {
         thinking_to_content: data.thinking_to_content,
         proxy: data.proxy,
         pass_through_body_enabled: data.pass_through_body_enabled,
+        markdown_ast_tool_calls_enabled: data.markdown_ast_tool_calls_enabled,
         system_prompt: data.system_prompt,
         system_prompt_override: data.system_prompt_override || false,
       });
@@ -1035,6 +1052,7 @@ const EditChannelModal = (props) => {
         (data.system_prompt && data.system_prompt.trim()) ||
         data.thinking_to_content ||
         data.pass_through_body_enabled ||
+        data.markdown_ast_tool_calls_enabled ||
         data.force_format ||
         data.claude_beta_query ||
         data.system_prompt_override;
@@ -1382,6 +1400,7 @@ const EditChannelModal = (props) => {
       thinking_to_content: false,
       proxy: '',
       pass_through_body_enabled: false,
+      markdown_ast_tool_calls_enabled: false,
       system_prompt: '',
       system_prompt_override: false,
     });
@@ -1752,6 +1771,8 @@ const EditChannelModal = (props) => {
       thinking_to_content: localInputs.thinking_to_content || false,
       proxy: localInputs.proxy || '',
       pass_through_body_enabled: localInputs.pass_through_body_enabled || false,
+      markdown_ast_tool_calls_enabled:
+        localInputs.markdown_ast_tool_calls_enabled || false,
       system_prompt: localInputs.system_prompt || '',
       system_prompt_override: localInputs.system_prompt_override || false,
     };
@@ -1833,6 +1854,7 @@ const EditChannelModal = (props) => {
     delete localInputs.thinking_to_content;
     delete localInputs.proxy;
     delete localInputs.pass_through_body_enabled;
+    delete localInputs.markdown_ast_tool_calls_enabled;
     delete localInputs.system_prompt;
     delete localInputs.system_prompt_override;
     delete localInputs.is_enterprise_account;
@@ -2524,7 +2546,8 @@ const EditChannelModal = (props) => {
                   )}
 
                   <Form.Switch field='thinking_to_content' label={t('思考内容转换')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelSettingsChange('thinking_to_content', value)} extraText={t('将 reasoning_content 转换为 <think> 标签拼接到内容中')} />
-                  <Form.Switch field='pass_through_body_enabled' label={t('透传请求体')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelSettingsChange('pass_through_body_enabled', value)} extraText={t('启用请求体透传功能')} />
+                  <Form.Switch field='markdown_ast_tool_calls_enabled' label={t('将工具调用处理为 Markdown AST')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelSettingsChange('markdown_ast_tool_calls_enabled', value)} extraText={t('发送到上游前，将标准 OpenAI 工具调用转换为 Markdown AST 工具块。不能与透传请求体同时打开，开启一个，另一个会自动关闭。')} />
+                  <Form.Switch field='pass_through_body_enabled' label={t('透传请求体')} checkedText={t('开')} uncheckedText={t('关')} onChange={(value) => handleChannelSettingsChange('pass_through_body_enabled', value)} extraText={t('启用请求体透传功能。不能与 Markdown AST 工具调用同时打开，开启一个，另一个会自动关闭。')} />
 
                   <Form.Input field='proxy' label={t('代理地址')} placeholder={t('例如: socks5://user:pass@host:port')} onChange={(value) => handleChannelSettingsChange('proxy', value)} showClear extraText={t('用于配置网络代理，支持 socks5 协议')} />
 

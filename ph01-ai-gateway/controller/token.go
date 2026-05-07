@@ -19,6 +19,10 @@ func buildMaskedTokenResponse(token *model.Token) *model.Token {
 		return nil
 	}
 	maskedToken := *token
+	if model.IsPH01ManagedToken(token) {
+		maskedToken.Key = ""
+		return &maskedToken
+	}
 	maskedToken.Key = token.GetMaskedKey()
 	return &maskedToken
 }
@@ -89,8 +93,8 @@ func GetTokenKey(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if model.IsPH01DefaultToken(token) {
-		common.ApiErrorMsg(c, "PH01 default key cannot be used as an API credential")
+	if model.IsPH01ManagedToken(token) {
+		common.ApiErrorMsg(c, "PH01 system key cannot be used as an API credential")
 		return
 	}
 	common.ApiSuccess(c, gin.H{
@@ -145,8 +149,8 @@ func GetTokenUsage(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgTokenGetInfoFailed)
 		return
 	}
-	if model.IsPH01DefaultToken(token) {
-		common.ApiErrorMsg(c, "PH01 default key cannot be used as an API credential")
+	if model.IsPH01ManagedToken(token) {
+		common.ApiErrorMsg(c, "PH01 system key cannot be used as an API credential")
 		return
 	}
 
@@ -248,10 +252,6 @@ func AddToken(c *gin.Context) {
 func DeleteToken(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
 	userId := c.GetInt("id")
-	if model.IsPH01User(userId) {
-		common.ApiErrorMsg(c, "PH01 default key cannot be deleted")
-		return
-	}
 	err := model.DeleteTokenById(id, userId)
 	if err != nil {
 		common.ApiError(c, err)
@@ -292,17 +292,25 @@ func UpdateToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if model.IsPH01DefaultToken(cleanToken) {
+	if model.IsPH01ManagedToken(cleanToken) {
 		if statusOnly != "" {
-			common.ApiErrorMsg(c, "PH01 default key status cannot be changed")
+			common.ApiErrorMsg(c, "PH01 system key status cannot be changed")
 			return
 		}
-		cleanToken.Group = token.Group
-		cleanToken.CrossGroupRetry = token.CrossGroupRetry
-		cleanToken.Name = model.PH01DefaultTokenName
+		if model.IsPH01PublicToken(cleanToken) {
+			cleanToken.Name = model.PH01PublicTokenName
+		} else {
+			cleanToken.Name = model.PH01DefaultTokenName
+		}
 		cleanToken.Status = common.TokenStatusEnabled
 		cleanToken.ExpiredTime = -1
-		cleanToken.UnlimitedQuota = true
+		cleanToken.RemainQuota = token.RemainQuota
+		cleanToken.UnlimitedQuota = token.UnlimitedQuota
+		cleanToken.ModelLimitsEnabled = token.ModelLimitsEnabled
+		cleanToken.ModelLimits = token.ModelLimits
+		cleanToken.AllowIps = token.AllowIps
+		cleanToken.Group = token.Group
+		cleanToken.CrossGroupRetry = token.CrossGroupRetry
 		if err := cleanToken.Update(); err != nil {
 			common.ApiError(c, err)
 			return
@@ -361,10 +369,6 @@ func DeleteTokenBatch(c *gin.Context) {
 		return
 	}
 	userId := c.GetInt("id")
-	if model.IsPH01User(userId) {
-		common.ApiErrorMsg(c, "PH01 default key cannot be deleted")
-		return
-	}
 	count, err := model.BatchDeleteTokens(tokenBatch.Ids, userId)
 	if err != nil {
 		common.ApiError(c, err)
@@ -388,10 +392,6 @@ func GetTokenKeysBatch(c *gin.Context) {
 		return
 	}
 	userId := c.GetInt("id")
-	if model.IsPH01User(userId) {
-		common.ApiErrorMsg(c, "PH01 default key cannot be used as an API credential")
-		return
-	}
 	tokens, err := model.GetTokenKeysByIds(tokenBatch.Ids, userId)
 	if err != nil {
 		common.ApiError(c, err)
@@ -399,6 +399,10 @@ func GetTokenKeysBatch(c *gin.Context) {
 	}
 	keysMap := make(map[int]string)
 	for _, t := range tokens {
+		if model.IsPH01ManagedToken(&t) {
+			common.ApiErrorMsg(c, "PH01 system key cannot be used as an API credential")
+			return
+		}
 		keysMap[t.Id] = t.GetFullKey()
 	}
 	common.ApiSuccess(c, gin.H{"keys": keysMap})

@@ -38,13 +38,13 @@ class Tool {
   });
 
   Map<String, dynamic> toOpenAI() => {
-        'type': 'function',
-        'function': {
-          'name': name,
-          'description': description,
-          'parameters': parameters,
-        },
-      };
+    'type': 'function',
+    'function': {
+      'name': name,
+      'description': description,
+      'parameters': parameters,
+    },
+  };
 }
 
 /// 流式事件（sealed 强制 exhaustive switch）。
@@ -65,7 +65,12 @@ class ThinkingDelta extends LlmEvent {
 class ToolCallStart extends LlmEvent {
   final String id;
   final String name;
-  const ToolCallStart({required this.id, required this.name});
+  final String? thoughtSignature;
+  const ToolCallStart({
+    required this.id,
+    required this.name,
+    this.thoughtSignature,
+  });
 }
 
 class ToolCallArgsDelta extends LlmEvent {
@@ -87,5 +92,6 @@ class MessageDone extends LlmEvent {
 class LlmError extends LlmEvent {
   final String message;
   final int? statusCode;
-  const LlmError({required this.message, this.statusCode});
+  final String? details;
+  const LlmError({required this.message, this.statusCode, this.details});
 }

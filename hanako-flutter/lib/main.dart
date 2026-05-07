@@ -1,19 +1,29 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:windows_single_instance/windows_single_instance.dart';
 
 import 'app/desktop_setup.dart';
 import 'app/ipc_registry.dart';
+import 'app/protocol_login_service.dart';
 import 'app/providers.dart';
+import 'app/window_factory.dart';
 import 'core/engine.dart';
+import 'ui/auth/protocol_login_confirm_dialog.dart';
 import 'ui/browser/browser_window.dart';
 import 'ui/chat_page.dart';
 import 'ui/editor/editor_window.dart';
-import 'ui/settings/settings_window.dart';
 import 'ui/themes/themes.dart';
+
+final rootNavigatorKey = GlobalKey<NavigatorState>();
+final rootScaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
+ProtocolLoginService? _protocolLoginService;
+final List<String> _pendingProtocolUrls = [];
 
 void main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,6 +39,15 @@ void main(List<String> args) async {
     return;
   }
 
+  final initialProtocolUrls = ProtocolLoginService.urlsFromArgs(args);
+  if (Platform.isWindows) {
+    await WindowsSingleInstance.ensureSingleInstance(
+      args,
+      'phantasm_01',
+      onSecondWindow: _handleSecondInstanceArgs,
+    );
+  }
+
   // 主窗口
   await DesktopSetup.initWindow();
 
@@ -42,13 +61,29 @@ void main(List<String> args) async {
     return;
   }
 
+  _protocolLoginService = ProtocolLoginService(
+    engine,
+    messengerKey: rootScaffoldMessengerKey,
+    onIdentityChanged: _notifyIdentityChanged,
+    authorizationConfirmer: _confirmProtocolLoginAuthorization,
+  );
   IpcRegistry(engine).install();
-  await DesktopSetup.installTray();
+  await DesktopSetup.installTray(
+    onOpenSettings: () async {
+      final context = rootNavigatorKey.currentContext;
+      if (context == null) return;
+      await WindowFactory.openSettings(context);
+    },
+  );
   await DesktopSetup.installHotkeys(
     onQuickSwitchModel: () {
       // TODO Phase 3.5: 弹出模型切换 picker
     },
   );
+  if (args.contains('--ph01-smoke-quit')) {
+    await DesktopSetup.quitApp();
+    return;
+  }
 
   // 主题模式从 SharedPreferences 读取（设置窗口写入）。
   final sp = await SharedPreferences.getInstance();
@@ -68,6 +103,69 @@ void main(List<String> args) async {
       child: const HanakoApp(),
     ),
   );
+
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    final urls = <String>[...initialProtocolUrls, ..._pendingProtocolUrls];
+    _pendingProtocolUrls.clear();
+    if (urls.isNotEmpty) {
+      unawaited(_protocolLoginService?.handleUrls(urls));
+    }
+  });
+}
+
+void _handleSecondInstanceArgs(List<String> args) {
+  unawaited(DesktopSetup.showMainWindow());
+  final urls = ProtocolLoginService.urlsFromArgs(args);
+  if (urls.isEmpty) return;
+  final service = _protocolLoginService;
+  if (service == null) {
+    _pendingProtocolUrls.addAll(urls);
+    return;
+  }
+  unawaited(service.handleUrls(urls));
+}
+
+void _notifyIdentityChanged() {
+  final context = rootNavigatorKey.currentContext;
+  if (context == null) return;
+  final container = ProviderScope.containerOf(context, listen: false);
+  final notifier = container.read(identityRevisionProvider.notifier);
+  notifier.state++;
+}
+
+Future<bool> _confirmProtocolLoginAuthorization(
+  ProtocolLoginRequest request,
+) async {
+  await DesktopSetup.showMainWindow();
+  final context = rootNavigatorKey.currentContext;
+  if (context == null || !context.mounted) return false;
+  final container = ProviderScope.containerOf(context, listen: false);
+  final eng = container.read(engineProvider);
+  final cfg = eng.config.read();
+  final auth = cfg['auth'] is Map ? cfg['auth'] as Map : const {};
+  final user = cfg['user'] is Map ? cfg['user'] as Map : const {};
+  final username = _stringValue(auth['username']) ?? _stringValue(user['name']);
+  final userId = _stringValue(auth['user_id']);
+  final accountParts = <String>[];
+  if (username != null) accountParts.add(username);
+  if (userId != null) accountParts.add('ID $userId');
+  final accountLabel = accountParts.join(' · ');
+  final approved = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => ProtocolLoginConfirmDialog(
+      request: request,
+      trustedCallback: request.isTrustedCallback(eng.backendClient.aiBaseUrl),
+      accountLabel: accountLabel.isEmpty ? '本机 PH01 身份' : accountLabel,
+    ),
+  );
+  return approved ?? false;
+}
+
+String? _stringValue(Object? value) {
+  if (value is! String && value is! num) return null;
+  final text = '$value'.trim();
+  return text.isEmpty ? null : text;
 }
 
 class HanakoApp extends ConsumerWidget {
@@ -77,8 +175,10 @@ class HanakoApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final mode = ref.watch(themeModeProvider);
     return MaterialApp(
-      title: 'Hanako',
+      title: '幻宙01',
       debugShowCheckedModeBanner: false,
+      navigatorKey: rootNavigatorKey,
+      scaffoldMessengerKey: rootScaffoldMessengerKey,
       theme: HanakoThemes.warmPaper(),
       darkTheme: HanakoThemes.dark(),
       themeMode: switch (mode) {
@@ -100,18 +200,31 @@ class _SubWindowApp extends StatelessWidget {
     final route = args['route'] as String? ?? 'main';
     return ProviderScope(
       child: MaterialApp(
-        title: 'Hanako Sub Window',
+        title: '幻宙01 子窗口',
         debugShowCheckedModeBanner: false,
         theme: HanakoThemes.warmPaper(),
         darkTheme: HanakoThemes.dark(),
         themeMode: ThemeMode.system,
         home: switch (route) {
-          'settings' => const SettingsWindow(),
+          'settings' => _UnsupportedSubWindow(route: route),
           'editor' => EditorWindow(filePath: args['filePath'] as String? ?? ''),
           'browser' => BrowserWindow(url: args['url'] as String? ?? ''),
           _ => Scaffold(body: Center(child: Text('Unknown route: $route'))),
         },
       ),
+    );
+  }
+}
+
+class _UnsupportedSubWindow extends StatelessWidget {
+  const _UnsupportedSubWindow({required this.route});
+
+  final String route;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(child: Text('Unsupported sub window route: $route')),
     );
   }
 }
@@ -123,7 +236,7 @@ class _FatalErrorApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Hanako · Fatal',
+      title: '幻宙01 · Fatal',
       home: Scaffold(
         body: Padding(
           padding: const EdgeInsets.all(40),

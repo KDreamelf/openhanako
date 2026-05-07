@@ -287,6 +287,11 @@ func InitResources() error {
 
 	// Initialize options, should after model.InitDB()
 	model.InitOptionMap()
+	model.ApplyDeploymentOptionOverrides()
+	if err := model.EnsurePH01RootManagedTokens(); err != nil {
+		common.SysError("failed to ensure PH01 root managed keys: " + err.Error())
+		return err
+	}
 
 	// 清理旧的磁盘缓存文件
 	common.CleanupOldCacheFiles()

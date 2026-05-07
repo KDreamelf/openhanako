@@ -1,7 +1,7 @@
 name: hanako
-description: "Hanako - personal AI agent with memory and soul"
+description: "幻宙01 - PH01 personal AI sub-agent client"
 publish_to: 'none'
-version: 600.42.0+1
+version: 0.0.1+1
 
 environment:
   sdk: ">=3.10.0 <4.0.0"
@@ -89,3 +89,5 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   generate: true
+  assets:
+    - windows/runner/resources/app_icon.ico

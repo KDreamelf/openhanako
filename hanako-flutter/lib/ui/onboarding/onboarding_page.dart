@@ -18,6 +18,8 @@
 // 规避 BUG-5：每一步右上角永远显示「跳过」。跳过后不创建身份，
 // 仅创建匿名 agent；用户可在设置里再走"创建账号"流程。
 
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -63,6 +65,8 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
   int? _loginAttempted;
   int? _loginElapsedMs;
   int? _loginDistance;
+  Timer? _emailCooldownTimer;
+  int _emailCooldownRemaining = 0;
 
   bool _canNext() {
     switch (_step) {
@@ -126,7 +130,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
 
   /// 注册流程：发送邮箱验证码。
   Future<void> _sendRegistrationEmailCode() async {
-    if (_busy) return;
+    if (_busy || _emailCooldownRemaining > 0) return;
     final username = _userName.trim();
     final email = _email.trim();
     if (username.isEmpty || email.isEmpty || !email.contains('@')) {
@@ -145,6 +149,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
         email: email,
       );
       if (!mounted) return;
+      _startEmailCooldown(challenge.cooldownSeconds);
       setState(() {
         _emailChallenge = challenge;
         _emailCode = '';
@@ -153,10 +158,52 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
       });
     } catch (e) {
       if (!mounted) return;
+      final retryAfter = _retryAfterSeconds(e);
+      if (retryAfter > 0) {
+        _startEmailCooldown(retryAfter);
+      }
       setState(() {
         _error = '发送验证码失败：${_formatBackendError(e)}';
         _busy = false;
       });
+    }
+  }
+
+  void _handleRegistrationEmailChanged(String value) {
+    _stopEmailCooldown();
+    setState(() {
+      _email = value;
+      _emailChallenge = null;
+      _emailCode = '';
+    });
+  }
+
+  void _startEmailCooldown(int seconds) {
+    final normalized = seconds <= 0 ? 60 : seconds;
+    _emailCooldownTimer?.cancel();
+    if (!mounted) return;
+    setState(() => _emailCooldownRemaining = normalized);
+    _emailCooldownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (_emailCooldownRemaining <= 1) {
+        timer.cancel();
+        setState(() => _emailCooldownRemaining = 0);
+        return;
+      }
+      setState(() => _emailCooldownRemaining--);
+    });
+  }
+
+  void _stopEmailCooldown() {
+    _emailCooldownTimer?.cancel();
+    _emailCooldownTimer = null;
+    if (mounted && _emailCooldownRemaining != 0) {
+      setState(() => _emailCooldownRemaining = 0);
+    } else {
+      _emailCooldownRemaining = 0;
     }
   }
 
@@ -305,6 +352,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     eng.config.writeAt(['auth', 'username'], auth.username);
     eng.config.writeAt(['auth', 'tier'], auth.tier);
     eng.config.writeAt(['auth', 'pubkey_hash'], auth.pubkeyHash);
+    ref.read(identityRevisionProvider.notifier).state++;
 
     // 非阻塞同步 AI 网关授权模型列表；服务器未部署时不阻断引导完成。
     try {
@@ -340,6 +388,9 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
   }
 
   void _goBack() {
+    if (_step == 2) {
+      _stopEmailCooldown();
+    }
     setState(() {
       if (_step == 2) {
         _accountFlow = _OnboardingAccountFlow.unknown;
@@ -353,6 +404,13 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     if (error is DioException) {
       final status = error.response?.statusCode;
       final data = error.response?.data;
+      if (status == 429) {
+        final retryAfter = _retryAfterSeconds(error);
+        if (retryAfter > 0) {
+          return '操作太频繁，请 $retryAfter 秒后再试。';
+        }
+        return '操作太频繁，请稍后再试。';
+      }
       if (status == 409) {
         return '用户名已被占用，请返回上一步重新核验或更换用户名。';
       }
@@ -373,6 +431,29 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
       return '无法连接认证中心';
     }
     return '$error';
+  }
+
+  int _retryAfterSeconds(Object error) {
+    if (error is! DioException) return 0;
+    final data = error.response?.data;
+    if (data is Map) {
+      final value = data['retry_after'];
+      if (value is num && value > 0) return value.ceil();
+      if (value is String) {
+        final parsed = int.tryParse(value.trim());
+        if (parsed != null && parsed > 0) return parsed;
+      }
+    }
+    final header = error.response?.headers.value('retry-after');
+    final parsed = int.tryParse((header ?? '').trim());
+    if (parsed != null && parsed > 0) return parsed;
+    return 0;
+  }
+
+  @override
+  void dispose() {
+    _emailCooldownTimer?.cancel();
+    super.dispose();
   }
 
   @override
@@ -444,11 +525,8 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
           code: _emailCode,
           challenge: _emailChallenge,
           busy: _busy,
-          onEmailChanged: (v) => setState(() {
-            _email = v;
-            _emailChallenge = null;
-            _emailCode = '';
-          }),
+          cooldownRemaining: _emailCooldownRemaining,
+          onEmailChanged: _handleRegistrationEmailChanged,
           onCodeChanged: (v) => setState(() => _emailCode = v),
           onSendCode: _sendRegistrationEmailCode,
         );
@@ -646,6 +724,7 @@ class _StepRegistrationEmail extends StatelessWidget {
     required this.code,
     required this.challenge,
     required this.busy,
+    required this.cooldownRemaining,
     required this.onEmailChanged,
     required this.onCodeChanged,
     required this.onSendCode,
@@ -655,6 +734,7 @@ class _StepRegistrationEmail extends StatelessWidget {
   final String code;
   final RegistrationEmailChallenge? challenge;
   final bool busy;
+  final int cooldownRemaining;
   final ValueChanged<String> onEmailChanged;
   final ValueChanged<String> onCodeChanged;
   final VoidCallback onSendCode;
@@ -663,6 +743,12 @@ class _StepRegistrationEmail extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final emailReady = email.trim().isNotEmpty && email.contains('@');
+    final canSend = !busy && emailReady && cooldownRemaining <= 0;
+    final sendLabel = cooldownRemaining > 0
+        ? '$cooldownRemaining 秒后重发'
+        : challenge == null
+        ? '发送验证码'
+        : '重新发送';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -707,8 +793,8 @@ class _StepRegistrationEmail extends StatelessWidget {
             ),
             const SizedBox(width: 12),
             OutlinedButton(
-              onPressed: busy || !emailReady ? null : onSendCode,
-              child: Text(challenge == null ? '发送验证码' : '重新发送'),
+              onPressed: canSend ? onSendCode : null,
+              child: Text(sendLabel),
             ),
           ],
         ),

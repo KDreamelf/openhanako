@@ -120,6 +120,25 @@ class IdentityRepository {
   /// 兼容旧调用名；Windows DPAPI 路径会忽略 [pin]。
   Future<HanakoIdentity> unlockWithPin(String pin) => unlock(pin: pin);
 
+  /// 用当前身份的 12 个名词重新生成记忆故事。
+  ///
+  /// 若当前进程尚未解锁身份，会先从本机 vault 解锁；旧版仅保存私钥、
+  /// 没有保存助记词 ID 的 vault 无法反推出助记词，此时会抛出 [StateError]。
+  Future<IdentityRegistration> regenerateStoryForCurrent({String? pin}) async {
+    final identity = _current ?? await unlock(pin: pin);
+    final mnemonic = identity.mnemonic;
+    if (mnemonic == null) {
+      throw StateError('当前身份没有保存助记词，无法重新生成故事');
+    }
+
+    final composition = await composer.compose(mnemonic.words);
+    return IdentityRegistration(
+      identity: identity,
+      story: composition.story,
+      fallback: composition.fallback,
+    );
+  }
+
   /// 用故事恢复长期身份私钥（换设备 / 重装时走这条）。
   ///
   /// [storyOrWords] 可以是模糊故事，也可以直接是逗号 / 空格分隔的词组。
@@ -188,6 +207,11 @@ class IdentityRepository {
   Future<void> logout() async {
     _current = null;
     await keystore.deleteAll();
+  }
+
+  /// 锁定：只清空本进程内的身份，不删除本机加密 vault。
+  Future<void> lock() async {
+    _current = null;
   }
 
   /// 仅供测试：手动塞一个身份进去。

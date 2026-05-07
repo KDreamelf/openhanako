@@ -42,7 +42,7 @@ HANA_PORT=4000 dart run bin/server.dart
 
 ## 核心特性
 
-- **AI 网关模型目录**：子体只选择模型，模型列表来自 `ai.幻宙.cn` 在密钥协商后返回的授权模型列表
+- **AI 网关模型目录**：子体只选择模型，模型列表来自 `ai.xn--lbtx0e.cn` 在密钥协商后返回的授权模型列表
 - **私钥身份通信**：子体持有私钥，向 AI 网关做 ECDH 短期通道协商，聊天请求不再使用本地供应商/API Key
 - **Drift / SQLite 持久化**：与 legacy `better-sqlite3` 同 schema（facts + FTS5），**已通过兼容性测试**——现有用户 `facts.db` 可直接打开
 - **Memory 系统完整**：滚动摘要 + 4 块编译（today/week/longterm/facts）+ 元事实拆分 + 标签搜索 + FTS5 全文搜索补充

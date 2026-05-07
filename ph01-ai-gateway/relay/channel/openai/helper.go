@@ -10,6 +10,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/markdowntools"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
@@ -200,6 +201,27 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 
 	switch info.RelayFormat {
 	case types.RelayFormatOpenAI:
+		if info.ChannelSetting.MarkdownASTToolCallsEnabled {
+			response := &dto.ChatCompletionsStreamResponse{
+				Id:                responseId,
+				Object:            "chat.completion.chunk",
+				Created:           createAt,
+				Model:             model,
+				SystemFingerprint: common.GetPointer(systemFingerprint),
+			}
+			flushed, ok, err := markdowntools.FlushStream(c, response)
+			if err != nil {
+				logger.LogError(c, "markdown ast tool call stream ended incomplete: "+err.Error())
+				sendMarkdownASTToolCallError(c, err)
+				helper.Done(c)
+				return
+			}
+			if ok {
+				for i := range flushed {
+					_ = sendStreamResponseObject(c, info, flushed[i], info.ChannelSetting.ThinkingToContent)
+				}
+			}
+		}
 		if info.ShouldIncludeUsage && !containStreamUsage {
 			response := helper.GenerateFinalUsageResponse(responseId, createAt, model, *usage)
 			response.SetSystemFingerprint(systemFingerprint)
@@ -250,6 +272,23 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 		// 发送最终的 Gemini 响应
 		c.Render(-1, common.CustomEvent{Data: "data: " + string(geminiResponseStr)})
 		_ = helper.FlushWriter(c)
+	}
+}
+
+func sendMarkdownASTToolCallError(c *gin.Context, err error) {
+	message := markdowntools.ErrIncompleteToolCall.Error()
+	if err != nil {
+		message = err.Error()
+	}
+	if writeErr := helper.ObjectData(c, map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    "invalid_response_error",
+			"param":   "",
+			"code":    "markdown_ast_tool_call_incomplete",
+		},
+	}); writeErr != nil {
+		logger.LogError(c, "failed to send markdown ast tool call error: "+writeErr.Error())
 	}
 }
 

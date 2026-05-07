@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/openrouter"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/markdowntools"
 	"github.com/QuantumNous/new-api/service"
 
 	"github.com/QuantumNous/new-api/types"
@@ -27,7 +28,7 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 		return nil
 	}
 
-	if !forceFormat && !thinkToContent {
+	if !info.ChannelSetting.MarkdownASTToolCallsEnabled && !forceFormat && !thinkToContent {
 		return helper.StringData(c, data)
 	}
 
@@ -36,6 +37,26 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 		return err
 	}
 
+	responses := []dto.ChatCompletionsStreamResponse{lastStreamResponse}
+	if info.ChannelSetting.MarkdownASTToolCallsEnabled {
+		transformed, modified, err := markdowntools.TransformStreamResponse(c, &lastStreamResponse)
+		if err != nil {
+			return err
+		}
+		if modified {
+			responses = transformed
+		}
+	}
+
+	for i := range responses {
+		if err := sendStreamResponseObject(c, info, responses[i], thinkToContent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sendStreamResponseObject(c *gin.Context, info *relaycommon.RelayInfo, lastStreamResponse dto.ChatCompletionsStreamResponse, thinkToContent bool) error {
 	if !thinkToContent {
 		return helper.ObjectData(c, lastStreamResponse)
 	}
@@ -258,10 +279,23 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	}
 
 	applyUsagePostProcessing(info, &simpleResponse.Usage, responseBody)
+	responseModified := false
+	if info.ChannelSetting.MarkdownASTToolCallsEnabled {
+		var transformErr error
+		responseModified, transformErr = markdowntools.TransformTextResponse(c, &simpleResponse)
+		if transformErr != nil {
+			return nil, types.NewOpenAIError(transformErr, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+		}
+	}
 
 	switch info.RelayFormat {
 	case types.RelayFormatOpenAI:
-		if usageModified {
+		if responseModified || forceFormat {
+			responseBody, err = common.Marshal(simpleResponse)
+			if err != nil {
+				return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+			}
+		} else if usageModified {
 			var bodyMap map[string]interface{}
 			err = common.Unmarshal(responseBody, &bodyMap)
 			if err != nil {
@@ -270,12 +304,7 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 			bodyMap["usage"] = simpleResponse.Usage
 			responseBody, _ = common.Marshal(bodyMap)
 		}
-		if forceFormat {
-			responseBody, err = common.Marshal(simpleResponse)
-			if err != nil {
-				return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
-			}
-		} else {
+		if !forceFormat && !responseModified {
 			break
 		}
 	case types.RelayFormatClaude:

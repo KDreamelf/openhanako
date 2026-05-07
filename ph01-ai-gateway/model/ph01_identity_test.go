@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -10,11 +11,22 @@ import (
 
 func TestFindOrCreateUserFromPH01(t *testing.T) {
 	oldRedisEnabled := common.RedisEnabled
+	oldUsingSQLite := common.UsingSQLite
+	oldUsingMySQL := common.UsingMySQL
+	oldUsingPostgreSQL := common.UsingPostgreSQL
 	oldDB := DB
 	oldLogDB := LOG_DB
 	common.RedisEnabled = false
+	common.UsingSQLite = true
+	common.UsingMySQL = false
+	common.UsingPostgreSQL = false
+	initCol()
 	t.Cleanup(func() {
 		common.RedisEnabled = oldRedisEnabled
+		common.UsingSQLite = oldUsingSQLite
+		common.UsingMySQL = oldUsingMySQL
+		common.UsingPostgreSQL = oldUsingPostgreSQL
+		initCol()
 		DB = oldDB
 		LOG_DB = oldLogDB
 	})
@@ -61,6 +73,13 @@ func TestFindOrCreateUserFromPH01(t *testing.T) {
 	if token.Status != common.TokenStatusEnabled || token.ExpiredTime != -1 || !token.UnlimitedQuota {
 		t.Fatalf("unexpected PH01 default token: %+v", token)
 	}
+	var commonUserTokenCount int64
+	if err := db.Model(&Token{}).Where("user_id = ?", user1.Id).Count(&commonUserTokenCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if commonUserTokenCount != 1 {
+		t.Fatalf("expected non-root PH01 user to have only default token, got %d", commonUserTokenCount)
+	}
 
 	rootUser, _, err := FindOrCreateUserFromPH01(1, "root", "beef")
 	if err != nil {
@@ -68,5 +87,35 @@ func TestFindOrCreateUserFromPH01(t *testing.T) {
 	}
 	if rootUser.Username != "root" || rootUser.Role != common.RoleRootUser {
 		t.Fatalf("expected PH01 root to map to local root, got %+v", rootUser)
+	}
+	var rootTokens []Token
+	if err := db.Where("user_id = ?", rootUser.Id).Find(&rootTokens).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rootTokens) != 2 {
+		t.Fatalf("expected PH01 root to have default and public tokens, got %+v", rootTokens)
+	}
+	var publicToken Token
+	if err := db.First(&publicToken, "user_id = ? AND name = ?", rootUser.Id, PH01PublicTokenName).Error; err != nil {
+		t.Fatalf("expected PH01 public token: %v", err)
+	}
+	if publicToken.Status != common.TokenStatusEnabled || publicToken.ExpiredTime != -1 || !publicToken.UnlimitedQuota {
+		t.Fatalf("unexpected PH01 public token: %+v", publicToken)
+	}
+	if _, err := ValidateUserToken(publicToken.Key); !errors.Is(err, ErrTokenInvalid) {
+		t.Fatalf("expected PH01 public token to be rejected as an API credential, got %v", err)
+	}
+	if err := db.Delete(&publicToken).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsurePH01RootManagedTokens(); err != nil {
+		t.Fatal(err)
+	}
+	var activePublicTokenCount int64
+	if err := db.Model(&Token{}).Where("user_id = ? AND name = ?", rootUser.Id, PH01PublicTokenName).Count(&activePublicTokenCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if activePublicTokenCount != 1 {
+		t.Fatalf("expected PH01 root public token to be backfilled, got %d", activePublicTokenCount)
 	}
 }

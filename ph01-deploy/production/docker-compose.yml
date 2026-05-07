@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     command: ["-config", "/etc/ph01/auth-center.hcl"]
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${PH01_BIND_ADDR:-0.0.0.0}:${PH01_AUTH_HOST_PORT:-18080}:8080"
     volumes:
       - ${PH01_DATA_DIR:-../../data/production}/config/auth-center.hcl:/etc/ph01/auth-center.hcl
       - ${PH01_DATA_DIR:-../../data/production}/certs/mtls:/etc/ph01/certs/mtls:ro
@@ -17,6 +17,7 @@ services:
           - ph01-auth-center
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz | grep 'auth-gateway'"]
+      start_period: 30s
       interval: 30s
       timeout: 10s
       retries: 3
@@ -27,7 +28,7 @@ services:
     restart: unless-stopped
     command: ["--config", "/etc/ph01/ai-gateway.yaml"]
     ports:
-      - "127.0.0.1:3000:3000"
+      - "${PH01_BIND_ADDR:-0.0.0.0}:${PH01_AI_HOST_PORT:-13000}:3000"
     volumes:
       - ${PH01_DATA_DIR:-../../data/production}/config/ai-gateway.yaml:/etc/ph01/ai-gateway.yaml:ro
       - ${PH01_DATA_DIR:-../../data/production}/certs/mtls:/etc/ph01/certs/mtls:ro
@@ -44,6 +45,7 @@ services:
           - ph01-ai-gateway
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/api/status | grep '\"success\"'"]
+      start_period: 30s
       interval: 30s
       timeout: 10s
       retries: 3
@@ -54,7 +56,7 @@ services:
     restart: unless-stopped
     command: ["-config", "/etc/ph01/experience-hub.json"]
     ports:
-      - "127.0.0.1:8090:8090"
+      - "${PH01_BIND_ADDR:-0.0.0.0}:${PH01_EXPERIENCE_HOST_PORT:-18090}:8090"
     volumes:
       - ${PH01_DATA_DIR:-../../data/production}/config/experience-hub.json:/etc/ph01/experience-hub.json:ro
       - ${PH01_DATA_DIR:-../../data/production}/runtime/experience-hub:/data/experience-hub
@@ -67,6 +69,7 @@ services:
           - ph01-experience-network-manager
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8090/healthz | grep 'experience-network-manager'"]
+      start_period: 30s
       interval: 30s
       timeout: 10s
       retries: 3

@@ -58,6 +58,13 @@ export const API_KEY_STATUS_OPTIONS = Object.values(API_KEY_STATUSES).map(
 
 export const DEFAULT_GROUP = '' as const
 
+export const PH01_DEFAULT_KEY_NAME = 'PH01 Default Key'
+export const PH01_PUBLIC_KEY_NAME = 'PH01 Public Key'
+
+export function isPH01SystemKeyName(name: string): boolean {
+  return name === PH01_DEFAULT_KEY_NAME || name === PH01_PUBLIC_KEY_NAME
+}
+
 // ============================================================================
 // Error Messages (i18n keys: use t(ERROR_MESSAGES.xxx) when displaying)
 // ============================================================================

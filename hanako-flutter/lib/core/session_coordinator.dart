@@ -2,15 +2,22 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:dio/dio.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 
 import '../identity/identity.dart';
 import '../llm/provider.dart';
+import '../local_tools/local_tools.dart';
 import '../shared/hana_home.dart';
+import '../windows_ops/windows_ops_capabilities.dart';
+import '../windows_ops/windows_ops_client.dart';
+import '../windows_ops/windows_ops_tools.dart';
+import 'agent_runtime.dart';
 import 'agent_manager.dart';
 import 'config_coordinator.dart';
 import 'model_manager.dart';
+import 'runtime_session_store.dart';
 import 'session.dart';
 
 /// SessionCoordinator 与 legacy core/session-coordinator.js 对齐。
@@ -23,7 +30,8 @@ class SessionCoordinator {
     required this.config,
     required this.identityRepository,
     required this.backendClient,
-  });
+    WindowsOpsClient? windowsOpsClient,
+  }) : _windowsOpsClient = windowsOpsClient ?? WindowsOpsClient();
 
   final HanaHome home;
   final AgentManager agentManager;
@@ -31,9 +39,11 @@ class SessionCoordinator {
   final ConfigCoordinator config;
   final IdentityRepository identityRepository;
   final HanakoBackendClient backendClient;
+  final WindowsOpsClient _windowsOpsClient;
 
   Session? _current;
   final _uuid = const Uuid();
+  Future<WindowsOpsCapabilities>? _windowsOpsCapabilities;
 
   Session? get current => _current;
 
@@ -50,7 +60,7 @@ class SessionCoordinator {
     final sessionId = _uuid.v4();
     final dir = home.agentSessions(agentId);
     final path = p.join(dir.path, '$sessionId.jsonl');
-    File(path).writeAsStringSync('', flush: true);
+    RuntimeSessionStore.createSessionFile(path, sessionId: sessionId, cwd: cwd);
 
     // 写 session-meta.json
     final metaFile = File(p.join(dir.path, 'session-meta.json'));
@@ -78,6 +88,7 @@ class SessionCoordinator {
       memoryEnabled: memoryEnabled,
     );
     _current = s;
+    _writeSessionState(s);
     return s;
   }
 
@@ -96,7 +107,67 @@ class SessionCoordinator {
       memoryEnabled: mEntry?['memoryEnabled'] as bool? ?? true,
     );
     _current = s;
+    _writeSessionState(s);
     return s;
+  }
+
+  /// 恢复当前 agent 最近使用的 session。
+  ///
+  /// 旧版本没有 session-state.json 时，回退到最近修改的 JSONL，避免升级后
+  /// 用户看起来像丢了历史。
+  Future<Session?> restoreLastSession() async {
+    if (_current != null && File(_current!.path).existsSync()) {
+      return _current;
+    }
+    final agentId = agentManager.activeAgentId;
+    if (agentId == null) return null;
+    final dir = home.agentSessions(agentId);
+    if (!dir.existsSync()) return null;
+
+    final lastSessionId = _readSessionState(dir.path)['lastSessionId'];
+    if (lastSessionId is String && lastSessionId.trim().isNotEmpty) {
+      final path = p.join(dir.path, '${lastSessionId.trim()}.jsonl');
+      if (File(path).existsSync()) {
+        return switchSession(path);
+      }
+    }
+
+    final sessions = await listSessions();
+    if (sessions.isEmpty) return null;
+    return switchSession(sessions.first.path);
+  }
+
+  List<Message> currentMessages() {
+    final session = _current;
+    if (session == null) return const [];
+    return loadSessionMessages(session.path);
+  }
+
+  List<RuntimeDisplayMessage> currentDisplayMessages() {
+    final session = _current;
+    if (session == null) return const [];
+    return loadSessionDisplayMessages(session.path);
+  }
+
+  List<Message> loadSessionMessages(String sessionPath) =>
+      RuntimeSessionStore.loadVisibleMessages(sessionPath);
+
+  List<RuntimeDisplayMessage> loadSessionDisplayMessages(String sessionPath) =>
+      RuntimeSessionStore.loadDisplayMessages(sessionPath);
+
+  void replaceCurrentMessages(List<Message> messages) {
+    final session = _current;
+    if (session == null) return;
+    replaceSessionMessages(session.path, messages);
+  }
+
+  void replaceSessionMessages(String sessionPath, List<Message> messages) {
+    RuntimeSessionStore.replaceVisibleMessages(
+      sessionPath,
+      messages,
+      sessionId: p.basenameWithoutExtension(sessionPath),
+      cwd: _current?.path == sessionPath ? _current?.cwd : null,
+    );
   }
 
   /// 列出当前 agent 的所有 session。
@@ -126,7 +197,31 @@ class SessionCoordinator {
 
   /// 流式发送一条消息。返回事件流。
   /// 所有 LLM 请求只通过 AI 网关短期加密通道发送。
-  Stream<LlmEvent> prompt(String text) async* {
+  Stream<LlmEvent> prompt(String text, {CancelToken? cancelToken}) async* {
+    yield* _runRuntimeTurn(
+      cancelToken: cancelToken,
+      run: (runtime) => runtime.runUserPrompt(text),
+    );
+  }
+
+  /// 基于当前已落盘上下文继续当前轮次，不追加新的 user 消息。
+  ///
+  /// 用于瞬时上游错误后的重试：用户消息、已完成工具调用和工具结果已经由
+  /// runtime 正常写入会话，重试时只需要继续 assistant turn。
+  Stream<LlmEvent> retryCurrentTurn({CancelToken? cancelToken}) async* {
+    yield* _runRuntimeTurn(
+      cancelToken: cancelToken,
+      run: (runtime) => runtime.continueAssistantTurn(),
+    );
+  }
+
+  Stream<LlmEvent> _runRuntimeTurn({
+    CancelToken? cancelToken,
+    required Stream<LlmEvent> Function(AgentRuntimeLoop runtime) run,
+  }) async* {
+    if (_current == null) {
+      await restoreLastSession();
+    }
     if (_current == null) {
       await createSession();
     }
@@ -168,30 +263,135 @@ class SessionCoordinator {
       }
     }
 
-    // 加载历史 messages
-    final history = _loadMessages(session.path);
-    final user = Message(role: 'user', content: text);
-    history.add(user);
+    try {
+      final tools = await _buildAvailableTools();
+      final selectedModelId = modelId.trim();
+      final runtime = AgentRuntimeLoop(
+        history: RuntimeSessionStore.loadRuntimeMessages(session.path),
+        systemPrompt: await _buildSystemPrompt(session),
+        tools: tools,
+        streamChat: ({required messages, required tools, Object? toolChoice}) =>
+            _chatEventsForRuntime(
+              model: selectedModelId,
+              messages: messages,
+              tools: tools,
+              toolChoice: toolChoice,
+              cancelToken: cancelToken,
+            ),
+        executeTool: (call) => _executeToolCall(session, call),
+        onNewMessages: (messages) {
+          RuntimeSessionStore.appendMessages(
+            session.path,
+            messages,
+            sessionId: p.basenameWithoutExtension(session.path),
+            cwd: session.cwd,
+          );
+        },
+      );
 
-    // 写入 user 消息
-    _appendMessage(session.path, user);
-
-    final assistantBuf = StringBuffer();
-    await for (final chunk in backendClient.chatStream(
-      model: modelId,
-      messages: history.map((m) => m.toJson()).toList(),
-    )) {
-      assistantBuf.write(chunk);
-      yield TextDelta(chunk);
+      await for (final event in run(runtime)) {
+        yield event;
+      }
+    } catch (e) {
+      yield LlmError(message: '发送对话失败：客户端处理异常', details: e.toString());
+      return;
     }
-    _appendMessage(
-      session.path,
-      Message(role: 'assistant', content: assistantBuf.toString()),
-    );
-    yield const MessageDone();
   }
 
   // -- internals --
+  Future<List<Tool>> _buildAvailableTools() async {
+    final localTools = LocalToolRegistry.buildTools();
+    final windowsTools = WindowsOpsToolRegistry.buildTools(
+      await _resolveWindowsOpsCapabilities(),
+    );
+    return <Tool>[...localTools, ...windowsTools];
+  }
+
+  Future<WindowsOpsCapabilities> _resolveWindowsOpsCapabilities() {
+    return _windowsOpsCapabilities ??=
+        WindowsOpsCapabilityProbe(_windowsOpsClient).probe().catchError(
+          (Object error) => WindowsOpsCapabilities.unavailable(
+            unavailableReasons: <String, String>{'sidecar': error.toString()},
+          ),
+        );
+  }
+
+  Stream<LlmEvent> _chatEventsForRuntime({
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required List<Tool> tools,
+    Object? toolChoice,
+    CancelToken? cancelToken,
+  }) async* {
+    try {
+      await for (final event in backendClient.chatEvents(
+        model: model,
+        messages: messages,
+        tools: tools,
+        toolChoice: toolChoice,
+        cancelToken: cancelToken,
+      )) {
+        yield event;
+      }
+    } on HanakoBackendException catch (e) {
+      yield LlmError(
+        message: e.message,
+        statusCode: e.statusCode,
+        details: e.details,
+      );
+    } catch (e) {
+      yield LlmError(message: '发送对话失败：客户端处理异常', details: e.toString());
+    }
+  }
+
+  Future<RuntimeToolExecutionResult> _executeToolCall(
+    Session session,
+    RuntimeToolCallBlock call,
+  ) async {
+    final args = call.arguments;
+    final name = call.name.trim();
+    if (_isWindowsOpsTool(name)) {
+      try {
+        final result = await WindowsOpsToolExecutor(
+          _windowsOpsClient,
+        ).execute(name, args);
+        final content = const JsonEncoder.withIndent(
+          '  ',
+        ).convert({'ok': true, 'tool': name, 'result': result});
+        return RuntimeToolExecutionResult(content: content);
+      } catch (e) {
+        return RuntimeToolExecutionResult(
+          content: const JsonEncoder.withIndent('  ').convert({
+            'ok': false,
+            'tool': name,
+            'error': 'windows_ops_failed',
+            'message': e.toString(),
+          }),
+          isError: true,
+        );
+      }
+    }
+    final content = await LocalToolRegistry.execute(
+      name,
+      args,
+      cwd: session.cwd,
+      agentDir: home.agentDir(session.agentId).path,
+    );
+    return RuntimeToolExecutionResult(
+      content: content,
+      isError: _toolOutputIsError(content),
+    );
+  }
+
+  bool _isWindowsOpsTool(String name) => switch (name) {
+    WindowsOpsToolNames.captureRegion ||
+    WindowsOpsToolNames.uiaTree ||
+    WindowsOpsToolNames.uiaInvoke ||
+    WindowsOpsToolNames.ocrRecognize ||
+    WindowsOpsToolNames.uiParse => true,
+    _ => false,
+  };
+
   String? _configuredChatModelId(Map<String, dynamic> cfg) {
     final models = cfg['models'] as Map?;
     final value = (models?['chat'] as String?)?.trim();
@@ -219,41 +419,21 @@ class SessionCoordinator {
     }
   }
 
-  List<Message> _loadMessages(String sessionPath) {
-    final f = File(sessionPath);
-    if (!f.existsSync()) return [];
-    final out = <Message>[];
-    for (final line in f.readAsLinesSync()) {
-      if (line.trim().isEmpty) continue;
-      try {
-        final j = jsonDecode(line) as Map<String, dynamic>;
-        final role = j['role'] as String?;
-        final content = j['content'];
-        if (role == null) continue;
-        if (content is String) {
-          out.add(Message(role: role, content: content));
-        }
-      } catch (_) {}
-    }
-    return out;
-  }
-
-  void _appendMessage(String sessionPath, Message msg) {
-    final f = File(sessionPath);
-    f.parent.createSync(recursive: true);
-    final raf = f.openSync(mode: FileMode.append);
-    try {
-      raf.writeStringSync(
-        jsonEncode({
-              'role': msg.role,
-              'content': msg.content,
-              'ts': DateTime.now().toUtc().toIso8601String(),
-            }) +
-            '\n',
-      );
-    } finally {
-      raf.closeSync();
-    }
+  Future<String> _buildSystemPrompt(Session session) async {
+    final agent = await agentManager.getAgent(session.agentId);
+    final parts = <String>[
+      '你运行在用户本机的“幻宙01”子体客户端中。',
+      '需要本地信息或桌面操作时，使用请求中提供的原生 function tools；不要把工具调用写成正文。',
+      '如果工具失败，说明失败原因和还缺什么信息。',
+      if (session.cwd != null && session.cwd!.trim().isNotEmpty)
+        '当前会话工作目录：${session.cwd}',
+      if (agent != null) '当前 Agent：${agent.name} (${agent.id})',
+      if (agent?.identity?.trim().isNotEmpty == true)
+        'Agent 身份：\n${agent!.identity!.trim()}',
+      if (agent?.ishiki?.trim().isNotEmpty == true)
+        'Agent 意识/行为设定：\n${agent!.ishiki!.trim()}',
+    ];
+    return parts.where((part) => part.trim().isNotEmpty).join('\n\n');
   }
 
   String _agentIdFromPath(String sessionPath) {
@@ -286,6 +466,29 @@ class SessionCoordinator {
   String? _readTitle(String sessionsDir, String sessionId) =>
       _readTitles(sessionsDir)[sessionId];
 
+  Map<String, dynamic> _readSessionState(String sessionsDir) {
+    final f = File(p.join(sessionsDir, 'session-state.json'));
+    if (!f.existsSync()) return <String, dynamic>{};
+    try {
+      return (jsonDecode(f.readAsStringSync()) as Map<String, dynamic>);
+    } catch (_) {
+      return <String, dynamic>{};
+    }
+  }
+
+  void _writeSessionState(Session session) {
+    final dir = p.dirname(session.path);
+    final sessionId = p.basenameWithoutExtension(session.path);
+    final f = File(p.join(dir, 'session-state.json'));
+    f.writeAsStringSync(
+      const JsonEncoder.withIndent('  ').convert({
+        'lastSessionId': sessionId,
+        'updatedAt': DateTime.now().toUtc().toIso8601String(),
+      }),
+      flush: true,
+    );
+  }
+
   void saveTitle(String title) {
     if (_current == null) return;
     _current!.title = title;
@@ -298,6 +501,17 @@ class SessionCoordinator {
       const JsonEncoder.withIndent('  ').convert(titles),
       flush: true,
     );
+  }
+
+  Future<void> dispose() => _windowsOpsClient.dispose();
+}
+
+bool _toolOutputIsError(String content) {
+  try {
+    final decoded = jsonDecode(content);
+    return decoded is Map && decoded['ok'] == false;
+  } catch (_) {
+    return false;
   }
 }
 

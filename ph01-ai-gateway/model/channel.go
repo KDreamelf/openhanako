@@ -849,6 +849,9 @@ func (channel *Channel) ValidateSettings() error {
 			return err
 		}
 	}
+	if channelParams.PassThroughBodyEnabled && channelParams.MarkdownASTToolCallsEnabled {
+		return fmt.Errorf("不能同时启用请求体透传与 Markdown AST 工具调用")
+	}
 	return nil
 }
 

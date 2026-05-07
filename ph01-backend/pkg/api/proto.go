@@ -59,9 +59,10 @@ type RegistrationEmailStartRequest struct {
 
 // RegistrationEmailStartResponse 返回注册邮箱验证码挑战。
 type RegistrationEmailStartResponse struct {
-	ChallengeID string `json:"challenge_id"`
-	Delivery    string `json:"delivery"`
-	ExpiresIn   int    `json:"expires_in"`
+	ChallengeID     string `json:"challenge_id"`
+	Delivery        string `json:"delivery"`
+	ExpiresIn       int    `json:"expires_in"`
+	CooldownSeconds int    `json:"cooldown_seconds"`
 }
 
 // ========== §5.1 简单登录 ==========
@@ -100,9 +101,10 @@ type RecoveryRFAStartRequest struct {
 
 // RecoveryRFAStartResponse 返回挑战 ID 和脱敏投递地址。
 type RecoveryRFAStartResponse struct {
-	ChallengeID string `json:"challenge_id"`
-	Delivery    string `json:"delivery"`
-	ExpiresIn   int    `json:"expires_in"`
+	ChallengeID     string `json:"challenge_id"`
+	Delivery        string `json:"delivery"`
+	ExpiresIn       int    `json:"expires_in"`
+	CooldownSeconds int    `json:"cooldown_seconds"`
 }
 
 // RecoveryRFAVerifyRequest 校验邮箱验证码。
@@ -162,8 +164,9 @@ type ChatRequest struct {
 
 // ErrorResponse 是所有非 2xx 响应的统一错误体。
 type ErrorResponse struct {
-	Error   string `json:"error"`
-	Message string `json:"message,omitempty"`
+	Error      string `json:"error"`
+	Message    string `json:"message,omitempty"`
+	RetryAfter int    `json:"retry_after,omitempty"`
 }
 
 // 错误码常量（与 protocol-spec.md §10 对齐）

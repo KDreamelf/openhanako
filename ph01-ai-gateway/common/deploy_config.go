@@ -19,12 +19,17 @@ type DeploymentConfig struct {
 }
 
 type DeploymentServerConfig struct {
-	Port                 int    `yaml:"port"`
-	LogDir               string `yaml:"log_dir"`
-	NodeName             string `yaml:"node_name"`
-	GinMode              string `yaml:"gin_mode"`
-	FrontendBaseURL      string `yaml:"frontend_base_url"`
-	GatewayPublicBaseURL string `yaml:"gateway_public_base_url"`
+	Port                 int     `yaml:"port"`
+	LogDir               string  `yaml:"log_dir"`
+	NodeName             string  `yaml:"node_name"`
+	GinMode              string  `yaml:"gin_mode"`
+	FrontendBaseURL      string  `yaml:"frontend_base_url"`
+	GatewayPublicBaseURL string  `yaml:"gateway_public_base_url"`
+	SystemName           *string `yaml:"system_name"`
+	FrontendTheme        *string `yaml:"frontend_theme"`
+	HomePageContent      *string `yaml:"home_page_content"`
+	Logo                 *string `yaml:"logo"`
+	Footer               *string `yaml:"footer"`
 }
 
 type DeploymentDatabaseConfig struct {
@@ -105,6 +110,11 @@ func ApplyDeploymentConfig(path string) error {
 	setEnvString("GIN_MODE", cfg.Server.GinMode)
 	setEnvString("FRONTEND_BASE_URL", cfg.Server.FrontendBaseURL)
 	setEnvString("PH01_GATEWAY_PUBLIC_BASE_URL", cfg.Server.GatewayPublicBaseURL)
+	setEnvStringPtr("PH01_SYSTEM_NAME", cfg.Server.SystemName)
+	setEnvStringPtr("PH01_FRONTEND_THEME", cfg.Server.FrontendTheme)
+	setEnvRawStringPtr("PH01_HOME_PAGE_CONTENT", cfg.Server.HomePageContent)
+	setEnvStringPtr("PH01_LOGO", cfg.Server.Logo)
+	setEnvRawStringPtr("PH01_FOOTER", cfg.Server.Footer)
 
 	setEnvString("SQL_DSN", cfg.Database.SQLDSN)
 	setEnvString("LOG_SQL_DSN", cfg.Database.LogSQLDSN)
@@ -163,6 +173,20 @@ func setEnvString(key, value string) {
 		return
 	}
 	_ = os.Setenv(key, value)
+}
+
+func setEnvStringPtr(key string, value *string) {
+	if value == nil {
+		return
+	}
+	setEnvString(key, *value)
+}
+
+func setEnvRawStringPtr(key string, value *string) {
+	if value == nil {
+		return
+	}
+	_ = os.Setenv(key, *value)
 }
 
 func setEnvInt(key string, value int) {

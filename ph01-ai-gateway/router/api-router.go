@@ -12,6 +12,16 @@ import (
 )
 
 func SetApiRouter(router *gin.Engine) {
+	ph01ProtocolRoute := router.Group("/api/v1")
+	ph01ProtocolRoute.Use(middleware.RouteTag("api"))
+	ph01ProtocolRoute.Use(middleware.BodyStorageCleanup())
+	ph01ProtocolRoute.Use(middleware.GlobalAPIRateLimit())
+	{
+		ph01ProtocolRoute.POST("/channel/handshake", middleware.CriticalRateLimit(), controller.PH01ChannelHandshake)
+		ph01ProtocolRoute.GET("/models", controller.PH01ListModels)
+		ph01ProtocolRoute.POST("/llm/chat", controller.PH01Chat)
+	}
+
 	apiRouter := router.Group("/api")
 	apiRouter.Use(middleware.RouteTag("api"))
 	apiRouter.Use(gzip.Gzip(gzip.DefaultCompression))

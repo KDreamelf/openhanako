@@ -191,7 +191,7 @@ func ValidateUserToken(key string) (token *Token, err error) {
 	}
 	token, err = GetTokenByKey(key, false)
 	if err == nil {
-		if IsPH01DefaultToken(token) {
+		if IsPH01ManagedToken(token) {
 			return token, ErrTokenInvalid
 		}
 		if token.Status == common.TokenStatusExhausted ||
@@ -372,6 +372,9 @@ func DeleteTokenById(id int, userId int) (err error) {
 	if err != nil {
 		return err
 	}
+	if IsPH01ManagedToken(&token) {
+		return errors.New("PH01 system key cannot be deleted")
+	}
 	return token.Delete()
 }
 
@@ -455,6 +458,12 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 		tx.Rollback()
 		return 0, err
 	}
+	for i := range tokens {
+		if IsPH01ManagedToken(&tokens[i]) {
+			tx.Rollback()
+			return 0, errors.New("PH01 system key cannot be deleted")
+		}
+	}
 
 	if err := tx.Where("user_id = ? AND id IN (?)", userId, ids).Delete(&Token{}).Error; err != nil {
 		tx.Rollback()
@@ -478,7 +487,7 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 
 func GetTokenKeysByIds(ids []int, userId int) ([]Token, error) {
 	var tokens []Token
-	err := DB.Select("id", commonKeyCol).
+	err := DB.Select("id", commonKeyCol, "name", "user_id").
 		Where("user_id = ? AND id IN (?)", userId, ids).
 		Find(&tokens).Error
 	return tokens, err

@@ -14,10 +14,9 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { StatusBadge } from '@/components/status-badge'
+import { isPH01SystemKeyName } from '../constants'
 import { type ApiKey } from '../types'
 import { useApiKeys } from './api-keys-provider'
-
-const PH01_DEFAULT_KEY_NAME = 'PH01 Default Key'
 
 export function ApiKeyCell({ apiKey }: { apiKey: ApiKey }) {
   const { t } = useTranslation()
@@ -34,10 +33,14 @@ export function ApiKeyCell({ apiKey }: { apiKey: ApiKey }) {
   const resolvedFullKey = resolvedKeys[apiKey.id]
   const isCopied = copiedKeyId === apiKey.id
   const maskedKey = `sk-${apiKey.key}`
-  const isLockedDefaultKey = apiKey.name === PH01_DEFAULT_KEY_NAME
+  const isSystemKey = isPH01SystemKeyName(apiKey.name)
 
-  if (isLockedDefaultKey) {
-    return <span className='text-muted-foreground font-mono text-xs'>{maskedKey}</span>
+  if (isSystemKey) {
+    return (
+      <span className='text-muted-foreground text-xs'>
+        {t('Configuration carrier')}
+      </span>
+    )
   }
 
   const handlePopoverOpen = useCallback(

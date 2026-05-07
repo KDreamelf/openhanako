@@ -5,14 +5,18 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../../app/sub_window_client.dart';
+import '../../app/providers.dart';
+import '../../identity/identity.dart';
+import '../onboarding/onboarding_page.dart';
 
 /// SharedPreferences key（与主窗口启动读取共用）。
 const String kPrefThemeMode = 'hanako.theme.mode';
 const String kPrefFontScale = 'hanako.theme.fontScale';
 
-/// Settings 子窗口主入口。
-/// 子窗口通过 IPC `business.invoke` 与主窗口 engine 交互。
+/// Settings 主窗口页面。
+///
+/// 设置页需要直接访问主窗口 ProviderScope 中的 HanaEngine；不再通过
+/// desktop_multi_window 创建独立子 Engine。
 class SettingsWindow extends ConsumerStatefulWidget {
   const SettingsWindow({super.key});
 
@@ -23,8 +27,14 @@ class SettingsWindow extends ConsumerStatefulWidget {
 class _SettingsWindowState extends ConsumerState<SettingsWindow> {
   List<Map<String, dynamic>>? _agents;
   Map<String, dynamic>? _prefs;
+  Map<String, dynamic>? _authConfig;
+  Map<String, dynamic>? _userConfig;
   Map<String, String>? _paths;
   Map<String, dynamic>? _runtime;
+  bool _hasSavedIdentity = false;
+  bool _identityReady = false;
+  bool _accountBusy = false;
+  String? _identityPublicKeyHash;
   String _themeMode = 'system';
   double _fontScale = 1.0;
   String? _error;
@@ -69,14 +79,39 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
 
   Future<void> _refresh() async {
     try {
-      final agents = await SubWindowEngineClient.listAgents();
-      final prefs = await SubWindowEngineClient.readPreferences();
-      final paths = await SubWindowEngineClient.homePaths();
-      final runtime = await SubWindowEngineClient.runtimeInfo();
+      final eng = ref.read(engineProvider);
+      final repo = ref.read(identityRepositoryProvider);
+      final agents = await eng.agentManager.listAgents(forceRefresh: true);
+      final prefs = eng.preferences.getPreferences();
+      final cfg = eng.config.read();
+      final identity = repo.current;
+      final hasSavedIdentity = await repo.hasSavedIdentity();
+      final paths = {
+        'root': eng.home.root.path,
+        'agentsDir': eng.home.agentsDir.path,
+        'skillsDir': eng.home.skillsDir.path,
+        'userDir': eng.home.userDir.path,
+        'logsDir': eng.home.logsDir.path,
+        'preferencesFile': eng.home.preferencesFile.path,
+        'modelsJson': eng.home.modelsJson.path,
+        'authJson': eng.home.authJson.path,
+      };
+      final runtime = {
+        'platform': Platform.operatingSystem,
+        'platformVersion': Platform.operatingSystemVersion,
+        'numberOfProcessors': Platform.numberOfProcessors,
+        'localeName': Platform.localeName,
+        'dartVersion': Platform.version,
+      };
       if (!mounted) return;
       setState(() {
-        _agents = agents;
+        _agents = agents.map((a) => a.toJson()).toList();
         _prefs = prefs;
+        _authConfig = _stringKeyMap(cfg['auth']);
+        _userConfig = _stringKeyMap(cfg['user']);
+        _hasSavedIdentity = hasSavedIdentity;
+        _identityReady = identity != null;
+        _identityPublicKeyHash = identity?.publicKeyHash;
         _paths = paths;
         _runtime = runtime;
         _error = null;
@@ -84,6 +119,177 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = '$e');
+    }
+  }
+
+  Future<void> _openAccountSetup() async {
+    final result = await Navigator.of(
+      context,
+    ).push<bool>(MaterialPageRoute(builder: (_) => const OnboardingPage()));
+    if (result == true && mounted) {
+      ref.read(identityRevisionProvider.notifier).state++;
+    }
+    await _refresh();
+  }
+
+  Future<HanakoIdentity> _loadIdentityForAccountAction() async {
+    final repo = ref.read(identityRepositoryProvider);
+    final current = repo.current;
+    if (current != null) return current;
+    final identity = await repo.unlock();
+    ref.read(identityRevisionProvider.notifier).state++;
+    return identity;
+  }
+
+  Future<void> _unlockIdentity() async {
+    if (_accountBusy) return;
+    setState(() => _accountBusy = true);
+    try {
+      final eng = ref.read(engineProvider);
+      final repo = ref.read(identityRepositoryProvider);
+      final identity = await repo.unlock();
+      ref.read(identityRevisionProvider.notifier).state++;
+      try {
+        await eng.syncGatewayModels(identity);
+      } catch (_) {}
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('本机身份已解锁')));
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('解锁失败：$e')));
+    } finally {
+      if (mounted) setState(() => _accountBusy = false);
+    }
+  }
+
+  Future<void> _lockIdentity() async {
+    if (_accountBusy) return;
+    setState(() => _accountBusy = true);
+    try {
+      await ref.read(identityRepositoryProvider).lock();
+      ref.read(identityRevisionProvider.notifier).state++;
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('身份已锁定，本机密钥仍保留')));
+      await _refresh();
+    } finally {
+      if (mounted) setState(() => _accountBusy = false);
+    }
+  }
+
+  Future<void> _syncModels() async {
+    if (_accountBusy) return;
+    final identity = ref.read(identityRepositoryProvider).current;
+    if (identity == null) return;
+    setState(() => _accountBusy = true);
+    try {
+      await ref.read(engineProvider).syncGatewayModels(identity);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('模型列表已同步')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('同步失败：$e')));
+    } finally {
+      if (mounted) setState(() => _accountBusy = false);
+    }
+  }
+
+  Future<void> _showMnemonic() async {
+    if (_accountBusy) return;
+    setState(() => _accountBusy = true);
+    try {
+      final identity = await _loadIdentityForAccountAction();
+      final words = identity.mnemonic?.words;
+      if (words == null || words.length != 12) {
+        throw StateError('当前身份没有保存助记词');
+      }
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (_) => _MnemonicDialog(
+          words: words,
+          publicKeyHash: identity.publicKeyHash,
+        ),
+      );
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('查看助记词失败：$e')));
+    } finally {
+      if (mounted) setState(() => _accountBusy = false);
+    }
+  }
+
+  Future<void> _regenerateStory() async {
+    if (_accountBusy) return;
+    setState(() => _accountBusy = true);
+    try {
+      final registration = await ref
+          .read(identityRepositoryProvider)
+          .regenerateStoryForCurrent();
+      ref.read(identityRevisionProvider.notifier).state++;
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (_) => _StoryDialog(registration: registration),
+      );
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('重新生成故事失败：$e')));
+    } finally {
+      if (mounted) setState(() => _accountBusy = false);
+    }
+  }
+
+  Future<void> _deleteLocalIdentity() async {
+    if (_accountBusy) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除本机身份？'),
+        content: const Text(
+          '这会删除当前 Windows 用户下的本机加密身份 vault。'
+          '覆盖安装不会删它，但这里确认删除后只能用 12 个名词或记忆故事重新登录恢复。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    setState(() => _accountBusy = true);
+    try {
+      await ref.read(identityRepositoryProvider).logout();
+      ref.read(identityRevisionProvider.notifier).state++;
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('本机身份已删除')));
+      await _refresh();
+    } finally {
+      if (mounted) setState(() => _accountBusy = false);
     }
   }
 
@@ -146,10 +352,12 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     );
     if (result != true || nameCtrl.text.trim().isEmpty) return;
     try {
-      await SubWindowEngineClient.call(
-        'agents.create',
-        payload: {'name': nameCtrl.text.trim(), 'yuan': yuan},
+      final eng = ref.read(engineProvider);
+      await eng.agentManager.createAgent(
+        name: nameCtrl.text.trim(),
+        yuan: yuan,
       );
+      ref.invalidate(agentListProvider);
       await _refresh();
     } catch (e) {
       if (!mounted) return;
@@ -174,6 +382,8 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
                   constraints: const BoxConstraints(maxWidth: 960),
                   child: Column(
                     children: [
+                      _buildMySection(),
+                      const SizedBox(height: 24),
                       _buildAgentsSection(),
                       const SizedBox(height: 24),
                       _buildAppearanceSection(),
@@ -196,7 +406,10 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       body: SafeArea(
         child: Column(
           children: [
-            _SettingsHeader(onRefresh: _refresh),
+            _SettingsHeader(
+              onRefresh: _refresh,
+              onClose: () => Navigator.of(context).maybePop(),
+            ),
             Expanded(child: content),
           ],
         ),
@@ -205,6 +418,139 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
   }
 
   // ===== Section 构建 =====
+
+  Widget _buildMySection() {
+    final auth = _authConfig ?? const <String, dynamic>{};
+    final user = _userConfig ?? const <String, dynamic>{};
+    final username = _textValue(auth['username']) ?? _textValue(user['name']);
+    final userId = _textValue(auth['user_id']);
+    final tier = _textValue(auth['tier']);
+    final configPubkeyHash = _textValue(auth['pubkey_hash']);
+    final currentHash = _identityPublicKeyHash ?? configPubkeyHash;
+    final vaultLabel = _hasSavedIdentity ? '本机密钥已保存' : '本机密钥未创建';
+    final identityLabel = _identityReady ? '身份已解锁' : '身份未解锁';
+    final accountParts = [
+      if (userId != null) 'ID $userId',
+      if (tier != null) '等级 $tier',
+      if (currentHash != null) '指纹 ${_shortHash(currentHash)}',
+    ];
+
+    return _Section(
+      title: '我的',
+      subtitle: '账号、本机身份和恢复信息。',
+      child: Card(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        _identityReady
+                            ? Icons.verified_user
+                            : Icons.lock_outline,
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              identityLabel,
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              vaultLabel,
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
+                                  ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      if (!_identityReady && _hasSavedIdentity)
+                        FilledButton.icon(
+                          onPressed: _accountBusy ? null : _unlockIdentity,
+                          icon: const Icon(Icons.lock_open, size: 18),
+                          label: const Text('解锁'),
+                        ),
+                      if (_identityReady)
+                        OutlinedButton.icon(
+                          onPressed: _accountBusy ? null : _showMnemonic,
+                          icon: const Icon(Icons.visibility_outlined, size: 18),
+                          label: const Text('查看助记词'),
+                        ),
+                      if (_identityReady)
+                        OutlinedButton.icon(
+                          onPressed: _accountBusy ? null : _regenerateStory,
+                          icon: const Icon(
+                            Icons.auto_stories_outlined,
+                            size: 18,
+                          ),
+                          label: const Text('重新生成故事'),
+                        ),
+                      if (_identityReady)
+                        OutlinedButton.icon(
+                          onPressed: _accountBusy ? null : _syncModels,
+                          icon: const Icon(Icons.sync, size: 18),
+                          label: const Text('同步模型'),
+                        ),
+                      if (_identityReady)
+                        OutlinedButton.icon(
+                          onPressed: _accountBusy ? null : _lockIdentity,
+                          icon: const Icon(Icons.lock, size: 18),
+                          label: const Text('锁定'),
+                        ),
+                      if (!_identityReady)
+                        OutlinedButton.icon(
+                          onPressed: _accountBusy ? null : _openAccountSetup,
+                          icon: const Icon(Icons.manage_accounts, size: 18),
+                          label: Text(_hasSavedIdentity ? '恢复其他账号' : '创建账号'),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 0),
+            ListTile(
+              leading: const Icon(Icons.account_circle_outlined),
+              title: Text(username == null ? '未绑定云端账号' : '账号：$username'),
+              subtitle: Text(
+                accountParts.isEmpty
+                    ? '完成注册或登录后会显示云端账号信息'
+                    : accountParts.join(' · '),
+              ),
+              trailing: _hasSavedIdentity
+                  ? TextButton.icon(
+                      onPressed: _accountBusy ? null : _deleteLocalIdentity,
+                      icon: const Icon(Icons.delete_outline, size: 18),
+                      label: const Text('删除本机身份'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: Theme.of(context).colorScheme.error,
+                      ),
+                    )
+                  : null,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _buildAgentsSection() {
     return _Section(
@@ -222,20 +568,23 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
                 subtitle: Text('${a['id']} · yuan=${a['yuan']}'),
                 trailing: PopupMenuButton<String>(
                   onSelected: (v) async {
+                    final eng = ref.read(engineProvider);
                     if (v == 'switch') {
-                      await SubWindowEngineClient.call(
-                        'agents.switch',
-                        payload: {'id': a['id']},
-                      );
+                      final id = a['id'] as String;
+                      await eng.agentManager.switchAgent(id);
+                      eng.config.retarget(id);
+                      ref.read(activeAgentIdProvider.notifier).state = id;
+                      ref.invalidate(agentListProvider);
                       if (!mounted) return;
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(content: Text('已切换到 ${a['name']}')),
                       );
                     } else if (v == 'delete') {
-                      await SubWindowEngineClient.call(
-                        'agents.delete',
-                        payload: {'id': a['id']},
-                      );
+                      await eng.agentManager.deleteAgent(a['id'] as String);
+                      if (ref.read(activeAgentIdProvider) == a['id']) {
+                        ref.read(activeAgentIdProvider.notifier).state = null;
+                      }
+                      ref.invalidate(agentListProvider);
                       await _refresh();
                     }
                   },
@@ -427,7 +776,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
           children: [
             const ListTile(
               leading: Icon(Icons.info_outline, size: 22),
-              title: Text('PH01 子体 / Hanako Flutter'),
+              title: Text('幻宙01 / PH01 子体'),
               subtitle: Text('个人 AI 子体 · Flutter Desktop · 二次设计版本'),
             ),
             const Divider(height: 0),
@@ -472,8 +821,9 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
 }
 
 class _SettingsHeader extends StatelessWidget {
-  const _SettingsHeader({required this.onRefresh});
+  const _SettingsHeader({required this.onRefresh, required this.onClose});
   final VoidCallback onRefresh;
+  final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) {
@@ -487,6 +837,18 @@ class _SettingsHeader extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(24, 18, 24, 18),
         child: Row(
           children: [
+            IconButton.filledTonal(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: onClose,
+              tooltip: '返回',
+              style: IconButton.styleFrom(
+                fixedSize: const Size(40, 40),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
             Container(
               width: 44,
               height: 44,
@@ -528,6 +890,12 @@ class _SettingsHeader extends StatelessWidget {
                   borderRadius: BorderRadius.circular(8),
                 ),
               ),
+            ),
+            const SizedBox(width: 12),
+            FilledButton.icon(
+              icon: const Icon(Icons.check),
+              label: const Text('完成'),
+              onPressed: onClose,
             ),
           ],
         ),
@@ -582,4 +950,176 @@ class _Shortcut {
   const _Shortcut(this.key, this.label);
   final String key;
   final String label;
+}
+
+class _MnemonicDialog extends StatelessWidget {
+  const _MnemonicDialog({required this.words, required this.publicKeyHash});
+
+  final List<String> words;
+  final String publicKeyHash;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('助记词'),
+      content: SizedBox(
+        width: 520,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '这是当前本机身份的 12 个名词。',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (var i = 0; i < words.length; i++)
+                    Chip(
+                      label: Text('${i + 1}. ${words[i]}'),
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              SelectableText(
+                words.join(' '),
+                style: const TextStyle(fontFamily: 'monospace'),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                '指纹：${_shortHash(publicKeyHash)}',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton.icon(
+          onPressed: () {
+            Clipboard.setData(ClipboardData(text: words.join(' ')));
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('助记词已复制'),
+                duration: Duration(seconds: 1),
+              ),
+            );
+          },
+          icon: const Icon(Icons.copy, size: 18),
+          label: const Text('复制'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
+    );
+  }
+}
+
+class _StoryDialog extends StatelessWidget {
+  const _StoryDialog({required this.registration});
+
+  final IdentityRegistration registration;
+
+  @override
+  Widget build(BuildContext context) {
+    final story = registration.story.trim();
+    final hasStory = story.isNotEmpty && !registration.fallback;
+    return AlertDialog(
+      title: const Text('记忆故事'),
+      content: SizedBox(
+        width: 560,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (hasStory)
+                SelectableText(
+                  story,
+                  style: Theme.of(context).textTheme.bodyLarge,
+                )
+              else
+                Text(
+                  '故事生成暂不可用，当前可直接保存 12 个名词。',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (var i = 0; i < registration.words.length; i++)
+                    Chip(
+                      label: Text('${i + 1}. ${registration.words[i]}'),
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        if (hasStory)
+          TextButton.icon(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: story));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('故事已复制'),
+                  duration: Duration(seconds: 1),
+                ),
+              );
+            },
+            icon: const Icon(Icons.copy, size: 18),
+            label: const Text('复制故事'),
+          ),
+        TextButton.icon(
+          onPressed: () {
+            Clipboard.setData(
+              ClipboardData(text: registration.words.join(' ')),
+            );
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('助记词已复制'),
+                duration: Duration(seconds: 1),
+              ),
+            );
+          },
+          icon: const Icon(Icons.copy_all_outlined, size: 18),
+          label: const Text('复制助记词'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
+    );
+  }
+}
+
+Map<String, dynamic> _stringKeyMap(Object? value) {
+  if (value is! Map) return const {};
+  return value.map((key, dynamic value) => MapEntry('$key', value));
+}
+
+String? _textValue(Object? value) {
+  if (value == null) return null;
+  final text = '$value'.trim();
+  return text.isEmpty ? null : text;
+}
+
+String _shortHash(String hash) {
+  final text = hash.trim();
+  if (text.length <= 16) return text;
+  return '${text.substring(0, 16)}...';
 }

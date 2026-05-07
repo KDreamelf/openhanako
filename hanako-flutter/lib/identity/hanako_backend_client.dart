@@ -15,6 +15,7 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 
+import '../llm/provider.dart';
 import 'ecdh.dart';
 import 'keypair.dart';
 import 'signed_request.dart';
@@ -26,14 +27,14 @@ class HanakoBackendClient {
     Dio? dio,
   }) : _dio = dio ?? Dio();
 
-  static const defaultAuthBaseUrl = 'https://auth.幻宙.cn';
+  static const defaultAuthBaseUrl = 'https://auth.xn--lbtx0e.cn';
 
-  static const defaultAiBaseUrl = 'https://ai.幻宙.cn';
+  static const defaultAiBaseUrl = 'https://ai.xn--lbtx0e.cn';
 
-  /// auth-gateway 基础 URL。生产默认是 `https://auth.幻宙.cn`。
+  /// auth-gateway 基础 URL。生产默认是 `https://auth.xn--lbtx0e.cn`。
   final String authBaseUrl;
 
-  /// ai-gateway 基础 URL。生产默认是 `https://ai.幻宙.cn`。
+  /// ai-gateway 基础 URL。生产默认是 `https://ai.xn--lbtx0e.cn`。
   final String aiBaseUrl;
 
   final Dio _dio;
@@ -109,6 +110,7 @@ class HanakoBackendClient {
       challengeId: body['challenge_id'] as String,
       delivery: body['delivery'] as String,
       expiresIn: (body['expires_in'] as num).toInt(),
+      cooldownSeconds: (body['cooldown_seconds'] as num?)?.toInt() ?? 60,
     );
   }
 
@@ -160,6 +162,7 @@ class HanakoBackendClient {
       challengeId: body['challenge_id'] as String,
       delivery: body['delivery'] as String,
       expiresIn: (body['expires_in'] as num).toInt(),
+      cooldownSeconds: (body['cooldown_seconds'] as num?)?.toInt() ?? 60,
     );
   }
 
@@ -237,11 +240,17 @@ class HanakoBackendClient {
       userId: userId,
       challenge: challenge,
     );
-    await _dio.postUri<Map<String, dynamic>>(
+    final resp = await _dio.postUri<Map<String, dynamic>>(
       Uri.parse(callbackUrl),
       data: body,
       options: Options(contentType: Headers.jsonContentType),
     );
+    final respBody = resp.data;
+    if (respBody == null) return;
+    if (respBody['success'] == false) {
+      final message = respBody['message'] ?? respBody['error'] ?? respBody;
+      throw StateError('AI gateway protocol login failed: $message');
+    }
   }
 
   /// ECDH 握手：建立短期通信通道，缓存到 [_channel]。
@@ -294,29 +303,40 @@ class HanakoBackendClient {
   Future<Map<String, dynamic>> chat({
     required String model,
     required List<Map<String, dynamic>> messages,
+    List<Tool>? tools,
+    Object? toolChoice,
     Map<String, dynamic>? extra,
   }) async {
     final ch = _requireChannel();
-    final plaintext = jsonEncode({
-      'model': model,
-      'messages': messages,
-      'stream': false,
-      ...?(_optionalExtra(extra)),
-    });
+    final plaintext = jsonEncode(
+      _chatPayload(
+        model: model,
+        messages: messages,
+        stream: false,
+        tools: tools,
+        toolChoice: toolChoice,
+        extra: extra,
+      ),
+    );
     final enc = encryptGcm(
       ch.aesKey,
       Uint8List.fromList(utf8.encode(plaintext)),
     );
-    final resp = await _dio.postUri<Map<String, dynamic>>(
-      Uri.parse('$aiBaseUrl/api/v1/llm/chat'),
-      data: {
-        'channel_id': ch.channelId,
-        'nonce': enc.nonceHex,
-        'ciphertext': enc.ciphertextHex,
-        'tag': enc.tagHex,
-      },
-      options: Options(contentType: Headers.jsonContentType),
-    );
+    final Response<Map<String, dynamic>> resp;
+    try {
+      resp = await _dio.postUri<Map<String, dynamic>>(
+        Uri.parse('$aiBaseUrl/api/v1/llm/chat'),
+        data: {
+          'channel_id': ch.channelId,
+          'nonce': enc.nonceHex,
+          'ciphertext': enc.ciphertextHex,
+          'tag': enc.tagHex,
+        },
+        options: Options(contentType: Headers.jsonContentType),
+      );
+    } on DioException catch (e) {
+      throw await HanakoBackendException.fromDio(e, action: '发送对话');
+    }
     final env = resp.data!;
     final pt = decryptGcm(
       ch.aesKey,
@@ -327,40 +347,74 @@ class HanakoBackendClient {
     return jsonDecode(utf8.decode(pt)) as Map<String, dynamic>;
   }
 
-  /// 流式 LLM 调用：每个 SSE chunk 解密后 yield 出去。
-  /// 服务端 SSE 行格式：`data: {EncryptedEnvelope JSON}\n\n`，
-  /// 最后一行 `data: [DONE]\n\n`。
+  /// 流式 LLM 调用：只返回正文文本，兼容旧调用点。
   Stream<String> chatStream({
     required String model,
     required List<Map<String, dynamic>> messages,
+    List<Tool>? tools,
+    Object? toolChoice,
+    Map<String, dynamic>? extra,
+    CancelToken? cancelToken,
+  }) async* {
+    await for (final event in chatEvents(
+      model: model,
+      messages: messages,
+      tools: tools,
+      toolChoice: toolChoice,
+      extra: extra,
+      cancelToken: cancelToken,
+    )) {
+      if (event is TextDelta) {
+        yield event.text;
+      }
+    }
+  }
+
+  /// 流式 LLM 调用：每个 SSE chunk 解密后转成正文、思考或工具事件。
+  /// 服务端 SSE 行格式：`data: {EncryptedEnvelope JSON}\n\n`，
+  /// 最后一行 `data: [DONE]\n\n`。
+  Stream<LlmEvent> chatEvents({
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    List<Tool>? tools,
+    Object? toolChoice,
     Map<String, dynamic>? extra,
     CancelToken? cancelToken,
   }) async* {
     final ch = _requireChannel();
-    final plaintext = jsonEncode({
-      'model': model,
-      'messages': messages,
-      'stream': true,
-      ...?(_optionalExtra(extra)),
-    });
+    final plaintext = jsonEncode(
+      _chatPayload(
+        model: model,
+        messages: messages,
+        stream: true,
+        tools: tools,
+        toolChoice: toolChoice,
+        extra: extra,
+      ),
+    );
     final enc = encryptGcm(
       ch.aesKey,
       Uint8List.fromList(utf8.encode(plaintext)),
     );
-    final resp = await _dio.postUri<ResponseBody>(
-      Uri.parse('$aiBaseUrl/api/v1/llm/chat'),
-      data: {
-        'channel_id': ch.channelId,
-        'nonce': enc.nonceHex,
-        'ciphertext': enc.ciphertextHex,
-        'tag': enc.tagHex,
-      },
-      options: Options(
-        contentType: Headers.jsonContentType,
-        responseType: ResponseType.stream,
-      ),
-      cancelToken: cancelToken,
-    );
+    final Response<ResponseBody> resp;
+    try {
+      resp = await _dio.postUri<ResponseBody>(
+        Uri.parse('$aiBaseUrl/api/v1/llm/chat'),
+        data: {
+          'channel_id': ch.channelId,
+          'nonce': enc.nonceHex,
+          'ciphertext': enc.ciphertextHex,
+          'tag': enc.tagHex,
+        },
+        options: Options(
+          contentType: Headers.jsonContentType,
+          responseType: ResponseType.stream,
+        ),
+        cancelToken: cancelToken,
+      );
+    } on DioException catch (e) {
+      throw await HanakoBackendException.fromDio(e, action: '发送对话');
+    }
 
     final stream = resp.data!.stream;
     final buffer = StringBuffer();
@@ -385,7 +439,9 @@ class HanakoBackendClient {
             ciphertextHex: env['ciphertext'] as String,
             tagHex: env['tag'] as String,
           );
-          yield utf8.decode(pt);
+          for (final event in _extractChatStreamEvents(utf8.decode(pt))) {
+            yield event;
+          }
         } catch (_) {
           // 跳过坏行
         }
@@ -404,6 +460,29 @@ class HanakoBackendClient {
     }
     return ch;
   }
+}
+
+Map<String, dynamic> _chatPayload({
+  required String model,
+  required List<Map<String, dynamic>> messages,
+  required bool stream,
+  List<Tool>? tools,
+  Object? toolChoice,
+  Map<String, dynamic>? extra,
+}) {
+  final payload = <String, dynamic>{
+    'model': model,
+    'messages': messages,
+    'stream': stream,
+    ...?(_optionalExtra(extra)),
+  };
+  if (tools != null && tools.isNotEmpty) {
+    payload['tools'] = tools.map((tool) => tool.toOpenAI()).toList();
+  }
+  if (toolChoice != null) {
+    payload['tool_choice'] = toolChoice;
+  }
+  return payload;
 }
 
 Map<String, dynamic>? _optionalExtra(Map<String, dynamic>? extra) {
@@ -434,6 +513,243 @@ String _hexEncode(Uint8List bytes) {
   return buf.toString();
 }
 
+class HanakoBackendException implements Exception {
+  HanakoBackendException({
+    required this.message,
+    this.details,
+    this.statusCode,
+  });
+
+  final String message;
+  final String? details;
+  final int? statusCode;
+
+  static Future<HanakoBackendException> fromDio(
+    DioException error, {
+    required String action,
+  }) async {
+    final response = error.response;
+    final status = response?.statusCode;
+    final body = await _responseBodyText(response?.data);
+    final uri = error.requestOptions.uri;
+    final method = error.requestOptions.method;
+    final summary = _gatewayErrorSummary(action, status);
+    final details = StringBuffer()
+      ..writeln('$action失败')
+      ..writeln('HTTP 状态：${status ?? "无响应"}')
+      ..writeln('请求：$method $uri')
+      ..writeln('错误类型：${error.type}');
+    final statusMessage = response?.statusMessage;
+    if (statusMessage != null && statusMessage.trim().isNotEmpty) {
+      details.writeln('状态描述：$statusMessage');
+    }
+    if (body.trim().isNotEmpty) {
+      details
+        ..writeln()
+        ..writeln('服务端返回明文：')
+        ..write(body.trim());
+    } else if (error.message != null && error.message!.trim().isNotEmpty) {
+      details
+        ..writeln()
+        ..writeln('Dio 信息：')
+        ..write(error.message!.trim());
+    }
+    return HanakoBackendException(
+      message: summary,
+      details: details.toString(),
+      statusCode: status,
+    );
+  }
+
+  @override
+  String toString() => message;
+}
+
+String _gatewayErrorSummary(String action, int? status) {
+  if (status == null) return '$action失败：无法连接服务器';
+  if (status == 400) return '$action失败：AI 网关拒绝了请求参数';
+  if (status == 401) return '$action失败：身份或通信通道已失效';
+  if (status == 403) return '$action失败：当前身份无权使用该模型';
+  if (status == 404) return '$action失败：服务接口不存在或未部署最新版本';
+  if (status == 429) return '$action失败：请求过于频繁';
+  if (status >= 500) return '$action失败：AI 网关或上游模型服务异常';
+  return '$action失败：服务器返回 HTTP $status';
+}
+
+Future<String> _responseBodyText(Object? data) async {
+  if (data == null) return '';
+  if (data is ResponseBody) {
+    final bytes = BytesBuilder(copy: false);
+    await for (final chunk in data.stream) {
+      bytes.add(chunk);
+    }
+    return utf8.decode(bytes.takeBytes(), allowMalformed: true);
+  }
+  if (data is Map || data is List) {
+    return const JsonEncoder.withIndent('  ').convert(data);
+  }
+  return data.toString();
+}
+
+Iterable<LlmEvent> _extractChatStreamEvents(String decoded) sync* {
+  final lines = const LineSplitter().convert(decoded);
+  final source = lines.isEmpty ? <String>[decoded] : lines;
+  for (final rawLine in source) {
+    var line = rawLine.trim();
+    if (line.isEmpty || line.startsWith(':') || line.startsWith('event:')) {
+      continue;
+    }
+    if (line.startsWith('data:')) {
+      line = line.substring(5).trimLeft();
+    }
+    if (line.isEmpty || line == '[DONE]') continue;
+
+    try {
+      final parsed = jsonDecode(line);
+      for (final event in _chatDeltaEvents(parsed)) {
+        yield event;
+      }
+    } catch (_) {
+      yield TextDelta(line);
+    }
+  }
+}
+
+Iterable<LlmEvent> _chatDeltaEvents(Object? parsed) sync* {
+  if (parsed is! Map) return;
+  final streamError = _streamErrorEvent(parsed);
+  if (streamError != null) {
+    yield streamError;
+    return;
+  }
+  final choices = parsed['choices'];
+  if (choices is List && choices.isNotEmpty) {
+    for (final choice in choices) {
+      if (choice is! Map) continue;
+      final delta = choice['delta'];
+      if (delta is Map) {
+        for (final key in const ['reasoning_content', 'reasoning']) {
+          final reasoning = delta[key];
+          if (reasoning is String && reasoning.isNotEmpty) {
+            yield ThinkingDelta(reasoning);
+          }
+        }
+        final content = delta['content'];
+        if (content is String && content.isNotEmpty) {
+          yield TextDelta(content);
+        }
+        yield* _toolCallEvents(delta['tool_calls']);
+      }
+      yield* _toolCallEvents(choice['tool_calls']);
+      final message = choice['message'];
+      if (message is Map) {
+        final reasoning = message['reasoning_content'] ?? message['reasoning'];
+        if (reasoning is String && reasoning.isNotEmpty) {
+          yield ThinkingDelta(reasoning);
+        }
+        final content = message['content'];
+        if (content is String && content.isNotEmpty) yield TextDelta(content);
+        yield* _toolCallEvents(message['tool_calls']);
+      }
+      final text = choice['text'];
+      if (text is String && text.isNotEmpty) yield TextDelta(text);
+    }
+  }
+  final content = parsed['content'];
+  if (content is String && content.isNotEmpty) yield TextDelta(content);
+}
+
+LlmError? _streamErrorEvent(Map parsed) {
+  final rawError = parsed['error'];
+  if (rawError == null) return null;
+
+  String message = '发送对话失败：AI 网关或上游模型服务异常';
+  Object? code;
+  if (rawError is Map) {
+    final rawMessage = rawError['message'];
+    if (rawMessage is String && rawMessage.trim().isNotEmpty) {
+      message = '发送对话失败：${rawMessage.trim()}';
+    }
+    code = rawError['code'];
+  } else if (rawError is String && rawError.trim().isNotEmpty) {
+    message = '发送对话失败：${rawError.trim()}';
+  }
+
+  final statusCode = _intFromAny(parsed['status_code'] ?? parsed['statusCode']);
+  final details = StringBuffer()
+    ..writeln('发送对话失败')
+    ..writeln('错误来源：AI 网关流式响应');
+  if (statusCode != null) {
+    details.writeln('HTTP 状态：$statusCode');
+  }
+  if (code != null && code.toString().trim().isNotEmpty) {
+    details.writeln('错误代码：$code');
+  }
+  details
+    ..writeln()
+    ..writeln('服务端返回明文：')
+    ..write(const JsonEncoder.withIndent('  ').convert(parsed));
+
+  return LlmError(
+    message: message,
+    statusCode: statusCode,
+    details: details.toString(),
+  );
+}
+
+int? _intFromAny(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) return int.tryParse(value);
+  return null;
+}
+
+Iterable<LlmEvent> _toolCallEvents(Object? raw) sync* {
+  if (raw is! List) return;
+  for (var index = 0; index < raw.length; index++) {
+    final item = raw[index];
+    if (item is! Map) continue;
+    final id = (item['id'] ?? item['call_id'] ?? 'tool_call_$index').toString();
+    final function = item['function'];
+    String? name;
+    String? args;
+    String? thoughtSignature;
+    if (function is Map) {
+      final rawName = function['name'];
+      if (rawName is String && rawName.isNotEmpty) name = rawName;
+      final rawArgs = function['arguments'];
+      if (rawArgs is String && rawArgs.isNotEmpty) args = rawArgs;
+      final rawThoughtSignature =
+          function['thought_signature'] ?? function['thoughtSignature'];
+      if (rawThoughtSignature is String && rawThoughtSignature.isNotEmpty) {
+        thoughtSignature = rawThoughtSignature;
+      }
+    } else {
+      final rawName = item['name'];
+      if (rawName is String && rawName.isNotEmpty) name = rawName;
+      final rawArgs = item['arguments'] ?? item['input'];
+      if (rawArgs is String && rawArgs.isNotEmpty) {
+        args = rawArgs;
+      } else if (rawArgs is Map) {
+        args = jsonEncode(rawArgs);
+      }
+      final rawThoughtSignature =
+          item['thought_signature'] ?? item['thoughtSignature'];
+      if (rawThoughtSignature is String && rawThoughtSignature.isNotEmpty) {
+        thoughtSignature = rawThoughtSignature;
+      }
+    }
+    if (name != null) {
+      yield ToolCallStart(
+        id: id,
+        name: name,
+        thoughtSignature: thoughtSignature,
+      );
+    }
+    if (args != null) yield ToolCallArgsDelta(id: id, argsJson: args);
+  }
+}
+
 /// 用户名预检返回值。
 class UsernameAvailability {
   UsernameAvailability({required this.username, required this.available});
@@ -462,11 +778,13 @@ class RegistrationEmailChallenge {
     required this.challengeId,
     required this.delivery,
     required this.expiresIn,
+    required this.cooldownSeconds,
   });
 
   final String challengeId;
   final String delivery;
   final int expiresIn;
+  final int cooldownSeconds;
 }
 
 /// 邮箱 RFA 挑战。
@@ -475,11 +793,13 @@ class RecoveryRfaChallenge {
     required this.challengeId,
     required this.delivery,
     required this.expiresIn,
+    required this.cooldownSeconds,
   });
 
   final String challengeId;
   final String delivery;
   final int expiresIn;
+  final int cooldownSeconds;
 }
 
 /// 邮箱 RFA 验证后得到的短期深度恢复授权。

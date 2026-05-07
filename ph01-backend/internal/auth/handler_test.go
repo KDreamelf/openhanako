@@ -657,12 +657,169 @@ func TestRecoveryRFAUnavailableAndEmailNotBound(t *testing.T) {
 	}
 }
 
+func TestRegistrationEmailStartCooldown(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	dsn := filepath.Join(tmpDir, "test.db")
+	gormDB, err := db.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	if err := user.AutoMigrate(gormDB); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	t.Cleanup(func() {
+		sqlDB, _ := gormDB.DB()
+		if sqlDB != nil {
+			sqlDB.Close()
+		}
+	})
+
+	store := user.NewStore(gormDB)
+	sender := &fakeEmailSender{}
+	registrationEmail := auth.NewRegistrationEmailService(store, newMemoryRFAStore(), sender)
+	registrationEmail.SendCooldown = time.Minute
+	handler := &auth.Handler{
+		UserStore:         store,
+		Verifier:          hcrypto.NewSignedRequestVerifier(nil, "nonce:test"),
+		RegistrationEmail: registrationEmail,
+	}
+	r := gin.New()
+	v1 := r.Group("/api/v1")
+	handler.Register(v1)
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	body, _ := json.Marshal(api.RegistrationEmailStartRequest{
+		Username: "cooldown_user",
+		Email:    "cooldown@example.com",
+	})
+	resp, err := http.Post(srv.URL+"/api/v1/auth/register_email/start", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		bb, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d body=%s", resp.StatusCode, bb)
+	}
+	var start api.RegistrationEmailStartResponse
+	if err := json.NewDecoder(resp.Body).Decode(&start); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if start.CooldownSeconds != 60 {
+		t.Fatalf("expected cooldown 60s, got %d", start.CooldownSeconds)
+	}
+
+	resp, err = http.Post(srv.URL+"/api/v1/auth/register_email/start", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		bb, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 429, got %d body=%s", resp.StatusCode, bb)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Fatal("expected Retry-After header")
+	}
+	var er api.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+		t.Fatal(err)
+	}
+	if er.Error != api.ErrRateLimitExceeded || er.RetryAfter <= 0 {
+		t.Fatalf("expected rate_limit_exceeded with retry_after, got %+v", er)
+	}
+	if sender.count != 1 {
+		t.Fatalf("expected one email to be sent, got %d", sender.count)
+	}
+}
+
+func TestRecoveryRFAStartCooldown(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	dsn := filepath.Join(tmpDir, "test.db")
+	gormDB, err := db.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	if err := user.AutoMigrate(gormDB); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	t.Cleanup(func() {
+		sqlDB, _ := gormDB.DB()
+		if sqlDB != nil {
+			sqlDB.Close()
+		}
+	})
+
+	store := user.NewStore(gormDB)
+	priv, _ := secp.GeneratePrivateKey()
+	pub := hex.EncodeToString(priv.PubKey().SerializeUncompressed())
+	hash, _ := hcrypto.PubkeyHash(pub)
+	if _, err := store.CreateWithPubkey("rfa_cooldown", "RFA Cooldown", "rfa-cooldown@example.com", pub, hash); err != nil {
+		t.Fatal(err)
+	}
+	sender := &fakeEmailSender{}
+	rfaSvc := auth.NewRFAService(store, newMemoryRFAStore(), sender)
+	rfaSvc.SendCooldown = time.Minute
+	handler := &auth.Handler{
+		UserStore: store,
+		Verifier:  hcrypto.NewSignedRequestVerifier(nil, "nonce:test"),
+		RFA:       rfaSvc,
+	}
+	r := gin.New()
+	v1 := r.Group("/api/v1")
+	handler.Register(v1)
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	body, _ := json.Marshal(api.RecoveryRFAStartRequest{Username: "rfa_cooldown"})
+	resp, err := http.Post(srv.URL+"/api/v1/auth/recovery_rfa/start", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		bb, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d body=%s", resp.StatusCode, bb)
+	}
+	var start api.RecoveryRFAStartResponse
+	if err := json.NewDecoder(resp.Body).Decode(&start); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if start.CooldownSeconds != 60 {
+		t.Fatalf("expected cooldown 60s, got %d", start.CooldownSeconds)
+	}
+
+	resp, err = http.Post(srv.URL+"/api/v1/auth/recovery_rfa/start", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		bb, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 429, got %d body=%s", resp.StatusCode, bb)
+	}
+	var er api.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+		t.Fatal(err)
+	}
+	if er.Error != api.ErrRateLimitExceeded || er.RetryAfter <= 0 {
+		t.Fatalf("expected rate_limit_exceeded with retry_after, got %+v", er)
+	}
+	if sender.count != 1 {
+		t.Fatalf("expected one email to be sent, got %d", sender.count)
+	}
+}
+
 // === helpers ===
 
 type fakeEmailSender struct {
 	to      string
 	subject string
 	body    string
+	count   int
 }
 
 type fakeGatewaySyncer struct {
@@ -678,6 +835,7 @@ func (f *fakeEmailSender) Send(_ context.Context, to, subject, body string) erro
 	f.to = to
 	f.subject = subject
 	f.body = body
+	f.count++
 	return nil
 }
 
@@ -685,12 +843,14 @@ type memoryRFAStore struct {
 	mu         sync.Mutex
 	challenges map[string]*auth.RFAChallenge
 	grants     map[string]*auth.RecoveryGrant
+	cooldowns  map[string]time.Time
 }
 
 func newMemoryRFAStore() *memoryRFAStore {
 	return &memoryRFAStore{
 		challenges: map[string]*auth.RFAChallenge{},
 		grants:     map[string]*auth.RecoveryGrant{},
+		cooldowns:  map[string]time.Time{},
 	}
 }
 
@@ -737,6 +897,27 @@ func (s *memoryRFAStore) GetGrant(_ context.Context, token string) (*auth.Recove
 	}
 	cp := *grant
 	return &cp, nil
+}
+
+func (s *memoryRFAStore) ReserveCooldown(_ context.Context, key string, ttl time.Duration) (time.Duration, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if expiresAt, ok := s.cooldowns[key]; ok {
+		if now.Before(expiresAt) {
+			return time.Until(expiresAt), false, nil
+		}
+		delete(s.cooldowns, key)
+	}
+	s.cooldowns[key] = now.Add(ttl)
+	return 0, true, nil
+}
+
+func (s *memoryRFAStore) ClearCooldown(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.cooldowns, key)
+	return nil
 }
 
 func signedPost(url string, priv *secp.PrivateKey, payload map[string]interface{}) ([]byte, error) {

@@ -45,7 +45,11 @@ import { Textarea } from '@/components/ui/textarea'
 import { DateTimePicker } from '@/components/datetime-picker'
 import { MultiSelect } from '@/components/multi-select'
 import { createApiKey, updateApiKey, getApiKey } from '../api'
-import { ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
+import {
+  ERROR_MESSAGES,
+  SUCCESS_MESSAGES,
+  isPH01SystemKeyName,
+} from '../constants'
 import {
   apiKeyFormSchema,
   type ApiKeyFormValues,
@@ -103,8 +107,8 @@ export function ApiKeysMutateDrawer({
 }: ApiKeyMutateDrawerProps) {
   const { t } = useTranslation()
   const isUpdate = !!currentRow
-  const isLockedDefaultKey =
-    isUpdate && currentRow?.name === 'PH01 Default Key'
+  const isLockedSystemKey =
+    isUpdate && !!currentRow && isPH01SystemKeyName(currentRow.name)
   const { triggerRefresh } = useApiKeys()
   const { status } = useStatus()
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -280,7 +284,7 @@ export function ApiKeysMutateDrawer({
               description={t('Set API key basic information')}
               icon={KeyRound}
             >
-              {!isLockedDefaultKey && (
+              {!isLockedSystemKey && (
                 <FormField
                   control={form.control}
                   name='name'
@@ -345,7 +349,7 @@ export function ApiKeysMutateDrawer({
                 />
               )}
 
-              {!isLockedDefaultKey && (
+              {!isLockedSystemKey && (
                 <FormField
                   control={form.control}
                   name='expired_time'
@@ -406,7 +410,7 @@ export function ApiKeysMutateDrawer({
                 />
               )}
 
-              {!isUpdate && !isLockedDefaultKey && (
+              {!isUpdate && !isLockedSystemKey && (
                 <FormField
                   control={form.control}
                   name='tokenCount'
@@ -436,156 +440,152 @@ export function ApiKeysMutateDrawer({
               )}
             </ApiKeyFormSection>
 
-            {!isLockedDefaultKey && (
-              <ApiKeyFormSection
-                title={t('Quota Settings')}
-                description={t('Set quota amount and limits')}
-                icon={WalletCards}
-              >
-                {!unlimitedQuota && (
-                  <FormField
-                    control={form.control}
-                    name='remain_quota_dollars'
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>{quotaLabel}</FormLabel>
-                        <FormControl>
-                          <Input
-                            {...field}
-                            type='number'
-                            step={tokensOnly ? 1 : 0.01}
-                            placeholder={quotaPlaceholder}
-                            onChange={(e) =>
-                              field.onChange(parseFloat(e.target.value) || 0)
-                            }
-                          />
-                        </FormControl>
-                        <FormDescription>
-                          {tokensOnly
-                            ? t('Enter the quota amount in tokens')
-                            : t('Enter the quota amount in {{currency}}', {
-                                currency: currencyLabel,
-                              })}
-                        </FormDescription>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                )}
-
+            <ApiKeyFormSection
+              title={t('Quota Settings')}
+              description={t('Set quota amount and limits')}
+              icon={WalletCards}
+            >
+              {!unlimitedQuota && (
                 <FormField
                   control={form.control}
-                  name='unlimited_quota'
+                  name='remain_quota_dollars'
                   render={({ field }) => (
-                    <FormItem className='flex min-h-16 flex-row items-center justify-between gap-3 rounded-lg border px-3 py-2.5 sm:min-h-20 sm:gap-4 sm:px-4 sm:py-3'>
-                      <div className='space-y-0.5'>
-                        <FormLabel className='text-sm'>
-                          {t('Unlimited Quota')}
-                        </FormLabel>
-                        <FormDescription className='text-xs'>
-                          {t('Enable unlimited quota for this API key')}
-                        </FormDescription>
-                      </div>
+                    <FormItem>
+                      <FormLabel>{quotaLabel}</FormLabel>
                       <FormControl>
-                        <Switch
-                          checked={field.value}
-                          onCheckedChange={field.onChange}
+                        <Input
+                          {...field}
+                          type='number'
+                          step={tokensOnly ? 1 : 0.01}
+                          placeholder={quotaPlaceholder}
+                          onChange={(e) =>
+                            field.onChange(parseFloat(e.target.value) || 0)
+                          }
                         />
                       </FormControl>
+                      <FormDescription>
+                        {tokensOnly
+                          ? t('Enter the quota amount in tokens')
+                          : t('Enter the quota amount in {{currency}}', {
+                              currency: currencyLabel,
+                            })}
+                      </FormDescription>
+                      <FormMessage />
                     </FormItem>
                   )}
                 />
-              </ApiKeyFormSection>
-            )}
+              )}
 
-            {!isLockedDefaultKey && (
-              <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
-              <section className='bg-card rounded-lg border'>
-                <CollapsibleTrigger asChild>
-                  <button
-                    type='button'
-                    className='hover:bg-muted/50 flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors sm:gap-3 sm:px-4 sm:py-3'
-                  >
-                    <div className='bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-lg border sm:size-10'>
-                      <Settings2 className='size-4 sm:size-5' />
+              <FormField
+                control={form.control}
+                name='unlimited_quota'
+                render={({ field }) => (
+                  <FormItem className='flex min-h-16 flex-row items-center justify-between gap-3 rounded-lg border px-3 py-2.5 sm:min-h-20 sm:gap-4 sm:px-4 sm:py-3'>
+                    <div className='space-y-0.5'>
+                      <FormLabel className='text-sm'>
+                        {t('Unlimited Quota')}
+                      </FormLabel>
+                      <FormDescription className='text-xs'>
+                        {t('Enable unlimited quota for this API key')}
+                      </FormDescription>
                     </div>
-                    <div className='min-w-0 flex-1'>
-                      <h3 className='text-sm font-medium leading-none'>
-                        {t('Advanced Settings')}
-                      </h3>
-                      <p className='text-muted-foreground mt-1 text-xs'>
-                        {t('Set API key access restrictions')}
-                      </p>
-                    </div>
-                    <ChevronDown
-                      className={cn(
-                        'text-muted-foreground size-4 shrink-0 transition-transform',
-                        advancedOpen && 'rotate-180'
-                      )}
-                    />
-                  </button>
-                </CollapsibleTrigger>
-                <CollapsibleContent>
-                  <div className='space-y-3 border-t p-3 sm:space-y-4 sm:p-4'>
-                    <FormField
-                      control={form.control}
-                      name='model_limits'
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>{t('Model Limits')}</FormLabel>
-                          <FormControl>
-                            <MultiSelect
-                              options={models.map((m) => ({
-                                label: m,
-                                value: m,
-                              }))}
-                              selected={field.value}
-                              onChange={field.onChange}
-                              placeholder={t(
-                                'Select models (empty for allow all)'
-                              )}
-                            />
-                          </FormControl>
-                          <FormDescription>
-                            {t('Limit which models can be used with this key')}
-                          </FormDescription>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                      />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+            </ApiKeyFormSection>
 
-                    <FormField
-                      control={form.control}
-                      name='allow_ips'
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>
-                            {t('IP Whitelist (supports CIDR)')}
-                          </FormLabel>
-                          <FormControl>
-                            <Textarea
-                              {...field}
-                              className='min-h-20 resize-none'
-                              placeholder={t(
-                                'One IP per line (empty for no restriction)'
+            <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
+                <section className='bg-card rounded-lg border'>
+                  <CollapsibleTrigger asChild>
+                    <button
+                      type='button'
+                      className='hover:bg-muted/50 flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors sm:gap-3 sm:px-4 sm:py-3'
+                    >
+                      <div className='bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-lg border sm:size-10'>
+                        <Settings2 className='size-4 sm:size-5' />
+                      </div>
+                      <div className='min-w-0 flex-1'>
+                        <h3 className='text-sm font-medium leading-none'>
+                          {t('Advanced Settings')}
+                        </h3>
+                        <p className='text-muted-foreground mt-1 text-xs'>
+                          {t('Set API key access restrictions')}
+                        </p>
+                      </div>
+                      <ChevronDown
+                        className={cn(
+                          'text-muted-foreground size-4 shrink-0 transition-transform',
+                          advancedOpen && 'rotate-180'
+                        )}
+                      />
+                    </button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <div className='space-y-3 border-t p-3 sm:space-y-4 sm:p-4'>
+                      <FormField
+                        control={form.control}
+                        name='model_limits'
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>{t('Model Limits')}</FormLabel>
+                            <FormControl>
+                              <MultiSelect
+                                options={models.map((m) => ({
+                                  label: m,
+                                  value: m,
+                                }))}
+                                selected={field.value}
+                                onChange={field.onChange}
+                                placeholder={t(
+                                  'Select models (empty for allow all)'
+                                )}
+                              />
+                            </FormControl>
+                            <FormDescription>
+                              {t('Limit which models can be used with this key')}
+                            </FormDescription>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+
+                      <FormField
+                        control={form.control}
+                        name='allow_ips'
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>
+                              {t('IP Whitelist (supports CIDR)')}
+                            </FormLabel>
+                            <FormControl>
+                              <Textarea
+                                {...field}
+                                className='min-h-20 resize-none'
+                                placeholder={t(
+                                  'One IP per line (empty for no restriction)'
+                                )}
+                                rows={3}
+                              />
+                            </FormControl>
+                            <FormDescription>
+                              {t(
+                                'Do not over-trust this feature. IP may be spoofed. Please use with nginx, CDN and other gateways.'
                               )}
-                              rows={3}
-                            />
-                          </FormControl>
-                          <FormDescription>
-                            {t(
-                              'Do not over-trust this feature. IP may be spoofed. Please use with nginx, CDN and other gateways.'
-                            )}
-                          </FormDescription>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                  </div>
-                </CollapsibleContent>
-              </section>
-              </Collapsible>
-            )}
+                            </FormDescription>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    </div>
+                  </CollapsibleContent>
+                </section>
+            </Collapsible>
           </form>
         </Form>
         <SheetFooter className='bg-background grid grid-cols-2 gap-2 border-t px-3 py-3 sm:flex sm:flex-row sm:justify-end sm:px-5 sm:py-4'>

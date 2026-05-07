@@ -92,13 +92,14 @@ func PH01CreateChallenge(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	clientIP := ph01ClientIP(c)
 	challenge := PH01LoginChallenge{
 		Version:     1,
 		Purpose:     ph01GatewayLoginPurpose,
 		ChallengeID: nonce,
 		Nonce:       nonce,
-		IP:          ph01ClientIP(c),
-		IPLocation:  lookupPH01IPLocation(ph01ClientIP(c)),
+		IP:          clientIP,
+		IPLocation:  lookupPH01IPLocation(clientIP),
 		UserAgent:   c.Request.UserAgent(),
 		IssuedAt:    now,
 		ExpiresAt:   now + ph01ChallengeTTLSeconds,
@@ -643,39 +644,106 @@ func lookupPH01IPLocationFromAPI(ip string) (string, bool) {
 }
 
 func ph01ParseGeoLocationPayload(body []byte) string {
-	var geo struct {
-		Status     string `json:"status"`
-		Country    string `json:"country"`
-		Region     string `json:"region"`
-		RegionName string `json:"regionName"`
-		City       string `json:"city"`
-		Message    string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &geo); err == nil {
-		if geo.Status == "" || strings.EqualFold(geo.Status, "success") {
-			parts := make([]string, 0, 3)
-			if geo.Country != "" {
-				parts = append(parts, geo.Country)
-			}
-			if geo.RegionName != "" {
-				parts = append(parts, geo.RegionName)
-			} else if geo.Region != "" {
-				parts = append(parts, geo.Region)
-			}
-			if geo.City != "" {
-				parts = append(parts, geo.City)
-			}
-			if len(parts) > 0 {
-				return strings.Join(parts, " / ")
-			}
-		}
-		if geo.Status != "" && !strings.EqualFold(geo.Status, "success") {
-			return ""
-		}
-	}
 	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return ""
+	}
+	var geo ph01GeoIPPayload
+	if err := json.Unmarshal(body, &geo); err == nil {
+		return ph01GeoLocationFromPayload(geo)
+	}
+	var jsonText string
+	if err := json.Unmarshal(body, &jsonText); err == nil {
+		text = strings.TrimSpace(jsonText)
+	}
 	if text != "" {
 		return text
+	}
+	return ""
+}
+
+type ph01GeoIPPayload struct {
+	Success         *bool             `json:"success"`
+	Status          string            `json:"status"`
+	Code            any               `json:"code"`
+	Country         string            `json:"country"`
+	CountryName     string            `json:"country_name"`
+	Region          string            `json:"region"`
+	RegionName      string            `json:"regionName"`
+	RegionNameSnake string            `json:"region_name"`
+	Province        string            `json:"province"`
+	City            string            `json:"city"`
+	Addr            string            `json:"addr"`
+	Message         string            `json:"message"`
+	Data            *ph01GeoIPPayload `json:"data"`
+	IPData          *ph01GeoIPPayload `json:"ipdata"`
+	Result          *ph01GeoIPPayload `json:"result"`
+}
+
+func ph01GeoLocationFromPayload(geo ph01GeoIPPayload) string {
+	if geo.Success != nil && !*geo.Success {
+		return ""
+	}
+	if geo.Status != "" && !ph01GeoIPStatusSuccess(geo.Status) {
+		return ""
+	}
+	if !ph01GeoIPCodeSuccess(geo.Code) {
+		return ""
+	}
+
+	parts := make([]string, 0, 3)
+	if country := firstNonEmptyString(geo.Country, geo.CountryName); country != "" {
+		parts = append(parts, country)
+	}
+	if region := firstNonEmptyString(geo.RegionName, geo.RegionNameSnake, geo.Region, geo.Province); region != "" {
+		parts = append(parts, region)
+	}
+	if city := strings.TrimSpace(geo.City); city != "" {
+		parts = append(parts, city)
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, " / ")
+	}
+
+	for _, nested := range []*ph01GeoIPPayload{geo.Data, geo.IPData, geo.Result} {
+		if nested == nil {
+			continue
+		}
+		if location := ph01GeoLocationFromPayload(*nested); location != "" {
+			return location
+		}
+	}
+	return strings.TrimSpace(geo.Addr)
+}
+
+func ph01GeoIPStatusSuccess(status string) bool {
+	status = strings.TrimSpace(status)
+	return status == "" ||
+		strings.EqualFold(status, "success") ||
+		strings.EqualFold(status, "ok") ||
+		status == "1" ||
+		status == "200"
+}
+
+func ph01GeoIPCodeSuccess(code any) bool {
+	switch value := code.(type) {
+	case nil:
+		return true
+	case float64:
+		return value == 0 || value == 1 || value == http.StatusOK
+	case string:
+		value = strings.TrimSpace(value)
+		return value == "" || value == "0" || value == "1" || value == "200"
+	default:
+		return true
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
 	}
 	return ""
 }

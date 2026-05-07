@@ -175,7 +175,23 @@ payload + "\n" + pubkey + "\n" + timestamp + "\n" + nonce
 {
   "challenge_id": "email-challenge-id",
   "delivery": "a***e@example.com",
-  "expires_in": 600
+  "expires_in": 600,
+  "cooldown_seconds": 60
+}
+```
+
+同一邮箱注册验证码发送成功后，服务端强制 60 秒冷却。冷却期内再次请求返回：
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 42
+```
+
+```json
+{
+  "error": "rate_limit_exceeded",
+  "message": "rate_limit_exceeded",
+  "retry_after": 42
 }
 ```
 
@@ -298,9 +314,12 @@ payload + "\n" + pubkey + "\n" + timestamp + "\n" + nonce
 {
   "challenge_id": "base64url...",
   "delivery": "a***e@example.com",
-  "expires_in": 600
+  "expires_in": 600,
+  "cooldown_seconds": 60
 }
 ```
+
+同一邮箱恢复验证码发送成功后，服务端同样强制 60 秒冷却；冷却期内返回 `429 rate_limit_exceeded`，响应体带 `retry_after`，响应头带 `Retry-After`。
 
 **POST `/api/v1/auth/recovery_rfa/verify`**
 

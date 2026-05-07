@@ -8,7 +8,14 @@ import '../../core/session_coordinator.dart';
 
 /// 侧边 Session Drawer：显示当前 agent 的 session 列表。
 class SessionDrawer extends ConsumerWidget {
-  const SessionDrawer({super.key});
+  const SessionDrawer({
+    super.key,
+    required this.onNewSession,
+    required this.onSwitchSession,
+  });
+
+  final Future<void> Function() onNewSession;
+  final Future<void> Function(SessionListEntry entry) onSwitchSession;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -39,7 +46,7 @@ class SessionDrawer extends ConsumerWidget {
               trailing: IconButton(
                 icon: const Icon(Icons.tune),
                 tooltip: '设置',
-                onPressed: () => WindowFactory.openSettings(),
+                onPressed: () => WindowFactory.openSettings(context),
               ),
             ),
             const Divider(height: 0),
@@ -47,16 +54,19 @@ class SessionDrawer extends ConsumerWidget {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: Row(
                 children: [
-                  Text('Sessions',
-                      style: Theme.of(context).textTheme.labelLarge),
+                  Text(
+                    'Sessions',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
                   const Spacer(),
                   IconButton(
                     icon: const Icon(Icons.add, size: 20),
                     tooltip: '新建会话',
                     onPressed: () async {
-                      final eng = ref.read(engineProvider);
-                      await eng.sessionCoordinator.createSession();
-                      ref.invalidate(sessionListProvider);
+                      await onNewSession();
+                      if (context.mounted) {
+                        Navigator.of(context).pop();
+                      }
                     },
                   ),
                 ],
@@ -64,8 +74,7 @@ class SessionDrawer extends ConsumerWidget {
             ),
             Expanded(
               child: sessions.when(
-                loading: () =>
-                    const Center(child: CircularProgressIndicator()),
+                loading: () => const Center(child: CircularProgressIndicator()),
                 error: (e, _) => Center(child: Text('Error: $e')),
                 data: (list) {
                   if (list.isEmpty) {
@@ -75,7 +84,10 @@ class SessionDrawer extends ConsumerWidget {
                     itemCount: list.length,
                     itemBuilder: (_, i) {
                       final s = list[i];
-                      return _SessionTile(entry: s);
+                      return _SessionTile(
+                        entry: s,
+                        onSwitchSession: onSwitchSession,
+                      );
                     },
                   );
                 },
@@ -90,7 +102,8 @@ class SessionDrawer extends ConsumerWidget {
 
 class _SessionTile extends ConsumerWidget {
   final SessionListEntry entry;
-  const _SessionTile({required this.entry});
+  final Future<void> Function(SessionListEntry entry) onSwitchSession;
+  const _SessionTile({required this.entry, required this.onSwitchSession});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -104,8 +117,10 @@ class _SessionTile extends ConsumerWidget {
       ),
       subtitle: Text(fmt.format(entry.modified.toLocal())),
       onTap: () async {
-        final eng = ref.read(engineProvider);
-        await eng.sessionCoordinator.switchSession(entry.path);
+        await onSwitchSession(entry);
+        if (context.mounted) {
+          Navigator.of(context).pop();
+        }
       },
     );
   }

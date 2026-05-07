@@ -6,8 +6,13 @@ server:
   log_dir: /app/logs
   node_name: ph01-ai-gateway-01
   gin_mode: release
-  frontend_base_url: https://ai.example.com
-  gateway_public_base_url: https://ai.example.com
+  frontend_base_url: https://ai.xn--lbtx0e.cn
+  gateway_public_base_url: https://ai.xn--lbtx0e.cn
+  system_name: 幻宙01
+  frontend_theme: default
+  home_page_content: ""
+  logo: ""
+  footer: ""
 
 database:
   sql_dsn: postgresql://ph01_ai:CHANGE_ME_AI_DB_PASSWORD@postgres.example.internal:5432/ph01_ai?sslmode=require
@@ -27,7 +32,7 @@ security:
   tls_insecure_skip_verify: false
   trust_proxy_headers: true
   trusted_redirect_domains:
-    - ai.example.com
+    - ai.xn--lbtx0e.cn
 
 runtime:
   debug_enabled: false
@@ -49,6 +54,11 @@ ph01_auth:
   client_cert: /etc/ph01/certs/mtls/ai-gateway.pem
   client_key: /etc/ph01/certs/mtls/ai-gateway-key.pem
   server_name: ph01-auth-center
+  # 如需完全内网化，可清空 geoip_api_url 并把 geoip_db_path 指向挂载进容器的 mmdb 文件。
+  geoip_api_url: https://ipwho.is/{ip}?lang=zh-CN
+  geoip_api_timeout_ms: 1000
+  geoip_cache_ttl_hours: 168
+  geoip_db_path: ""
 
 analytics:
   google_analytics_id: ""

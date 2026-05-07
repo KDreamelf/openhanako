@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="168" y1="76" x2="856" y2="948" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1D35"/>
+      <stop offset="0.48" stop-color="#071426"/>
+      <stop offset="1" stop-color="#08101A"/>
+    </linearGradient>
+    <radialGradient id="coreGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(576 496) rotate(90) scale(388)">
+      <stop offset="0" stop-color="#78D7FF" stop-opacity="0.72"/>
+      <stop offset="0.42" stop-color="#1D5EFF" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#1D5EFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="292" y1="202" x2="754" y2="818" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#78D7FF"/>
+      <stop offset="0.38" stop-color="#1D5EFF"/>
+      <stop offset="0.76" stop-color="#0D7FA8"/>
+      <stop offset="1" stop-color="#F6FAFF"/>
+    </linearGradient>
+    <linearGradient id="one" x1="348" y1="258" x2="430" y2="790" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F6FAFF"/>
+      <stop offset="0.28" stop-color="#78D7FF"/>
+      <stop offset="1" stop-color="#1D5EFF"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="146" y1="102" x2="878" y2="922" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#78D7FF" stop-opacity="0.9"/>
+      <stop offset="0.5" stop-color="#1D5EFF" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#0D7FA8" stop-opacity="0.7"/>
+    </linearGradient>
+    <clipPath id="tileClip">
+      <rect x="56" y="56" width="912" height="912" rx="184"/>
+    </clipPath>
+  </defs>
+
+  <rect x="56" y="56" width="912" height="912" rx="184" fill="url(#bg)"/>
+  <g clip-path="url(#tileClip)">
+    <circle cx="576" cy="496" r="390" fill="url(#coreGlow)"/>
+    <path d="M184 768C296 638 396 565 512 520C636 471 750 382 850 238" fill="none" stroke="#78D7FF" stroke-width="18" stroke-linecap="round" opacity="0.16"/>
+    <path d="M156 322C280 402 382 446 502 468C650 495 758 556 884 694" fill="none" stroke="#0D7FA8" stroke-width="20" stroke-linecap="round" opacity="0.18"/>
+
+    <ellipse cx="568" cy="512" rx="228" ry="316" transform="rotate(-18 568 512)" fill="none" stroke="#030913" stroke-width="86" opacity="0.46"/>
+    <ellipse cx="568" cy="512" rx="228" ry="316" transform="rotate(-18 568 512)" fill="none" stroke="url(#ring)" stroke-width="58" stroke-linecap="round"/>
+    <path d="M435 236C498 198 599 185 682 229" fill="none" stroke="#F6FAFF" stroke-width="22" stroke-linecap="round" opacity="0.82"/>
+    <path d="M696 764C628 820 522 836 434 796" fill="none" stroke="#78D7FF" stroke-width="20" stroke-linecap="round" opacity="0.46"/>
+
+    <path d="M338 340L424 286L468 346L390 398Z" fill="#F6FAFF" opacity="0.94"/>
+    <rect x="352" y="322" width="92" height="468" rx="44" fill="#061322" opacity="0.7"/>
+    <rect x="340" y="306" width="92" height="504" rx="46" fill="url(#one)"/>
+    <rect x="306" y="758" width="174" height="64" rx="32" fill="#78D7FF" opacity="0.9"/>
+
+    <circle cx="575" cy="512" r="76" fill="#071426"/>
+    <circle cx="575" cy="512" r="54" fill="#78D7FF" opacity="0.16"/>
+    <circle cx="575" cy="512" r="24" fill="#F6FAFF"/>
+    <circle cx="707" cy="268" r="26" fill="#F6FAFF"/>
+    <circle cx="736" cy="730" r="20" fill="#78D7FF"/>
+    <circle cx="310" cy="650" r="16" fill="#0D7FA8"/>
+  </g>
+  <rect x="56" y="56" width="912" height="912" rx="184" fill="none" stroke="url(#edge)" stroke-width="18"/>
+</svg>

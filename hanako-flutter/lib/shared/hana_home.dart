@@ -86,4 +86,10 @@ class HanaHome {
 
   /// 仅供测试：清空缓存，使下一次 [resolve] 重新读取环境变量。
   static void resetForTesting() => _cached = null;
+
+  /// 仅供测试：用指定目录构造一个隔离的 HANA_HOME。
+  static HanaHome debugFromDirectory(Directory root) {
+    root.createSync(recursive: true);
+    return HanaHome._(root);
+  }
 }

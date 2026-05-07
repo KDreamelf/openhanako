@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/markdowntools"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/reasoning"
@@ -220,9 +222,7 @@ func CovertOpenAI2Gemini(c *gin.Context, textRequest dto.GeneralOpenAIRequest, i
 		geminiRequest.GenerationConfig.Seed = common.GetPointer(geminiSeed)
 	}
 
-	attachThoughtSignature := (info.ChannelType == constant.ChannelTypeGemini ||
-		info.ChannelType == constant.ChannelTypeVertexAi) &&
-		model_setting.GetGeminiSettings().FunctionCallThoughtSignatureEnabled
+	attachThoughtSignature := ShouldAttachFunctionCallThoughtSignature(info)
 
 	if model_setting.IsGeminiModelSupportImagine(info.UpstreamModelName) {
 		geminiRequest.GenerationConfig.ResponseModalities = []string{
@@ -512,8 +512,8 @@ func CovertOpenAI2Gemini(c *gin.Context, textRequest dto.GeneralOpenAIRequest, i
 						Arguments:    args,
 					},
 				}
-				if shouldAttachThoughtSignature && !signatureAttached && hasFunctionCallContent(toolCall.FunctionCall) && len(toolCall.ThoughtSignature) == 0 {
-					toolCall.ThoughtSignature = json.RawMessage(strconv.Quote(thoughtSignatureBypassValue))
+				if len(call.Function.ThoughtSignature) > 0 {
+					toolCall.ThoughtSignature = call.Function.ThoughtSignature
 					signatureAttached = true
 				}
 				parts = append(parts, toolCall)
@@ -678,6 +678,375 @@ func hasFunctionCallContent(call *dto.FunctionCall) bool {
 	}
 
 	switch v := call.Arguments.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(v) != ""
+	case map[string]interface{}:
+		return len(v) > 0
+	case []interface{}:
+		return len(v) > 0
+	default:
+		return true
+	}
+}
+
+func ShouldAttachFunctionCallThoughtSignature(info *relaycommon.RelayInfo) bool {
+	if info == nil || info.ChannelMeta == nil {
+		return false
+	}
+	if info.ChannelType != constant.ChannelTypeGemini && info.ChannelType != constant.ChannelTypeVertexAi {
+		return false
+	}
+	return model_setting.GetGeminiSettings().FunctionCallThoughtSignatureEnabled
+}
+
+type FunctionCallThoughtSignatureIssue struct {
+	ContentIndex int
+	PartIndex    int
+	FunctionName string
+	FieldName    string
+	SignatureLen int
+	SignatureSHA string
+}
+
+type FunctionCallThoughtSignatureAudit struct {
+	Total       int
+	Signed      int
+	SignedParts []FunctionCallThoughtSignatureIssue
+	Missing     []FunctionCallThoughtSignatureIssue
+}
+
+func (a FunctionCallThoughtSignatureAudit) MissingCount() int {
+	return len(a.Missing)
+}
+
+func (a FunctionCallThoughtSignatureAudit) MissingSummary(limit int) string {
+	return formatFunctionCallSignatureIssues(a.Missing, limit)
+}
+
+func (a FunctionCallThoughtSignatureAudit) SignedSummary(limit int) string {
+	return formatFunctionCallSignatureIssues(a.SignedParts, limit)
+}
+
+func formatFunctionCallSignatureIssues(items []FunctionCallThoughtSignatureIssue, limit int) string {
+	if len(items) == 0 {
+		return ""
+	}
+	if limit <= 0 || limit > len(items) {
+		limit = len(items)
+	}
+	parts := make([]string, 0, limit)
+	for _, item := range items[:limit] {
+		name := item.FunctionName
+		if name == "" {
+			name = "<unknown>"
+		}
+		extra := ""
+		if item.SignatureLen > 0 || item.SignatureSHA != "" || item.FieldName != "" {
+			extra = fmt.Sprintf(" field=%s sig_len=%d sig_sha=%s", item.FieldName, item.SignatureLen, item.SignatureSHA)
+		}
+		parts = append(parts, fmt.Sprintf("content=%d part=%d name=%s%s", item.ContentIndex, item.PartIndex, name, extra))
+	}
+	if len(items) > limit {
+		parts = append(parts, fmt.Sprintf("...+%d", len(items)-limit))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func InspectFunctionCallThoughtSignatures(request *dto.GeminiChatRequest) FunctionCallThoughtSignatureAudit {
+	var audit FunctionCallThoughtSignatureAudit
+	if request == nil {
+		return audit
+	}
+	for contentIdx := range request.Contents {
+		for partIdx := range request.Contents[contentIdx].Parts {
+			part := &request.Contents[contentIdx].Parts[partIdx]
+			if part.FunctionCall == nil || !hasFunctionCallContent(part.FunctionCall) {
+				continue
+			}
+			audit.Total++
+			if len(part.ThoughtSignature) > 0 {
+				audit.Signed++
+				sigLen, sigSHA := thoughtSignatureRawFingerprint(part.ThoughtSignature)
+				audit.SignedParts = append(audit.SignedParts, FunctionCallThoughtSignatureIssue{
+					ContentIndex: contentIdx,
+					PartIndex:    partIdx,
+					FunctionName: part.FunctionCall.FunctionName,
+					FieldName:    "thoughtSignature",
+					SignatureLen: sigLen,
+					SignatureSHA: sigSHA,
+				})
+				continue
+			}
+			audit.Missing = append(audit.Missing, FunctionCallThoughtSignatureIssue{
+				ContentIndex: contentIdx,
+				PartIndex:    partIdx,
+				FunctionName: part.FunctionCall.FunctionName,
+			})
+		}
+	}
+	return audit
+}
+
+func InspectFunctionCallThoughtSignaturesJSON(jsonData []byte) (FunctionCallThoughtSignatureAudit, error) {
+	var audit FunctionCallThoughtSignatureAudit
+	var data map[string]interface{}
+	if err := common.Unmarshal(jsonData, &data); err != nil {
+		return audit, err
+	}
+	contents, ok := data["contents"].([]interface{})
+	if !ok {
+		return audit, nil
+	}
+
+	for contentIdx, content := range contents {
+		contentMap, ok := content.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		parts, ok := contentMap["parts"].([]interface{})
+		if !ok {
+			continue
+		}
+		for partIdx, part := range parts {
+			partMap, ok := part.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			functionName, hasFunctionCall := functionCallMapName(partMap["functionCall"])
+			if !hasFunctionCall {
+				functionName, hasFunctionCall = functionCallMapName(partMap["function_call"])
+			}
+			if !hasFunctionCall {
+				continue
+			}
+			audit.Total++
+			if hasJSONThoughtSignature(partMap["thoughtSignature"]) {
+				sigLen, sigSHA := thoughtSignatureValueFingerprint(partMap["thoughtSignature"])
+				audit.Signed++
+				audit.SignedParts = append(audit.SignedParts, FunctionCallThoughtSignatureIssue{
+					ContentIndex: contentIdx,
+					PartIndex:    partIdx,
+					FunctionName: functionName,
+					FieldName:    "thoughtSignature",
+					SignatureLen: sigLen,
+					SignatureSHA: sigSHA,
+				})
+				continue
+			}
+			if hasJSONThoughtSignature(partMap["thought_signature"]) {
+				sigLen, sigSHA := thoughtSignatureValueFingerprint(partMap["thought_signature"])
+				audit.Signed++
+				audit.SignedParts = append(audit.SignedParts, FunctionCallThoughtSignatureIssue{
+					ContentIndex: contentIdx,
+					PartIndex:    partIdx,
+					FunctionName: functionName,
+					FieldName:    "thought_signature",
+					SignatureLen: sigLen,
+					SignatureSHA: sigSHA,
+				})
+				continue
+			}
+			audit.Missing = append(audit.Missing, FunctionCallThoughtSignatureIssue{
+				ContentIndex: contentIdx,
+				PartIndex:    partIdx,
+				FunctionName: functionName,
+			})
+		}
+	}
+	return audit, nil
+}
+
+func SummarizeGeminiRequestShapeJSON(jsonData []byte, limit int) (string, error) {
+	var data map[string]interface{}
+	if err := common.Unmarshal(jsonData, &data); err != nil {
+		return "", err
+	}
+	contents, ok := data["contents"].([]interface{})
+	if !ok {
+		return "contents=<none>", nil
+	}
+	if limit <= 0 || limit > len(contents) {
+		limit = len(contents)
+	}
+	items := make([]string, 0, limit+1)
+	for contentIdx, content := range contents[:limit] {
+		contentMap, ok := content.(map[string]interface{})
+		if !ok {
+			items = append(items, fmt.Sprintf("%d:<invalid>", contentIdx))
+			continue
+		}
+		role, _ := contentMap["role"].(string)
+		if role == "" {
+			role = "<no-role>"
+		}
+		partItems := []string{}
+		parts, _ := contentMap["parts"].([]interface{})
+		for partIdx, rawPart := range parts {
+			partMap, ok := rawPart.(map[string]interface{})
+			if !ok {
+				partItems = append(partItems, fmt.Sprintf("%d:invalid", partIdx))
+				continue
+			}
+			partItems = append(partItems, summarizeGeminiPartShape(partIdx, partMap))
+		}
+		items = append(items, fmt.Sprintf("%d:%s[%s]", contentIdx, role, strings.Join(partItems, ",")))
+	}
+	if len(contents) > limit {
+		items = append(items, fmt.Sprintf("...+%d", len(contents)-limit))
+	}
+	return strings.Join(items, " "), nil
+}
+
+func summarizeGeminiPartShape(partIdx int, part map[string]interface{}) string {
+	if functionCallName, ok := functionCallMapName(part["functionCall"]); ok {
+		field := ""
+		sigLen := 0
+		sigSHA := ""
+		if hasJSONThoughtSignature(part["thoughtSignature"]) {
+			field = "thoughtSignature"
+			sigLen, sigSHA = thoughtSignatureValueFingerprint(part["thoughtSignature"])
+		} else if hasJSONThoughtSignature(part["thought_signature"]) {
+			field = "thought_signature"
+			sigLen, sigSHA = thoughtSignatureValueFingerprint(part["thought_signature"])
+		}
+		return fmt.Sprintf("%d:functionCall(%s sig_field=%s sig_len=%d sig_sha=%s)", partIdx, emptyAsUnknown(functionCallName), field, sigLen, sigSHA)
+	}
+	if functionResponseName, ok := functionResponseMapName(part["functionResponse"]); ok {
+		return fmt.Sprintf("%d:functionResponse(%s)", partIdx, emptyAsUnknown(functionResponseName))
+	}
+	if functionResponseName, ok := functionResponseMapName(part["function_response"]); ok {
+		return fmt.Sprintf("%d:function_response(%s)", partIdx, emptyAsUnknown(functionResponseName))
+	}
+	if _, ok := part["text"]; ok {
+		return fmt.Sprintf("%d:text", partIdx)
+	}
+	if _, ok := part["inlineData"]; ok {
+		return fmt.Sprintf("%d:inlineData", partIdx)
+	}
+	if _, ok := part["fileData"]; ok {
+		return fmt.Sprintf("%d:fileData", partIdx)
+	}
+	return fmt.Sprintf("%d:unknown", partIdx)
+}
+
+func InspectStreamToolCallThoughtSignatures(response *dto.ChatCompletionsStreamResponse) FunctionCallThoughtSignatureAudit {
+	var audit FunctionCallThoughtSignatureAudit
+	if response == nil {
+		return audit
+	}
+	for choiceIdx := range response.Choices {
+		toolCalls := response.Choices[choiceIdx].Delta.ToolCalls
+		for toolIdx := range toolCalls {
+			toolCall := &toolCalls[toolIdx]
+			if strings.TrimSpace(toolCall.Function.Name) == "" && strings.TrimSpace(toolCall.Function.Arguments) == "" {
+				continue
+			}
+			audit.Total++
+			if len(toolCall.Function.ThoughtSignature) > 0 {
+				audit.Signed++
+				sigLen, sigSHA := thoughtSignatureRawFingerprint(toolCall.Function.ThoughtSignature)
+				audit.SignedParts = append(audit.SignedParts, FunctionCallThoughtSignatureIssue{
+					ContentIndex: choiceIdx,
+					PartIndex:    toolIdx,
+					FunctionName: toolCall.Function.Name,
+					FieldName:    "function.thought_signature",
+					SignatureLen: sigLen,
+					SignatureSHA: sigSHA,
+				})
+				continue
+			}
+			audit.Missing = append(audit.Missing, FunctionCallThoughtSignatureIssue{
+				ContentIndex: choiceIdx,
+				PartIndex:    toolIdx,
+				FunctionName: toolCall.Function.Name,
+			})
+		}
+	}
+	return audit
+}
+
+func functionResponseMapName(raw interface{}) (string, bool) {
+	response, ok := raw.(map[string]interface{})
+	if !ok {
+		return "", false
+	}
+	if name, ok := response["name"].(string); ok && strings.TrimSpace(name) != "" {
+		return name, true
+	}
+	return "", true
+}
+
+func thoughtSignatureRawFingerprint(raw json.RawMessage) (int, string) {
+	if len(raw) == 0 {
+		return 0, ""
+	}
+	var sig string
+	if err := json.Unmarshal(raw, &sig); err == nil {
+		return thoughtSignatureStringFingerprint(sig)
+	}
+	return thoughtSignatureStringFingerprint(string(raw))
+}
+
+func thoughtSignatureValueFingerprint(raw interface{}) (int, string) {
+	switch v := raw.(type) {
+	case nil:
+		return 0, ""
+	case string:
+		return thoughtSignatureStringFingerprint(v)
+	default:
+		bytes, err := common.Marshal(v)
+		if err != nil {
+			return thoughtSignatureStringFingerprint(fmt.Sprintf("%v", v))
+		}
+		return thoughtSignatureStringFingerprint(string(bytes))
+	}
+}
+
+func thoughtSignatureStringFingerprint(signature string) (int, string) {
+	signature = strings.TrimSpace(signature)
+	if signature == "" {
+		return 0, ""
+	}
+	sum := sha256.Sum256([]byte(signature))
+	return len(signature), fmt.Sprintf("%x", sum[:8])
+}
+
+func emptyAsUnknown(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "<unknown>"
+	}
+	return value
+}
+
+func functionCallMapName(raw interface{}) (string, bool) {
+	call, ok := raw.(map[string]interface{})
+	if !ok {
+		return "", false
+	}
+	if name, ok := call["name"].(string); ok && strings.TrimSpace(name) != "" {
+		return name, true
+	}
+	if args, exists := call["args"]; exists && hasJSONValueContent(args) {
+		return "", true
+	}
+	return "", false
+}
+
+func hasJSONThoughtSignature(raw interface{}) bool {
+	switch v := raw.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(v) != ""
+	default:
+		return true
+	}
+}
+
+func hasJSONValueContent(raw interface{}) bool {
+	switch v := raw.(type) {
 	case nil:
 		return false
 	case string:
@@ -1005,8 +1374,9 @@ func getResponseToolCall(item *dto.GeminiPart) *dto.ToolCallResponse {
 		ID:   fmt.Sprintf("call_%s", common.GetUUID()),
 		Type: "function",
 		Function: dto.FunctionResponse{
-			Arguments: string(argsBytes),
-			Name:      item.FunctionCall.FunctionName,
+			Arguments:        string(argsBytes),
+			Name:             item.FunctionCall.FunctionName,
+			ThoughtSignature: item.ThoughtSignature,
 		},
 	}
 }
@@ -1339,6 +1709,22 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 		response.Id = id
 		response.Created = createAt
 		response.Model = info.UpstreamModelName
+		signatureAudit := InspectStreamToolCallThoughtSignatures(response)
+		if signatureAudit.Total > 0 {
+			logger.LogInfo(c, fmt.Sprintf("gemini functionCall thoughtSignature downstream stream audit: channel_id=%d model=%s total=%d signed=%d missing=%d missing_parts=%s",
+				info.ChannelId,
+				info.UpstreamModelName,
+				signatureAudit.Total,
+				signatureAudit.Signed,
+				signatureAudit.MissingCount(),
+				signatureAudit.MissingSummary(8),
+			))
+			logger.LogInfo(c, fmt.Sprintf("gemini functionCall thoughtSignature downstream signed parts: channel_id=%d model=%s signed_parts=%s",
+				info.ChannelId,
+				info.UpstreamModelName,
+				signatureAudit.SignedSummary(8),
+			))
+		}
 		for choiceIdx := range response.Choices {
 			choiceKey := response.Choices[choiceIdx].Index
 			for toolIdx := range response.Choices[choiceIdx].Delta.ToolCalls {
@@ -1470,6 +1856,11 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 	usage := buildUsageFromGeminiMetadata(geminiResponse.UsageMetadata, info.GetEstimatePromptTokens())
 
 	fullTextResponse.Usage = usage
+	if info.ChannelSetting.MarkdownASTToolCallsEnabled {
+		if _, err := markdowntools.TransformTextResponse(c, fullTextResponse); err != nil {
+			return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+		}
+	}
 
 	switch info.RelayFormat {
 	case types.RelayFormatOpenAI:

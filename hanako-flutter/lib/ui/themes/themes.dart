@@ -4,6 +4,21 @@ import 'package:flutter/material.dart';
 class HanakoThemes {
   HanakoThemes._();
 
+  static const _fontFamily = 'Microsoft YaHei UI';
+  static const _fontFallback = <String>[
+    'Microsoft YaHei',
+    'Noto Sans CJK SC',
+    'Noto Sans SC',
+    'PingFang SC',
+    'Source Han Sans SC',
+    'SimHei',
+    'Arial Unicode MS',
+  ];
+  static const _textTheme = TextTheme(
+    bodyMedium: TextStyle(height: 1.5),
+    titleMedium: TextStyle(fontWeight: FontWeight.w600),
+  );
+
   static ThemeData warmPaper() {
     final scheme =
         ColorScheme.fromSeed(
@@ -34,6 +49,8 @@ class HanakoThemes {
     return ThemeData(
       colorScheme: scheme,
       useMaterial3: true,
+      fontFamily: _fontFamily,
+      fontFamilyFallback: _fontFallback,
       scaffoldBackgroundColor: scheme.surface,
       appBarTheme: AppBarTheme(
         backgroundColor: scheme.surface,
@@ -83,10 +100,7 @@ class HanakoThemes {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
       ),
-      textTheme: const TextTheme(
-        bodyMedium: TextStyle(height: 1.5),
-        titleMedium: TextStyle(fontWeight: FontWeight.w600),
-      ),
+      textTheme: _textTheme,
     );
   }
 
@@ -120,6 +134,8 @@ class HanakoThemes {
     return ThemeData(
       colorScheme: scheme,
       useMaterial3: true,
+      fontFamily: _fontFamily,
+      fontFamilyFallback: _fontFallback,
       scaffoldBackgroundColor: scheme.surface,
       appBarTheme: AppBarTheme(
         backgroundColor: scheme.surface,
@@ -169,10 +185,7 @@ class HanakoThemes {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
       ),
-      textTheme: const TextTheme(
-        bodyMedium: TextStyle(height: 1.5),
-        titleMedium: TextStyle(fontWeight: FontWeight.w600),
-      ),
+      textTheme: _textTheme,
     );
   }
 }

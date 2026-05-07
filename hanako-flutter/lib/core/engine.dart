@@ -50,14 +50,27 @@ class HanaEngine {
     HanakoBackendClient? backendClient,
   }) async {
     final h = home ?? await HanaHome.resolve();
-    final identityRepo =
+    final gateway = backendClient ?? HanakoBackendClient();
+    late final IdentityRepository identityRepo;
+    late final ModelManager models;
+    identityRepo =
         identityRepository ??
         IdentityRepository(
           keystore: PlatformSecureKeystore(hanaHome: h.root),
-          composer: StoryComposer(caller: _missingLlmCaller),
+          composer: StoryComposer(
+            caller: ({required systemPrompt, required userPrompt, maxTokens}) =>
+                _callGatewayForStory(
+                  gateway: gateway,
+                  identityRepository: identityRepo,
+                  modelManager: models,
+                  systemPrompt: systemPrompt,
+                  userPrompt: userPrompt,
+                  maxTokens: maxTokens,
+                ),
+          ),
           parser: StoryParser(caller: _missingLlmCaller),
         );
-    final gateway = backendClient ?? HanakoBackendClient();
+    await _restoreSavedIdentity(identityRepo);
     final prefs = PreferencesManager(h);
     final agents = AgentManager(h, prefs);
 
@@ -72,7 +85,7 @@ class HanaEngine {
     final cfg = ConfigCoordinator(h, activeId ?? '_no_agent');
     await cfg.initialize();
 
-    final models = ModelManager(h);
+    models = ModelManager(h);
     await models.initialize();
 
     final sessions = SessionCoordinator(
@@ -116,6 +129,7 @@ class HanaEngine {
 
   Future<void> dispose() async {
     await config.dispose();
+    await sessionCoordinator.dispose();
     await bridgeSessionManager.dispose();
     _initialized = false;
   }
@@ -142,10 +156,97 @@ class HanaEngine {
   }
 }
 
+Future<void> _restoreSavedIdentity(IdentityRepository repo) async {
+  try {
+    if (await repo.hasSavedIdentity()) {
+      await repo.unlock();
+    }
+  } catch (_) {
+    // 自动恢复不能阻断启动。旧 PIN keystore、用户取消系统解锁、
+    // vault 损坏等情况仍可在设置页由用户显式处理。
+  }
+}
+
 Future<String> _missingLlmCaller({
   required String systemPrompt,
   required String userPrompt,
   int? maxTokens,
 }) async {
   throw UnsupportedError('LLM 网关尚未接入，故事生成走 fallback 路径');
+}
+
+Future<String> _callGatewayForStory({
+  required HanakoBackendClient gateway,
+  required IdentityRepository identityRepository,
+  required ModelManager modelManager,
+  required String systemPrompt,
+  required String userPrompt,
+  int? maxTokens,
+}) async {
+  final identity = identityRepository.current;
+  if (identity == null) {
+    throw StateError('身份未解锁，无法调用 AI 网关生成故事');
+  }
+
+  final channel = await _ensureGatewayChannel(
+    gateway: gateway,
+    identity: identity,
+  );
+  final model = _selectStoryModel(modelManager, channel);
+  if (model == null) {
+    throw StateError('未找到可用于生成故事的模型');
+  }
+
+  final response = await gateway.chat(
+    model: model,
+    messages: [
+      {'role': 'system', 'content': systemPrompt},
+      {'role': 'user', 'content': userPrompt},
+    ],
+    extra: maxTokens == null ? null : {'max_tokens': maxTokens},
+  );
+  return _extractAssistantText(response);
+}
+
+Future<HanakoChannel> _ensureGatewayChannel({
+  required HanakoBackendClient gateway,
+  required HanakoIdentity identity,
+}) async {
+  final current = gateway.channel;
+  if (current != null && DateTime.now().isBefore(current.expiresAt)) {
+    return current;
+  }
+  return gateway.handshake(keyPair: identity.keyPair);
+}
+
+String? _selectStoryModel(ModelManager modelManager, HanakoChannel channel) {
+  final current = modelManager.currentModelId;
+  if (current != null &&
+      current.isNotEmpty &&
+      channel.allowedModels.contains(current)) {
+    return current;
+  }
+  if (channel.allowedModels.isNotEmpty) return channel.allowedModels.first;
+  return current?.isEmpty == false ? current : null;
+}
+
+String _extractAssistantText(Map<String, dynamic> response) {
+  final choices = response['choices'];
+  if (choices is List) {
+    for (final choice in choices) {
+      if (choice is! Map) continue;
+      final message = choice['message'];
+      if (message is Map) {
+        final content = message['content'];
+        if (content is String && content.trim().isNotEmpty) {
+          return content.trim();
+        }
+      }
+      final text = choice['text'];
+      if (text is String && text.trim().isNotEmpty) return text.trim();
+    }
+  }
+  final content = response['content'];
+  if (content is String && content.trim().isNotEmpty) return content.trim();
+  throw StateError('AI 网关未返回故事正文');
 }

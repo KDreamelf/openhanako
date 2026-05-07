@@ -47,7 +47,7 @@ class _BrowserWindowState extends State<BrowserWindow> {
         configuration: CreateConfiguration(
           windowHeight: 720,
           windowWidth: 1100,
-          title: 'Hanako · Browser',
+          title: '幻宙01 · 浏览器',
           titleBarHeight: 30,
         ),
       );

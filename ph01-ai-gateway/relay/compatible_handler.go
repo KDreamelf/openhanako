@@ -11,9 +11,11 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/markdowntools"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -72,6 +74,12 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	adaptor.Init(info)
 
 	passThroughGlobal := model_setting.GetGlobalSettings().PassThroughRequestEnabled
+	if info.ChannelSetting.MarkdownASTToolCallsEnabled && !passThroughGlobal && !info.ChannelSetting.PassThroughBodyEnabled {
+		if err := markdowntools.ApplyRequest(c, request); err != nil {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+	}
+
 	if info.RelayMode == relayconstant.RelayModeChatCompletions &&
 		!passThroughGlobal &&
 		!info.ChannelSetting.PassThroughBodyEnabled &&
@@ -171,6 +179,42 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
+			}
+		}
+
+		if info.ChannelType == constant.ChannelTypeGemini || info.ChannelType == constant.ChannelTypeVertexAi {
+			jsonData, err = relaycommon.RemoveGeminiDisabledFields(jsonData)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			}
+			signatureAudit, auditErr := gemini.InspectFunctionCallThoughtSignaturesJSON(jsonData)
+			if auditErr != nil {
+				return types.NewError(auditErr, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			}
+			if signatureAudit.Total > 0 {
+				logger.LogInfo(c, fmt.Sprintf("gemini functionCall thoughtSignature upstream request audit: channel_id=%d model=%s enabled=%t total=%d signed=%d missing=%d missing_parts=%s",
+					info.ChannelId,
+					info.UpstreamModelName,
+					gemini.ShouldAttachFunctionCallThoughtSignature(info),
+					signatureAudit.Total,
+					signatureAudit.Signed,
+					signatureAudit.MissingCount(),
+					signatureAudit.MissingSummary(8),
+				))
+				logger.LogInfo(c, fmt.Sprintf("gemini functionCall thoughtSignature upstream signed parts: channel_id=%d model=%s signed_parts=%s",
+					info.ChannelId,
+					info.UpstreamModelName,
+					signatureAudit.SignedSummary(8),
+				))
+				shape, shapeErr := gemini.SummarizeGeminiRequestShapeJSON(jsonData, 12)
+				if shapeErr != nil {
+					return types.NewError(shapeErr, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+				}
+				logger.LogInfo(c, fmt.Sprintf("gemini upstream request shape: channel_id=%d model=%s shape=%s",
+					info.ChannelId,
+					info.UpstreamModelName,
+					shape,
+				))
 			}
 		}
 

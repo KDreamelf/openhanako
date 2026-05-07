@@ -1,11 +1,14 @@
+import 'dart:async';
+
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../app/providers.dart';
 import '../app/window_factory.dart';
 import '../core/engine.dart';
+import '../core/runtime_session_store.dart';
 import '../llm/provider.dart';
 import 'memory/memory_page.dart';
 import 'onboarding/onboarding_page.dart';
@@ -19,47 +22,134 @@ import 'widgets/streaming_message.dart';
 // =====================================================================
 
 class ChatState {
-  final List<Message> history;
-  final String currentText;
-  final String currentThinking;
-  final List<ToolCallView> currentToolCalls;
+  final List<RuntimeDisplayMessage> history;
+  final List<RuntimeDisplayBlock> currentBlocks;
   final bool streaming;
+  final ChatRetryNotice? retrying;
   final String? error;
+  final String? errorDetails;
+  final int? errorStatusCode;
 
   const ChatState({
     this.history = const [],
-    this.currentText = '',
-    this.currentThinking = '',
-    this.currentToolCalls = const [],
+    this.currentBlocks = const [],
     this.streaming = false,
+    this.retrying,
     this.error,
+    this.errorDetails,
+    this.errorStatusCode,
   });
 
   ChatState copyWith({
-    List<Message>? history,
-    String? currentText,
-    String? currentThinking,
-    List<ToolCallView>? currentToolCalls,
+    List<RuntimeDisplayMessage>? history,
+    List<RuntimeDisplayBlock>? currentBlocks,
     bool? streaming,
+    Object? retrying = _sentinel,
     Object? error = _sentinel,
+    Object? errorDetails = _sentinel,
+    Object? errorStatusCode = _sentinel,
   }) => ChatState(
     history: history ?? this.history,
-    currentText: currentText ?? this.currentText,
-    currentThinking: currentThinking ?? this.currentThinking,
-    currentToolCalls: currentToolCalls ?? this.currentToolCalls,
+    currentBlocks: currentBlocks ?? this.currentBlocks,
     streaming: streaming ?? this.streaming,
+    retrying: identical(retrying, _sentinel)
+        ? this.retrying
+        : retrying as ChatRetryNotice?,
     error: identical(error, _sentinel) ? this.error : error as String?,
+    errorDetails: identical(errorDetails, _sentinel)
+        ? this.errorDetails
+        : errorDetails as String?,
+    errorStatusCode: identical(errorStatusCode, _sentinel)
+        ? this.errorStatusCode
+        : errorStatusCode as int?,
   );
 
   static const _sentinel = Object();
 }
 
+class ChatRetryNotice {
+  const ChatRetryNotice({
+    required this.message,
+    required this.retryIndex,
+    required this.maxRetries,
+    required this.waiting,
+    this.delay,
+    this.statusCode,
+    this.details,
+  });
+
+  final String message;
+  final int retryIndex;
+  final int maxRetries;
+  final bool waiting;
+  final Duration? delay;
+  final int? statusCode;
+  final String? details;
+
+  String get title {
+    final prefix = '第 $retryIndex/$maxRetries 次重试';
+    if (waiting && delay != null) {
+      return '$prefix 将在 ${delay!.inSeconds} 秒后开始';
+    }
+    return '$prefix 正在进行';
+  }
+}
+
 class ChatNotifier extends StateNotifier<ChatState> {
   ChatNotifier(this._ref) : super(const ChatState());
   final Ref _ref;
+  bool _restored = false;
+  int _sendGeneration = 0;
+  bool _stopRetrying = false;
+  CancelToken? _activeCancelToken;
+  Completer<void>? _retryDelayCompleter;
+
+  static const int _maxRetries = 5;
+
+  Future<void> restoreLastSession({bool force = false}) async {
+    if (state.streaming) return;
+    if (_restored && !force) return;
+    try {
+      final eng = _ref.read(engineProvider);
+      final session = await eng.sessionCoordinator.restoreLastSession();
+      final messages = session == null
+          ? const <RuntimeDisplayMessage>[]
+          : eng.sessionCoordinator.currentDisplayMessages();
+      _restored = true;
+      state = ChatState(history: messages);
+    } catch (e) {
+      _restored = false;
+      state = state.copyWith(
+        streaming: false,
+        error: '恢复会话失败',
+        errorDetails: e.toString(),
+      );
+    }
+  }
+
+  Future<void> createSession() async {
+    if (state.streaming) return;
+    final eng = _ref.read(engineProvider);
+    await eng.sessionCoordinator.createSession();
+    _restored = true;
+    state = const ChatState();
+    _ref.invalidate(sessionListProvider);
+  }
+
+  Future<void> switchSession(String sessionPath) async {
+    if (state.streaming) return;
+    final eng = _ref.read(engineProvider);
+    await eng.sessionCoordinator.switchSession(sessionPath);
+    _restored = true;
+    state = ChatState(history: eng.sessionCoordinator.currentDisplayMessages());
+    _ref.invalidate(sessionListProvider);
+  }
 
   Future<void> send(String text) async {
     if (state.streaming) return;
+    if (!_restored) {
+      await restoreLastSession();
+    }
 
     final eng = _ref.read(engineProvider);
     final agentId = eng.agentManager.activeAgentId;
@@ -79,13 +169,32 @@ class ChatNotifier extends StateNotifier<ChatState> {
       return;
     }
 
-    final newMessages = [
-      ...state.history,
-      Message(role: 'user', content: text),
+    final committedMessages = [...state.history];
+    final inFlightMessages = [
+      ...committedMessages,
+      RuntimeDisplayMessage.userText(text),
     ];
-    state = ChatState(history: newMessages, streaming: true);
+    final generation = ++_sendGeneration;
+    _stopRetrying = false;
+    _activeCancelToken = null;
+    state = ChatState(history: inFlightMessages, streaming: true);
 
-    await _consumeStream(eng.sessionCoordinator.prompt(text), newMessages);
+    await _sendWithRetries(
+      text,
+      committedMessages: committedMessages,
+      inFlightMessages: inFlightMessages,
+      generation: generation,
+    );
+  }
+
+  void stopRetrying() {
+    if (!state.streaming || state.retrying == null) return;
+    _stopRetrying = true;
+    _activeCancelToken?.cancel('用户停止重试');
+    final delayCompleter = _retryDelayCompleter;
+    if (delayCompleter != null && !delayCompleter.isCompleted) {
+      delayCompleter.complete();
+    }
   }
 
   /// 删除指定索引的消息。如果是流中状态，禁止删除。
@@ -94,6 +203,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
     if (index < 0 || index >= state.history.length) return;
     final next = [...state.history]..removeAt(index);
     state = state.copyWith(history: next);
+    _replaceCurrentHistory(next);
   }
 
   /// 重新生成指定索引的 assistant 消息：截断到这条之前（不含），
@@ -109,10 +219,11 @@ class ChatNotifier extends StateNotifier<ChatState> {
       userIdx--;
     }
     if (userIdx < 0) return;
-    final userText = state.history[userIdx].content;
+    final userText = state.history[userIdx].visibleText;
     // 截断到 user 之前（不含 user 自己——send 会重新加）
     final truncated = state.history.sublist(0, userIdx);
     state = ChatState(history: truncated);
+    _replaceCurrentHistory(truncated);
     await send(userText);
   }
 
@@ -126,6 +237,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
     if (trimmed.isEmpty) return;
     final truncated = state.history.sublist(0, index);
     state = ChatState(history: truncated);
+    _replaceCurrentHistory(truncated);
     await send(trimmed);
   }
 
@@ -133,78 +245,315 @@ class ChatNotifier extends StateNotifier<ChatState> {
   void clear() {
     if (state.streaming) return;
     state = const ChatState();
+    _replaceCurrentHistory(const []);
   }
 
-  Future<void> _consumeStream(
-    Stream<LlmEvent> events,
-    List<Message> baseMessages,
-  ) async {
-    final assistantText = StringBuffer();
-    final assistantThink = StringBuffer();
-    final toolCalls = <String, ToolCallView>{};
+  Future<void> _sendWithRetries(
+    String text, {
+    required List<RuntimeDisplayMessage> committedMessages,
+    required List<RuntimeDisplayMessage> inFlightMessages,
+    required int generation,
+  }) async {
+    var retryCount = 0;
+    _LlmFailure? lastFailure;
+
+    while (generation == _sendGeneration) {
+      if (retryCount > 0) {
+        state = ChatState(
+          history: _ref
+              .read(engineProvider)
+              .sessionCoordinator
+              .currentDisplayMessages(),
+          streaming: true,
+          retrying: _retryNotice(lastFailure!, retryCount, waiting: false),
+        );
+      }
+
+      final token = CancelToken();
+      _activeCancelToken = token;
+      final stream = retryCount == 0
+          ? _ref
+                .read(engineProvider)
+                .sessionCoordinator
+                .prompt(text, cancelToken: token)
+          : _ref
+                .read(engineProvider)
+                .sessionCoordinator
+                .retryCurrentTurn(cancelToken: token);
+      final result = await _consumeStream(
+        stream,
+        committedMessages: committedMessages,
+        inFlightMessages: inFlightMessages,
+      );
+      if (_activeCancelToken == token) {
+        _activeCancelToken = null;
+      }
+      if (generation != _sendGeneration) return;
+      if (result.success) return;
+
+      final failure = _stopRetrying && lastFailure != null
+          ? lastFailure
+          : result.failure!;
+      lastFailure = failure;
+      if (result.hadProgress) {
+        retryCount = 0;
+      }
+
+      if (_stopRetrying ||
+          !_shouldRetry(failure) ||
+          retryCount >= _maxRetries) {
+        _showFinalFailure(failure);
+        return;
+      }
+
+      retryCount++;
+      final delay = _retryDelay(retryCount);
+      state = ChatState(
+        history: _ref
+            .read(engineProvider)
+            .sessionCoordinator
+            .currentDisplayMessages(),
+        streaming: true,
+        retrying: _retryNotice(
+          failure,
+          retryCount,
+          waiting: true,
+          delay: delay,
+        ),
+      );
+      final stopped = await _waitForRetryDelay(delay);
+      if (generation != _sendGeneration) return;
+      if (stopped) {
+        _showFinalFailure(failure);
+        return;
+      }
+    }
+  }
+
+  Future<_StreamConsumeResult> _consumeStream(
+    Stream<LlmEvent> events, {
+    required List<RuntimeDisplayMessage> committedMessages,
+    required List<RuntimeDisplayMessage> inFlightMessages,
+  }) async {
+    final currentBlocks = <RuntimeDisplayBlock>[];
+    final toolCallIndices = <String, int>{};
+    var hadProgress = false;
+
+    void updateBlocks() {
+      state = state.copyWith(
+        currentBlocks: List<RuntimeDisplayBlock>.from(currentBlocks),
+        retrying: null,
+        error: null,
+        errorDetails: null,
+        errorStatusCode: null,
+      );
+    }
+
+    void appendText(String text) {
+      if (text.isEmpty) return;
+      hadProgress = true;
+      if (currentBlocks.isNotEmpty &&
+          currentBlocks.last is RuntimeDisplayTextBlock) {
+        final last = currentBlocks.removeLast() as RuntimeDisplayTextBlock;
+        currentBlocks.add(RuntimeDisplayTextBlock('${last.text}$text'));
+      } else {
+        currentBlocks.add(RuntimeDisplayTextBlock(text));
+      }
+      updateBlocks();
+    }
+
+    void appendThinking(String text) {
+      if (text.isEmpty) return;
+      hadProgress = true;
+      if (currentBlocks.isNotEmpty &&
+          currentBlocks.last is RuntimeDisplayThinkingBlock) {
+        final last = currentBlocks.removeLast() as RuntimeDisplayThinkingBlock;
+        currentBlocks.add(RuntimeDisplayThinkingBlock('${last.text}$text'));
+      } else {
+        currentBlocks.add(RuntimeDisplayThinkingBlock(text));
+      }
+      updateBlocks();
+    }
+
+    void upsertToolCall(String id, String name, {String argsDelta = ''}) {
+      hadProgress = true;
+      final index = toolCallIndices[id];
+      if (index == null || index >= currentBlocks.length) {
+        toolCallIndices[id] = currentBlocks.length;
+        currentBlocks.add(
+          RuntimeDisplayToolCallBlock(id: id, name: name, argsJson: argsDelta),
+        );
+      } else {
+        final old = currentBlocks[index];
+        if (old is RuntimeDisplayToolCallBlock) {
+          currentBlocks[index] = RuntimeDisplayToolCallBlock(
+            id: id,
+            name: name.isNotEmpty ? name : old.name,
+            argsJson: '${old.argsJson}$argsDelta',
+          );
+        }
+      }
+      updateBlocks();
+    }
 
     try {
       await for (final ev in events) {
         switch (ev) {
           case TextDelta(:final text):
-            assistantText.write(text);
-            state = state.copyWith(currentText: assistantText.toString());
+            appendText(text);
           case ThinkingDelta(:final text):
-            assistantThink.write(text);
-            state = state.copyWith(currentThinking: assistantThink.toString());
+            appendThinking(text);
           case ToolCallStart(:final id, :final name):
-            toolCalls[id] = ToolCallView(id: id, name: name);
-            state = state.copyWith(currentToolCalls: toolCalls.values.toList());
+            upsertToolCall(id, name);
           case ToolCallArgsDelta(:final id, :final argsJson):
-            final old = toolCalls[id];
-            if (old != null) {
-              toolCalls[id] = ToolCallView(
-                id: id,
-                name: old.name,
-                args: old.args + argsJson,
-              );
-              state = state.copyWith(
-                currentToolCalls: toolCalls.values.toList(),
-              );
-            }
+            upsertToolCall(id, '', argsDelta: argsJson);
           case ToolCallEnd():
             break;
           case MessageDone():
-            final assistantMsg = Message(
-              role: 'assistant',
-              content: assistantText.toString(),
-            );
+            final eng = _ref.read(engineProvider);
             state = ChatState(
-              history: [...baseMessages, assistantMsg],
+              history: eng.sessionCoordinator.currentDisplayMessages(),
               streaming: false,
             );
-            return;
-          case LlmError(:final message):
-            state = state.copyWith(streaming: false, error: message);
-            return;
+            return const _StreamConsumeResult.success();
+          case LlmError(:final message, :final statusCode, :final details):
+            final eng = _ref.read(engineProvider);
+            state = state.copyWith(
+              history: eng.sessionCoordinator.currentDisplayMessages(),
+              currentBlocks: const [],
+            );
+            return _StreamConsumeResult.failure(
+              _LlmFailure(
+                message: message,
+                statusCode: statusCode,
+                details: details,
+              ),
+              hadProgress: hadProgress,
+            );
         }
       }
-      if (assistantText.isNotEmpty) {
-        final assistantMsg = Message(
-          role: 'assistant',
-          content: assistantText.toString(),
-        );
+      if (currentBlocks.isNotEmpty) {
         state = ChatState(
-          history: [...baseMessages, assistantMsg],
+          history: [
+            ...inFlightMessages,
+            RuntimeDisplayMessage(
+              role: 'assistant',
+              blocks: List<RuntimeDisplayBlock>.from(currentBlocks),
+            ),
+          ],
           streaming: false,
         );
+        return const _StreamConsumeResult.success();
       } else {
-        state = state.copyWith(streaming: false);
+        state = ChatState(history: committedMessages, streaming: false);
+        return const _StreamConsumeResult.success();
       }
     } catch (e) {
-      state = state.copyWith(streaming: false, error: e.toString());
+      return _StreamConsumeResult.failure(
+        _LlmFailure(message: '发送对话失败：客户端处理异常', details: e.toString()),
+        hadProgress: hadProgress,
+      );
     }
+  }
+
+  bool _shouldRetry(_LlmFailure failure) {
+    final status = failure.statusCode;
+    if (status == null) return true;
+    if (status == 429) return true;
+    return status >= 500;
+  }
+
+  Duration _retryDelay(int retryIndex) {
+    final seconds = 1 << (retryIndex - 1);
+    return Duration(seconds: seconds);
+  }
+
+  ChatRetryNotice _retryNotice(
+    _LlmFailure failure,
+    int retryIndex, {
+    required bool waiting,
+    Duration? delay,
+  }) {
+    return ChatRetryNotice(
+      message: failure.message,
+      statusCode: failure.statusCode,
+      details: failure.details,
+      retryIndex: retryIndex,
+      maxRetries: _maxRetries,
+      waiting: waiting,
+      delay: delay,
+    );
+  }
+
+  Future<bool> _waitForRetryDelay(Duration delay) async {
+    final completer = Completer<void>();
+    _retryDelayCompleter = completer;
+    final timer = Timer(delay, () {
+      if (!completer.isCompleted) completer.complete();
+    });
+    try {
+      await completer.future;
+      return _stopRetrying;
+    } finally {
+      timer.cancel();
+      if (_retryDelayCompleter == completer) {
+        _retryDelayCompleter = null;
+      }
+    }
+  }
+
+  void _showFinalFailure(_LlmFailure failure) {
+    state = ChatState(
+      history: _ref
+          .read(engineProvider)
+          .sessionCoordinator
+          .currentDisplayMessages(),
+      streaming: false,
+      error: failure.message,
+      errorDetails: failure.details,
+      errorStatusCode: failure.statusCode,
+    );
+  }
+
+  void _replaceCurrentHistory(List<RuntimeDisplayMessage> messages) {
+    final eng = _ref.read(engineProvider);
+    eng.sessionCoordinator.replaceCurrentMessages(
+      messages.map((message) => message.toVisibleMessage()).toList(),
+    );
+    _ref.invalidate(sessionListProvider);
   }
 }
 
 final chatProvider = StateNotifierProvider<ChatNotifier, ChatState>(
   ChatNotifier.new,
 );
+
+class _StreamConsumeResult {
+  const _StreamConsumeResult._({
+    required this.success,
+    this.failure,
+    this.hadProgress = false,
+  });
+
+  const _StreamConsumeResult.success() : this._(success: true, failure: null);
+
+  const _StreamConsumeResult.failure(
+    _LlmFailure failure, {
+    bool hadProgress = false,
+  }) : this._(success: false, failure: failure, hadProgress: hadProgress);
+
+  final bool success;
+  final _LlmFailure? failure;
+  final bool hadProgress;
+}
+
+class _LlmFailure {
+  const _LlmFailure({required this.message, this.statusCode, this.details});
+
+  final String message;
+  final int? statusCode;
+  final String? details;
+}
 
 String? selectedChatModelId(HanaEngine engine) {
   final cfg = engine.config.read();
@@ -229,6 +578,15 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
   bool _onboardingShown = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(ref.read(chatProvider.notifier).restoreLastSession());
+    });
+  }
 
   @override
   void dispose() {
@@ -262,7 +620,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     final state = ref.watch(chatProvider);
     final activeAgent = ref.watch(activeAgentIdProvider);
     final eng = ref.watch(engineProvider);
-    final identity = ref.watch(identityRepositoryProvider).current;
+    final identity = ref.watch(currentIdentityProvider);
     final selectedModel = selectedChatModelId(eng);
 
     ref.listen<ChatState>(chatProvider, (_, _) {
@@ -284,7 +642,11 @@ class _ChatPageState extends ConsumerState<ChatPage> {
         selectedModel != null;
 
     return Scaffold(
-      drawer: const SessionDrawer(),
+      drawer: SessionDrawer(
+        onNewSession: () => ref.read(chatProvider.notifier).createSession(),
+        onSwitchSession: (entry) =>
+            ref.read(chatProvider.notifier).switchSession(entry.path),
+      ),
       body: Stack(
         children: [
           Column(
@@ -305,7 +667,8 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                   onOpenSkills: () => Navigator.of(
                     context,
                   ).push(MaterialPageRoute(builder: (_) => const SkillsPage())),
-                  onOpenSettings: () => WindowFactory.openSettings(),
+                  onOpenSettings: () => WindowFactory.openSettings(context),
+                  onUnlockIdentity: identity == null ? _unlockIdentity : null,
                   onChooseModel: state.streaming ? null : _chooseModel,
                 ),
               ),
@@ -331,19 +694,27 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                           for (var i = 0; i < state.history.length; i++)
                             _MessageBubble(
                               index: i,
-                              role: state.history[i].role,
-                              text: state.history[i].content,
+                              message: state.history[i],
                               streaming: state.streaming,
                             ),
                           if (state.streaming)
                             StreamingMessage(
-                              text: state.currentText,
-                              thinking: state.currentThinking,
-                              toolCalls: state.currentToolCalls,
+                              blocks: state.currentBlocks,
                               streaming: true,
                             ),
+                          if (state.retrying != null)
+                            _RetryBanner(
+                              notice: state.retrying!,
+                              onStop: () => ref
+                                  .read(chatProvider.notifier)
+                                  .stopRetrying(),
+                            ),
                           if (state.error != null)
-                            _ErrorBanner(message: state.error!),
+                            _ErrorBanner(
+                              message: state.error!,
+                              details: state.errorDetails,
+                              statusCode: state.errorStatusCode,
+                            ),
                         ],
                       ),
                     ),
@@ -373,9 +744,26 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     ref.read(chatProvider.notifier).send(text);
   }
 
+  Future<void> _unlockIdentity() async {
+    try {
+      final repo = ref.read(identityRepositoryProvider);
+      await repo.unlock();
+      ref.read(identityRevisionProvider.notifier).state++;
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('本机身份已解锁')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('解锁身份失败：$e')));
+    }
+  }
+
   Future<void> _chooseModel() async {
     final eng = ref.read(engineProvider);
-    final identity = ref.read(identityRepositoryProvider).current;
+    final identity = ref.read(currentIdentityProvider);
     final preferred = selectedChatModelId(eng);
 
     if (identity != null) {
@@ -449,6 +837,7 @@ class _ChatHeader extends StatelessWidget {
     required this.onOpenMemory,
     required this.onOpenSkills,
     required this.onOpenSettings,
+    required this.onUnlockIdentity,
     required this.onChooseModel,
   });
 
@@ -463,6 +852,7 @@ class _ChatHeader extends StatelessWidget {
   final VoidCallback onOpenMemory;
   final VoidCallback onOpenSkills;
   final VoidCallback onOpenSettings;
+  final VoidCallback? onUnlockIdentity;
   final VoidCallback? onChooseModel;
 
   @override
@@ -554,6 +944,8 @@ class _ChatHeader extends StatelessWidget {
                     icon: Icons.key_outlined,
                     label: identityReady ? '身份已解锁' : '身份未解锁',
                     color: identityReady ? c.primary : c.error,
+                    tooltip: identityReady ? null : '尝试解锁本机身份',
+                    onPressed: onUnlockIdentity,
                   ),
                   _StatusPill(
                     icon: Icons.memory_outlined,
@@ -638,22 +1030,21 @@ class _StatusPill extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.color,
+    this.tooltip,
+    this.onPressed,
   });
 
   final IconData icon;
   final String label;
   final Color color;
+  final String? tooltip;
+  final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    final child = Container(
       height: 34,
       padding: const EdgeInsets.symmetric(horizontal: 10),
-      decoration: BoxDecoration(
-        color: color.withAlpha(28),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: color.withAlpha(72)),
-      ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -670,10 +1061,30 @@ class _StatusPill extends StatelessWidget {
         ],
       ),
     );
+    final pill = Material(
+      color: color.withAlpha(28),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: BorderSide(color: color.withAlpha(72)),
+      ),
+      child: onPressed == null
+          ? child
+          : InkWell(
+              onTap: onPressed,
+              borderRadius: BorderRadius.circular(8),
+              child: child,
+            ),
+    );
+    final wrapped = onPressed == null
+        ? pill
+        : MouseRegion(cursor: SystemMouseCursors.click, child: pill);
+    final text = tooltip;
+    if (text == null || text.isEmpty) return wrapped;
+    return Tooltip(message: text, child: wrapped);
   }
 }
 
-class _ComposerPanel extends StatelessWidget {
+class _ComposerPanel extends StatefulWidget {
   const _ComposerPanel({
     required this.controller,
     required this.canSend,
@@ -691,15 +1102,35 @@ class _ComposerPanel extends StatelessWidget {
   final VoidCallback onSend;
 
   @override
+  State<_ComposerPanel> createState() => _ComposerPanelState();
+}
+
+class _ComposerPanelState extends State<_ComposerPanel> {
+  late final FocusNode _focusNode;
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode = FocusNode(debugLabel: 'chat-composer');
+    _focusNode.onKeyEvent = _handleKeyEvent;
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final c = Theme.of(context).colorScheme;
-    final hintText = activeAgent == null
+    final hintText = widget.activeAgent == null
         ? '请先创建或选择 Agent'
-        : !identityReady
+        : !widget.identityReady
         ? '请先创建或解锁子体身份'
-        : selectedModel == null
+        : widget.selectedModel == null
         ? '请先选择模型'
-        : '输入消息，Enter 发送';
+        : '输入消息，Enter 发送，Shift+Enter 换行';
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -725,10 +1156,12 @@ class _ComposerPanel extends StatelessWidget {
                         border: Border.all(color: c.outlineVariant),
                       ),
                       child: TextField(
-                        controller: controller,
-                        enabled: canSend,
+                        focusNode: _focusNode,
+                        controller: widget.controller,
+                        enabled: widget.canSend,
                         minLines: 1,
                         maxLines: 6,
+                        keyboardType: TextInputType.multiline,
                         decoration: InputDecoration(
                           hintText: hintText,
                           border: InputBorder.none,
@@ -741,8 +1174,7 @@ class _ComposerPanel extends StatelessWidget {
                           ),
                         ),
                         style: const TextStyle(fontSize: 16, height: 1.5),
-                        textInputAction: TextInputAction.send,
-                        onSubmitted: (_) => onSend(),
+                        textInputAction: TextInputAction.newline,
                       ),
                     ),
                   ),
@@ -750,7 +1182,7 @@ class _ComposerPanel extends StatelessWidget {
                   SizedBox(
                     height: 50,
                     child: FilledButton.icon(
-                      onPressed: canSend ? onSend : null,
+                      onPressed: widget.canSend ? widget.onSend : null,
                       icon: const Icon(Icons.send, size: 18),
                       label: const Text('发送'),
                       style: FilledButton.styleFrom(
@@ -766,6 +1198,39 @@ class _ComposerPanel extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent || !widget.canSend) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    final isEnter =
+        key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter;
+    if (!isEnter) return KeyEventResult.ignored;
+
+    if (HardwareKeyboard.instance.isShiftPressed) {
+      _insertNewline();
+    } else {
+      widget.onSend();
+    }
+    return KeyEventResult.handled;
+  }
+
+  void _insertNewline() {
+    final value = widget.controller.value;
+    final text = value.text;
+    final selection = value.selection;
+    final start = selection.start < 0 ? text.length : selection.start;
+    final end = selection.end < 0 ? text.length : selection.end;
+    final nextText = text.replaceRange(start, end, '\n');
+    final caret = start + 1;
+    widget.controller.value = value.copyWith(
+      text: nextText,
+      selection: TextSelection.collapsed(offset: caret),
+      composing: TextRange.empty,
     );
   }
 }
@@ -863,23 +1328,204 @@ class _EmptyHint extends StatelessWidget {
 
 class _ErrorBanner extends StatelessWidget {
   final String message;
-  const _ErrorBanner({required this.message});
+  final String? details;
+  final int? statusCode;
+  const _ErrorBanner({required this.message, this.details, this.statusCode});
+
   @override
   Widget build(BuildContext context) {
+    final c = Theme.of(context).colorScheme;
+    final hasDetails = details != null && details!.trim().isNotEmpty;
     return Padding(
       padding: const EdgeInsets.all(12),
       child: Material(
-        color: Theme.of(context).colorScheme.errorContainer,
+        color: c.errorContainer,
         borderRadius: BorderRadius.circular(8),
         child: Padding(
           padding: const EdgeInsets.all(12),
-          child: Text(
-            'Error: $message',
-            style: TextStyle(
-              color: Theme.of(context).colorScheme.onErrorContainer,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.error_outline, color: c.onErrorContainer, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      message,
+                      style: TextStyle(
+                        color: c.onErrorContainer,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (statusCode != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'HTTP $statusCode',
+                        style: TextStyle(
+                          color: c.onErrorContainer.withAlpha(190),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (hasDetails)
+                TextButton(
+                  onPressed: () => _showDetails(context),
+                  child: const Text('查看详情'),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showDetails(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('错误详情'),
+        content: SizedBox(
+          width: 640,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 420),
+            child: SingleChildScrollView(
+              child: SelectableText(
+                details ?? '',
+                style: const TextStyle(fontFamily: 'monospace', height: 1.45),
+              ),
             ),
           ),
         ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: details ?? ''));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('详情已复制'),
+                  duration: Duration(seconds: 1),
+                ),
+              );
+            },
+            child: const Text('复制详情'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RetryBanner extends StatelessWidget {
+  const _RetryBanner({required this.notice, required this.onStop});
+
+  final ChatRetryNotice notice;
+  final VoidCallback onStop;
+
+  @override
+  Widget build(BuildContext context) {
+    const background = Color(0xfffff2c2);
+    const foreground = Color(0xff4b3510);
+    final hasDetails =
+        notice.details != null && notice.details!.trim().isNotEmpty;
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Material(
+        color: background,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.autorenew, color: foreground, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      notice.title,
+                      style: const TextStyle(
+                        color: foreground,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      notice.message,
+                      style: const TextStyle(color: foreground),
+                    ),
+                    if (notice.statusCode != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'HTTP ${notice.statusCode}',
+                        style: TextStyle(
+                          color: foreground.withAlpha(190),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (hasDetails)
+                TextButton(
+                  onPressed: () => _showDetails(context),
+                  child: const Text('查看详情'),
+                ),
+              const SizedBox(width: 8),
+              OutlinedButton(onPressed: onStop, child: const Text('停止')),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showDetails(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重试前错误详情'),
+        content: SizedBox(
+          width: 640,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 420),
+            child: SingleChildScrollView(
+              child: SelectableText(
+                notice.details ?? '',
+                style: const TextStyle(fontFamily: 'monospace', height: 1.45),
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: notice.details ?? ''));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('详情已复制'),
+                  duration: Duration(seconds: 1),
+                ),
+              );
+            },
+            child: const Text('复制详情'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
+        ],
       ),
     );
   }
@@ -887,13 +1533,11 @@ class _ErrorBanner extends StatelessWidget {
 
 class _MessageBubble extends ConsumerStatefulWidget {
   final int index;
-  final String role;
-  final String text;
+  final RuntimeDisplayMessage message;
   final bool streaming;
   const _MessageBubble({
     required this.index,
-    required this.role,
-    required this.text,
+    required this.message,
     required this.streaming,
   });
 
@@ -905,7 +1549,7 @@ class _MessageBubbleState extends ConsumerState<_MessageBubble> {
   bool _hover = false;
 
   Future<void> _editUserMessage() async {
-    final ctrl = TextEditingController(text: widget.text);
+    final ctrl = TextEditingController(text: widget.message.visibleText);
     final result = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -934,7 +1578,8 @@ class _MessageBubbleState extends ConsumerState<_MessageBubble> {
 
   @override
   Widget build(BuildContext context) {
-    final isUser = widget.role == 'user';
+    final isUser = widget.message.role == 'user';
+    final copyText = widget.message.copyText;
     final c = Theme.of(context).colorScheme;
     final actions = <Widget>[
       IconButton(
@@ -944,7 +1589,7 @@ class _MessageBubbleState extends ConsumerState<_MessageBubble> {
         constraints: const BoxConstraints.tightFor(width: 28, height: 28),
         padding: EdgeInsets.zero,
         onPressed: () {
-          Clipboard.setData(ClipboardData(text: widget.text));
+          Clipboard.setData(ClipboardData(text: copyText));
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('已复制'),
@@ -1025,28 +1670,14 @@ class _MessageBubbleState extends ConsumerState<_MessageBubble> {
                 ),
                 child: isUser
                     ? SelectableText(
-                        widget.text,
+                        widget.message.visibleText,
                         style: TextStyle(
                           color: c.onPrimaryContainer,
                           fontSize: 16,
                           height: 1.6,
                         ),
                       )
-                    : MarkdownBody(
-                        data: widget.text,
-                        selectable: true,
-                        styleSheet:
-                            MarkdownStyleSheet.fromTheme(
-                              Theme.of(context),
-                            ).copyWith(
-                              p: Theme.of(context).textTheme.bodyMedium
-                                  ?.copyWith(
-                                    fontSize: 16,
-                                    height: 1.6,
-                                    color: c.onSurface,
-                                  ),
-                            ),
-                      ),
+                    : MessageBlocksView(blocks: widget.message.blocks),
               ),
               AnimatedOpacity(
                 opacity: _hover ? 1 : 0,

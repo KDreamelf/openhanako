@@ -11,11 +11,10 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { DataTableBulkActions as BulkActionsToolbar } from '@/components/data-table'
+import { isPH01SystemKeyName } from '../constants'
 import { apiKeySchema, type ApiKey } from '../types'
 import { ApiKeysMultiDeleteDialog } from './api-keys-multi-delete-dialog'
 import { useApiKeys } from './api-keys-provider'
-
-const PH01_DEFAULT_KEY_NAME = 'PH01 Default Key'
 
 type DataTableBulkActionsProps<TData> = {
   table: Table<TData>
@@ -29,14 +28,15 @@ export function DataTableBulkActions<TData>({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [isCopying, setIsCopying] = useState(false)
   const selectedRows = table.getFilteredSelectedRowModel().rows
-  const hasLockedDefaultKey = selectedRows.some(
-    (row) => apiKeySchema.parse(row.original).name === PH01_DEFAULT_KEY_NAME
-  )
+  const hasLockedSystemKey = selectedRows.some((row) => {
+    const name = apiKeySchema.parse(row.original).name
+    return isPH01SystemKeyName(name)
+  })
 
   const handleBatchCopy = useCallback(async () => {
     if (selectedRows.length === 0) return
-    if (hasLockedDefaultKey) {
-      toast.error(t('PH01 default key cannot be copied'))
+    if (hasLockedSystemKey) {
+      toast.error(t('PH01 system keys cannot be copied'))
       return
     }
 
@@ -67,7 +67,7 @@ export function DataTableBulkActions<TData>({
     } finally {
       setIsCopying(false)
     }
-  }, [hasLockedDefaultKey, selectedRows, resolveRealKeysBatch, t])
+  }, [hasLockedSystemKey, selectedRows, resolveRealKeysBatch, t])
 
   return (
     <>
@@ -79,7 +79,7 @@ export function DataTableBulkActions<TData>({
               size='icon'
               className='size-8'
               onClick={handleBatchCopy}
-              disabled={isCopying || hasLockedDefaultKey}
+              disabled={isCopying || hasLockedSystemKey}
               aria-label={t('Copy selected keys')}
             >
               {isCopying ? (
@@ -100,7 +100,7 @@ export function DataTableBulkActions<TData>({
               variant='destructive'
               size='icon'
               onClick={() => setShowDeleteConfirm(true)}
-              disabled={hasLockedDefaultKey}
+              disabled={hasLockedSystemKey}
               className='size-8'
               aria-label={t('Delete selected API keys')}
             >
@@ -110,8 +110,8 @@ export function DataTableBulkActions<TData>({
           </TooltipTrigger>
           <TooltipContent>
             <p>
-              {hasLockedDefaultKey
-                ? t('PH01 default key cannot be deleted')
+              {hasLockedSystemKey
+                ? t('PH01 system keys cannot be deleted')
                 : t('Delete selected API keys')}
             </p>
           </TooltipContent>

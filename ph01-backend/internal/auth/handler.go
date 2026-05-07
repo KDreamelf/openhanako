@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/mail"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -80,8 +81,7 @@ func (h *Handler) HandleRegistrationEmailStart(c *gin.Context) {
 	}
 	resp, err := h.RegistrationEmail.Start(c.Request.Context(), req.Username, req.Email)
 	if err != nil {
-		status, code := classifyRFAErr(err)
-		errorJSON(c, status, code, err.Error())
+		rfaErrorJSON(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, resp)
@@ -162,8 +162,7 @@ func (h *Handler) HandleRegister(c *gin.Context) {
 		return
 	}
 	if err := h.RegistrationEmail.Verify(c.Request.Context(), payload.EmailChallengeID, payload.Username, email, payload.EmailCode); err != nil {
-		status, code := classifyRFAErr(err)
-		errorJSON(c, status, code, err.Error())
+		rfaErrorJSON(c, err)
 		return
 	}
 
@@ -319,8 +318,7 @@ func (h *Handler) HandleRecoveryRFAStart(c *gin.Context) {
 	}
 	resp, err := h.RFA.Start(c.Request.Context(), req.Username)
 	if err != nil {
-		status, code := classifyRFAErr(err)
-		errorJSON(c, status, code, err.Error())
+		rfaErrorJSON(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, resp)
@@ -339,8 +337,7 @@ func (h *Handler) HandleRecoveryRFAVerify(c *gin.Context) {
 	}
 	resp, err := h.RFA.Verify(c.Request.Context(), req.ChallengeID, req.Code)
 	if err != nil {
-		status, code := classifyRFAErr(err)
-		errorJSON(c, status, code, err.Error())
+		rfaErrorJSON(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, resp)
@@ -519,6 +516,20 @@ func errorJSON(c *gin.Context, status int, code, msg string) {
 	c.JSON(status, api.ErrorResponse{Error: code, Message: msg})
 }
 
+func errorJSONWithRetryAfter(c *gin.Context, status int, code, msg string, retryAfter int) {
+	c.Header("Retry-After", strconv.Itoa(retryAfter))
+	c.JSON(status, api.ErrorResponse{Error: code, Message: msg, RetryAfter: retryAfter})
+}
+
+func rfaErrorJSON(c *gin.Context, err error) {
+	status, code := classifyRFAErr(err)
+	if retryAfter := emailCooldownRetryAfterSeconds(err); retryAfter > 0 {
+		errorJSONWithRetryAfter(c, status, code, err.Error(), retryAfter)
+		return
+	}
+	errorJSON(c, status, code, err.Error())
+}
+
 func classifyVerifyErr(err error) string {
 	s := err.Error()
 	switch {
@@ -540,6 +551,8 @@ func classifyRFAErr(err error) (int, string) {
 		return http.StatusServiceUnavailable, api.ErrEmailNotConfigured
 	case errors.Is(err, ErrEmailNotBound):
 		return http.StatusBadRequest, api.ErrEmailNotBound
+	case errors.Is(err, ErrEmailCooldown):
+		return http.StatusTooManyRequests, api.ErrRateLimitExceeded
 	case strings.Contains(err.Error(), api.ErrEmailVerificationRequired):
 		return http.StatusBadRequest, api.ErrEmailVerificationRequired
 	case strings.Contains(err.Error(), api.ErrUsernameTaken):

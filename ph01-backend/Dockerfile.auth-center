@@ -1,5 +1,10 @@
 FROM golang:1.26.1-alpine AS builder
 
+ARG GOPROXY=https://goproxy.cn,direct
+ARG GOSUMDB=sum.golang.google.cn
+ENV GOPROXY=${GOPROXY} \
+    GOSUMDB=${GOSUMDB}
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -8,6 +13,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o /out/auth-center ./cmd
 
 FROM alpine:3.22
 
+ARG ALPINE_MIRROR=http://mirrors.aliyun.com/alpine
+RUN if [ -n "$ALPINE_MIRROR" ]; then \
+      sed -i "s|https://dl-cdn.alpinelinux.org/alpine|$ALPINE_MIRROR|g; s|http://dl-cdn.alpinelinux.org/alpine|$ALPINE_MIRROR|g" /etc/apk/repositories; \
+    fi
 RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app

@@ -2358,6 +2358,50 @@ export function ChannelMutateDrawer({
                 />
               </div>
 
+              <div className='bg-card space-y-4 rounded-xl border p-5'>
+                <CardHeading
+                  title={t('Tool Call Protocol')}
+                  icon={<Code className='h-4 w-4' />}
+                />
+                <FormField
+                  control={form.control}
+                  name='markdown_ast_tool_calls_enabled'
+                  render={({ field }) => (
+                    <FormItem className='flex items-center justify-between gap-4 rounded-lg border px-4 py-3'>
+                      <div className='space-y-1'>
+                        <FormLabel>
+                          {t('Handle tool calls as Markdown AST')}
+                        </FormLabel>
+                        <FormDescription>
+                          {t(
+                            'Convert standard OpenAI tool calls into Markdown AST tool blocks before sending upstream'
+                          )}
+                        </FormDescription>
+                        <FormDescription>
+                          {t(
+                            'Cannot be enabled with Pass Through Body. Enabling one will automatically turn off the other.'
+                          )}
+                        </FormDescription>
+                      </div>
+                      <FormControl>
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={(checked) => {
+                            field.onChange(checked)
+                            if (checked) {
+                              form.setValue('pass_through_body_enabled', false, {
+                                shouldDirty: true,
+                                shouldTouch: true,
+                              })
+                            }
+                          }}
+                        />
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
+              </div>
+
               <Collapsible
                 open={advancedSettingsOpen}
                 onOpenChange={handleAdvancedSettingsOpenChange}
@@ -3072,11 +3116,28 @@ export function ChannelMutateDrawer({
                               <FormDescription>
                                 {t('Pass request body directly to upstream')}
                               </FormDescription>
+                              <FormDescription>
+                                {t(
+                                  'Cannot be enabled with Markdown AST tool calls. Enabling one will automatically turn off the other.'
+                                )}
+                              </FormDescription>
                             </div>
                             <FormControl>
                               <Switch
                                 checked={field.value}
-                                onCheckedChange={field.onChange}
+                                onCheckedChange={(checked) => {
+                                  field.onChange(checked)
+                                  if (checked) {
+                                    form.setValue(
+                                      'markdown_ast_tool_calls_enabled',
+                                      false,
+                                      {
+                                        shouldDirty: true,
+                                        shouldTouch: true,
+                                      }
+                                    )
+                                  }
+                                }}
                               />
                             </FormControl>
                           </FormItem>

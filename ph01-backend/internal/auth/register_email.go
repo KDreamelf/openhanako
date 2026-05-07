@@ -19,6 +19,7 @@ type RegistrationEmailService struct {
 	Sender    EmailSender
 
 	ChallengeTTL time.Duration
+	SendCooldown time.Duration
 	MaxAttempts  int
 }
 
@@ -28,6 +29,7 @@ func NewRegistrationEmailService(userStore *user.Store, store RFAStore, sender E
 		Store:        store,
 		Sender:       sender,
 		ChallengeTTL: 10 * time.Minute,
+		SendCooldown: defaultEmailSendCooldown,
 		MaxAttempts:  5,
 	}
 }
@@ -53,6 +55,17 @@ func (s *RegistrationEmailService) Start(ctx context.Context, username, email st
 	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
+	cooldownSeconds := durationSeconds(s.SendCooldown)
+	releaseCooldown, err := reserveEmailSendCooldown(ctx, s.Store, "registration", email, s.SendCooldown)
+	if err != nil {
+		return nil, err
+	}
+	releaseCooldownOnFailure := releaseCooldown != nil
+	defer func() {
+		if releaseCooldownOnFailure {
+			_ = releaseCooldown(ctx)
+		}
+	}()
 
 	code, err := randomNumericCode(6)
 	if err != nil {
@@ -84,10 +97,12 @@ func (s *RegistrationEmailService) Start(ctx context.Context, username, email st
 		_ = s.Store.DeleteChallenge(ctx, challengeID)
 		return nil, err
 	}
+	releaseCooldownOnFailure = false
 	return &api.RegistrationEmailStartResponse{
-		ChallengeID: challengeID,
-		Delivery:    maskEmail(email),
-		ExpiresIn:   int(s.ChallengeTTL.Seconds()),
+		ChallengeID:     challengeID,
+		Delivery:        maskEmail(email),
+		ExpiresIn:       int(s.ChallengeTTL.Seconds()),
+		CooldownSeconds: cooldownSeconds,
 	}, nil
 }
 

@@ -9,7 +9,10 @@ import (
 	"gorm.io/gorm"
 )
 
-const PH01DefaultTokenName = "PH01 Default Key"
+const (
+	PH01DefaultTokenName = "PH01 Default Key"
+	PH01PublicTokenName  = "PH01 Public Key"
+)
 
 type PH01Identity struct {
 	Id           int    `json:"id"`
@@ -48,7 +51,7 @@ func FindOrCreateUserFromPH01(ph01UserID uint64, ph01Username string, pubkeyHash
 			}).Error; err != nil {
 				return err
 			}
-			return ensurePH01DefaultTokenWithTx(tx, user.Id)
+			return ensurePH01ManagedTokensForUserWithTx(tx, user.Id, ph01Username)
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
@@ -67,7 +70,7 @@ func FindOrCreateUserFromPH01(ph01UserID uint64, ph01Username string, pubkeyHash
 		if err := tx.Create(&identity).Error; err != nil {
 			return err
 		}
-		return ensurePH01DefaultTokenWithTx(tx, user.Id)
+		return ensurePH01ManagedTokensForUserWithTx(tx, user.Id, ph01Username)
 	})
 	if err != nil {
 		return nil, nil, err
@@ -104,6 +107,14 @@ func IsPH01DefaultToken(token *Token) bool {
 	return token != nil && token.Name == PH01DefaultTokenName && IsPH01User(token.UserId)
 }
 
+func IsPH01PublicToken(token *Token) bool {
+	return token != nil && token.Name == PH01PublicTokenName && IsPH01User(token.UserId)
+}
+
+func IsPH01ManagedToken(token *Token) bool {
+	return IsPH01DefaultToken(token) || IsPH01PublicToken(token)
+}
+
 func EnsurePH01DefaultToken(userID int) (*Token, error) {
 	if userID <= 0 {
 		return nil, errors.New("user id is empty")
@@ -116,6 +127,20 @@ func EnsurePH01DefaultToken(userID int) (*Token, error) {
 		return nil, err
 	}
 	return &token, nil
+}
+
+func EnsurePH01RootManagedTokens() error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var identity PH01Identity
+		err := tx.Where("LOWER(ph01_username) = ?", "root").First(&identity).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return ensurePH01RootManagedTokensWithTx(tx, identity.UserId)
+	})
 }
 
 func findOrCreateGatewayUserWithTx(tx *gorm.DB, ph01Username string) (User, bool, error) {
@@ -176,8 +201,30 @@ func syncPH01UserFields(tx *gorm.DB, user *User, ph01Username string) error {
 }
 
 func ensurePH01DefaultTokenWithTx(tx *gorm.DB, userID int) error {
+	return ensurePH01ManagedTokenWithTx(tx, userID, PH01DefaultTokenName)
+}
+
+func ensurePH01PublicTokenWithTx(tx *gorm.DB, userID int) error {
+	return ensurePH01ManagedTokenWithTx(tx, userID, PH01PublicTokenName)
+}
+
+func ensurePH01ManagedTokensForUserWithTx(tx *gorm.DB, userID int, ph01Username string) error {
+	if isPH01RootUsername(ph01Username) {
+		return ensurePH01RootManagedTokensWithTx(tx, userID)
+	}
+	return ensurePH01DefaultTokenWithTx(tx, userID)
+}
+
+func ensurePH01RootManagedTokensWithTx(tx *gorm.DB, userID int) error {
+	if err := ensurePH01DefaultTokenWithTx(tx, userID); err != nil {
+		return err
+	}
+	return ensurePH01PublicTokenWithTx(tx, userID)
+}
+
+func ensurePH01ManagedTokenWithTx(tx *gorm.DB, userID int, name string) error {
 	var token Token
-	err := tx.First(&token, "user_id = ? AND name = ?", userID, PH01DefaultTokenName).Error
+	err := tx.First(&token, "user_id = ? AND name = ?", userID, name).Error
 	if err == nil {
 		updates := map[string]any{}
 		if token.Status != common.TokenStatusEnabled {
@@ -208,7 +255,7 @@ func ensurePH01DefaultTokenWithTx(tx *gorm.DB, userID int) error {
 	}
 	token = Token{
 		UserId:             userID,
-		Name:               PH01DefaultTokenName,
+		Name:               name,
 		Key:                key,
 		Status:             common.TokenStatusEnabled,
 		CreatedTime:        common.GetTimestamp(),

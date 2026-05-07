@@ -12,13 +12,17 @@ class PromptToolFormat {
   static const String toolCallClose = '</tool_call>';
   static const String thinkOpen = '<think>';
   static const String thinkClose = '</think>';
+  static const String thinkingOpen = '<thinking>';
+  static const String thinkingClose = '</thinking>';
 
   /// 给模型的工具说明 prompt 段（拼到 system 末尾）。
   static String buildToolInstructions(List<ToolSchema> tools) {
     if (tools.isEmpty) return '';
     final buf = StringBuffer()
       ..writeln('You can call the following tools by emitting a tag:')
-      ..writeln('$toolCallOpen{"name": "tool_name", "arguments": {...}}$toolCallClose')
+      ..writeln(
+        '$toolCallOpen{"name": "tool_name", "arguments": {...}}$toolCallClose',
+      )
       ..writeln('Each call must be on its own and well-formed JSON.')
       ..writeln('')
       ..writeln('Available tools:');
@@ -52,15 +56,22 @@ class PromptToolStreamParser {
     final out = <PromptToolEvent>[];
 
     while (true) {
-      final s = _buf.toString();
+      final s = _normalizedBuffer();
       if (s.isEmpty) break;
 
       if (_inThink) {
         final close = s.indexOf(PromptToolFormat.thinkClose);
         if (close < 0) {
-          // 闭合 tag 还没到，全部 emit 为 think delta
-          if (s.isNotEmpty) {
-            out.add(PromptToolThinkDelta(s));
+          // 闭合 tag 还没完整到达时，保留可能的半截闭合标签。
+          final keep = _possiblyPartialThinkCloseSuffixLength(s);
+          final emit = keep == 0 ? s : s.substring(0, s.length - keep);
+          if (emit.isNotEmpty) {
+            out.add(PromptToolThinkDelta(emit));
+          }
+          _buf
+            ..clear()
+            ..write(keep == 0 ? '' : s.substring(s.length - keep));
+          if (keep == 0) {
             _buf.clear();
           }
           break;
@@ -84,14 +95,19 @@ class PromptToolStreamParser {
         _inToolCall = false;
         try {
           final j = jsonDecode(body) as Map<String, dynamic>;
-          out.add(PromptToolCallParsed(
-            name: (j['name'] as String?) ?? '',
-            argumentsJson: jsonEncode(j['arguments'] ?? <String, dynamic>{}),
-          ));
+          out.add(
+            PromptToolCallParsed(
+              name: (j['name'] as String?) ?? '',
+              argumentsJson: jsonEncode(j['arguments'] ?? <String, dynamic>{}),
+            ),
+          );
         } catch (_) {
           // JSON 解析失败 → 当作普通文本
-          out.add(PromptToolTextDelta(
-              '${PromptToolFormat.toolCallOpen}$body${PromptToolFormat.toolCallClose}'));
+          out.add(
+            PromptToolTextDelta(
+              '${PromptToolFormat.toolCallOpen}$body${PromptToolFormat.toolCallClose}',
+            ),
+          );
         }
       } else {
         // 找下一个 tag 起点
@@ -140,9 +156,13 @@ class PromptToolStreamParser {
 
   /// 处理流式文本结束时残留的 buffer（只输出剩余 text）。
   List<PromptToolEvent> flush() {
-    final s = _buf.toString();
+    final s = _normalizedBuffer();
     _buf.clear();
     if (s.isEmpty) return const [];
+    if (_inThink) {
+      _inThink = false;
+      return [PromptToolThinkDelta(s)];
+    }
     return [PromptToolTextDelta(s)];
   }
 
@@ -151,6 +171,7 @@ class PromptToolStreamParser {
   int _possiblyPartialTagSuffixLength(String s) {
     const candidates = [
       PromptToolFormat.thinkOpen,
+      PromptToolFormat.thinkingOpen,
       PromptToolFormat.toolCallOpen,
     ];
     for (final c in candidates) {
@@ -159,6 +180,37 @@ class PromptToolStreamParser {
       }
     }
     return 0;
+  }
+
+  int _possiblyPartialThinkCloseSuffixLength(String s) {
+    const candidates = [
+      PromptToolFormat.thinkClose,
+      PromptToolFormat.thinkingClose,
+    ];
+    for (final c in candidates) {
+      for (var len = c.length - 1; len > 0; len--) {
+        if (s.endsWith(c.substring(0, len))) return len;
+      }
+    }
+    return 0;
+  }
+
+  String _normalizedBuffer() {
+    final s = _buf.toString();
+    if (!s.contains(PromptToolFormat.thinkingOpen) &&
+        !s.contains(PromptToolFormat.thinkingClose)) {
+      return s;
+    }
+    final normalized = s
+        .replaceAll(PromptToolFormat.thinkingOpen, PromptToolFormat.thinkOpen)
+        .replaceAll(
+          PromptToolFormat.thinkingClose,
+          PromptToolFormat.thinkClose,
+        );
+    _buf
+      ..clear()
+      ..write(normalized);
+    return normalized;
   }
 }
 

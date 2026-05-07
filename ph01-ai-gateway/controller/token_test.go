@@ -546,6 +546,7 @@ func TestPH01DefaultTokenCannotExposeOrDeleteKey(t *testing.T) {
 		t.Fatalf("failed to migrate PH01 identity table: %v", err)
 	}
 	token := seedToken(t, db, 1, model.PH01DefaultTokenName, "ph01defaulttoken5678")
+	publicToken := seedToken(t, db, 1, model.PH01PublicTokenName, "ph01publictoken5678")
 	if err := db.Create(&model.PH01Identity{
 		UserId:       1,
 		PH01UserID:   42,
@@ -553,6 +554,21 @@ func TestPH01DefaultTokenCannotExposeOrDeleteKey(t *testing.T) {
 		PubkeyHash:   "hash",
 	}).Error; err != nil {
 		t.Fatalf("failed to seed PH01 identity: %v", err)
+	}
+
+	detailCtx, detailRecorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/"+strconv.Itoa(publicToken.Id), nil, 1)
+	detailCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(publicToken.Id)}}
+	GetToken(detailCtx)
+	detailResponse := decodeAPIResponse(t, detailRecorder)
+	if !detailResponse.Success {
+		t.Fatalf("expected PH01 public key detail to succeed, got %s", detailResponse.Message)
+	}
+	var detail tokenResponseItem
+	if err := common.Unmarshal(detailResponse.Data, &detail); err != nil {
+		t.Fatalf("failed to decode PH01 public detail response: %v", err)
+	}
+	if detail.Key != "" {
+		t.Fatalf("expected PH01 public detail to hide masked key, got %q", detail.Key)
 	}
 
 	keyCtx, keyRecorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/"+strconv.Itoa(token.Id)+"/key", nil, 1)
@@ -566,6 +582,29 @@ func TestPH01DefaultTokenCannotExposeOrDeleteKey(t *testing.T) {
 		t.Fatalf("PH01 default key response leaked raw token key: %s", keyRecorder.Body.String())
 	}
 
+	publicKeyCtx, publicKeyRecorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/"+strconv.Itoa(publicToken.Id)+"/key", nil, 1)
+	publicKeyCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(publicToken.Id)}}
+	GetTokenKey(publicKeyCtx)
+	publicKeyResponse := decodeAPIResponse(t, publicKeyRecorder)
+	if publicKeyResponse.Success {
+		t.Fatalf("expected PH01 public key fetch to fail")
+	}
+	if strings.Contains(publicKeyRecorder.Body.String(), publicToken.Key) {
+		t.Fatalf("PH01 public key response leaked raw token key: %s", publicKeyRecorder.Body.String())
+	}
+
+	batchKeyCtx, batchKeyRecorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/batch/keys", map[string]any{
+		"ids": []int{publicToken.Id},
+	}, 1)
+	GetTokenKeysBatch(batchKeyCtx)
+	batchKeyResponse := decodeAPIResponse(t, batchKeyRecorder)
+	if batchKeyResponse.Success {
+		t.Fatalf("expected PH01 public key batch fetch to fail")
+	}
+	if strings.Contains(batchKeyRecorder.Body.String(), publicToken.Key) {
+		t.Fatalf("PH01 public batch key response leaked raw token key: %s", batchKeyRecorder.Body.String())
+	}
+
 	deleteCtx, deleteRecorder := newAuthenticatedContext(t, http.MethodDelete, "/api/token/"+strconv.Itoa(token.Id), nil, 1)
 	deleteCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
 	DeleteToken(deleteCtx)
@@ -574,14 +613,25 @@ func TestPH01DefaultTokenCannotExposeOrDeleteKey(t *testing.T) {
 		t.Fatalf("expected PH01 default key delete to fail")
 	}
 
+	publicDeleteCtx, publicDeleteRecorder := newAuthenticatedContext(t, http.MethodDelete, "/api/token/"+strconv.Itoa(publicToken.Id), nil, 1)
+	publicDeleteCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(publicToken.Id)}}
+	DeleteToken(publicDeleteCtx)
+	publicDeleteResponse := decodeAPIResponse(t, publicDeleteRecorder)
+	if publicDeleteResponse.Success {
+		t.Fatalf("expected PH01 public key delete to fail")
+	}
+
 	updateBody := map[string]any{
-		"id":                token.Id,
-		"name":              "renamed",
-		"group":             "auto",
-		"cross_group_retry": true,
-		"expired_time":      123,
-		"unlimited_quota":   false,
-		"remain_quota":      100,
+		"id":                   token.Id,
+		"name":                 "renamed",
+		"group":                "auto",
+		"cross_group_retry":    true,
+		"expired_time":         123,
+		"unlimited_quota":      false,
+		"remain_quota":         100,
+		"model_limits_enabled": true,
+		"model_limits":         "story-model",
+		"allow_ips":            "127.0.0.1",
 	}
 	updateCtx, updateRecorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", updateBody, 1)
 	UpdateToken(updateCtx)
@@ -596,7 +646,48 @@ func TestPH01DefaultTokenCannotExposeOrDeleteKey(t *testing.T) {
 	if updated.Name != model.PH01DefaultTokenName || updated.Group != "auto" || !updated.CrossGroupRetry {
 		t.Fatalf("unexpected PH01 default key update: %+v", updated)
 	}
-	if updated.ExpiredTime != -1 || !updated.UnlimitedQuota || updated.Status != common.TokenStatusEnabled {
+	if updated.ExpiredTime != -1 || updated.Status != common.TokenStatusEnabled {
 		t.Fatalf("PH01 default key invariant changed: %+v", updated)
+	}
+	if updated.UnlimitedQuota || updated.RemainQuota != 100 || !updated.ModelLimitsEnabled || updated.ModelLimits != "story-model" {
+		t.Fatalf("PH01 default key carrier config was not updated: %+v", updated)
+	}
+	if updated.AllowIps == nil || *updated.AllowIps != "127.0.0.1" {
+		t.Fatalf("PH01 default key allow_ips was not updated: %+v", updated.AllowIps)
+	}
+
+	publicUpdateBody := map[string]any{
+		"id":                   publicToken.Id,
+		"name":                 "renamed-public",
+		"group":                "auto",
+		"cross_group_retry":    true,
+		"expired_time":         123,
+		"unlimited_quota":      false,
+		"remain_quota":         200,
+		"model_limits_enabled": true,
+		"model_limits":         "public-story-model",
+		"allow_ips":            "10.0.0.1",
+	}
+	publicUpdateCtx, publicUpdateRecorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", publicUpdateBody, 1)
+	UpdateToken(publicUpdateCtx)
+	publicUpdateResponse := decodeAPIResponse(t, publicUpdateRecorder)
+	if !publicUpdateResponse.Success {
+		t.Fatalf("expected PH01 public key group update to succeed, got %s", publicUpdateResponse.Message)
+	}
+	var updatedPublic model.Token
+	if err := db.First(&updatedPublic, "id = ?", publicToken.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updatedPublic.Name != model.PH01PublicTokenName || updatedPublic.Group != "auto" || !updatedPublic.CrossGroupRetry {
+		t.Fatalf("unexpected PH01 public key update: %+v", updatedPublic)
+	}
+	if updatedPublic.ExpiredTime != -1 || updatedPublic.Status != common.TokenStatusEnabled {
+		t.Fatalf("PH01 public key invariant changed: %+v", updatedPublic)
+	}
+	if updatedPublic.UnlimitedQuota || updatedPublic.RemainQuota != 200 || !updatedPublic.ModelLimitsEnabled || updatedPublic.ModelLimits != "public-story-model" {
+		t.Fatalf("PH01 public key carrier config was not updated: %+v", updatedPublic)
+	}
+	if updatedPublic.AllowIps == nil || *updatedPublic.AllowIps != "10.0.0.1" {
+		t.Fatalf("PH01 public key allow_ips was not updated: %+v", updatedPublic.AllowIps)
 	}
 }

@@ -32,6 +32,15 @@ final identityRepositoryProvider = Provider<IdentityRepository>((ref) {
   );
 });
 
+/// 身份状态版本号。IdentityRepository 本身是可变对象，注册 / 解锁 / 锁定后
+/// 需要递增此值，通知 UI 重新读取 current。
+final identityRevisionProvider = StateProvider<int>((_) => 0);
+
+final currentIdentityProvider = Provider<HanakoIdentity?>((ref) {
+  ref.watch(identityRevisionProvider);
+  return ref.watch(identityRepositoryProvider).current;
+});
+
 /// 当前活动 agent ID（响应 agentManager.activeAgentId 变化）。
 final activeAgentIdProvider = StateProvider<String?>((ref) {
   final eng = ref.watch(engineProvider);

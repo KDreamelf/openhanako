@@ -2,7 +2,7 @@
   "listen": ":8090",
   "storage_root": "/data/experience-hub",
   "admin_token": "39263fb0a04db397e36bb740852badd2cfd93f479a2f841e3f9a6c99ee11722c",
-  "cors_origins": ["https://experience.example.com"],
+  "cors_origins": ["https://experience.xn--lbtx0e.cn"],
   "max_upload_bytes": 536870912,
   "governance": {
     "enabled": true,

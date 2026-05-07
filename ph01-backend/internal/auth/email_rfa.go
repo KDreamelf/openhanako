@@ -29,10 +29,13 @@ var (
 	ErrRFANotAvailable      = errors.New(api.ErrRFANotAvailable)
 	ErrEmailNotConfigured   = errors.New(api.ErrEmailNotConfigured)
 	ErrEmailNotBound        = errors.New(api.ErrEmailNotBound)
+	ErrEmailCooldown        = errors.New(api.ErrRateLimitExceeded)
 	ErrRFAChallengeNotFound = errors.New(api.ErrRFAChallengeNotFound)
 	ErrRFACodeInvalid       = errors.New(api.ErrRFACodeInvalid)
 	ErrRFACodeExpired       = errors.New(api.ErrRFACodeExpired)
 )
+
+const defaultEmailSendCooldown = 60 * time.Second
 
 // EmailSender 发送验证码。生产实现是 SMTP，测试可用内存 fake。
 type EmailSender interface {
@@ -57,6 +60,8 @@ type RFAStore interface {
 	DeleteChallenge(ctx context.Context, id string) error
 	SaveGrant(ctx context.Context, grant *RecoveryGrant, ttl time.Duration) error
 	GetGrant(ctx context.Context, token string) (*RecoveryGrant, error)
+	ReserveCooldown(ctx context.Context, key string, ttl time.Duration) (time.Duration, bool, error)
+	ClearCooldown(ctx context.Context, key string) error
 }
 
 // RFAChallenge 是邮箱验证码挑战。CodeHash = SHA256(salt + ":" + code)。
@@ -88,6 +93,7 @@ type RFAService struct {
 
 	ChallengeTTL           time.Duration
 	GrantTTL               time.Duration
+	SendCooldown           time.Duration
 	MaxAttempts            int
 	MaxCandidatesPerColumn int
 }
@@ -99,6 +105,7 @@ func NewRFAService(userStore *user.Store, store RFAStore, sender EmailSender) *R
 		Sender:                 sender,
 		ChallengeTTL:           10 * time.Minute,
 		GrantTTL:               30 * time.Minute,
+		SendCooldown:           defaultEmailSendCooldown,
 		MaxAttempts:            5,
 		MaxCandidatesPerColumn: 4,
 	}
@@ -130,6 +137,17 @@ func (s *RFAService) Start(ctx context.Context, username string) (*api.RecoveryR
 	if _, err := mail.ParseAddress(email); err != nil {
 		return nil, ErrEmailNotBound
 	}
+	cooldownSeconds := durationSeconds(s.SendCooldown)
+	releaseCooldown, err := reserveEmailSendCooldown(ctx, s.Store, "recovery", email, s.SendCooldown)
+	if err != nil {
+		return nil, err
+	}
+	releaseCooldownOnFailure := releaseCooldown != nil
+	defer func() {
+		if releaseCooldownOnFailure {
+			_ = releaseCooldown(ctx)
+		}
+	}()
 
 	code, err := randomNumericCode(6)
 	if err != nil {
@@ -162,11 +180,13 @@ func (s *RFAService) Start(ctx context.Context, username string) (*api.RecoveryR
 		_ = s.Store.DeleteChallenge(ctx, challengeID)
 		return nil, err
 	}
+	releaseCooldownOnFailure = false
 
 	return &api.RecoveryRFAStartResponse{
-		ChallengeID: challengeID,
-		Delivery:    maskEmail(email),
-		ExpiresIn:   int(s.ChallengeTTL.Seconds()),
+		ChallengeID:     challengeID,
+		Delivery:        maskEmail(email),
+		ExpiresIn:       int(s.ChallengeTTL.Seconds()),
+		CooldownSeconds: cooldownSeconds,
 	}, nil
 }
 
@@ -281,6 +301,60 @@ func sendEmailMessage(ctx context.Context, sender EmailSender, to string, msg Em
 	return sender.Send(ctx, to, msg.Subject, msg.TextBody)
 }
 
+type EmailCooldownError struct {
+	RetryAfter time.Duration
+}
+
+func (e *EmailCooldownError) Error() string {
+	return api.ErrRateLimitExceeded
+}
+
+func (e *EmailCooldownError) Is(target error) bool {
+	return target == ErrEmailCooldown
+}
+
+func emailCooldownRetryAfterSeconds(err error) int {
+	var cooldownErr *EmailCooldownError
+	if !errors.As(err, &cooldownErr) {
+		return 0
+	}
+	return durationSeconds(cooldownErr.RetryAfter)
+}
+
+func reserveEmailSendCooldown(ctx context.Context, store RFAStore, purpose, email string, cooldown time.Duration) (func(context.Context) error, error) {
+	if cooldown <= 0 {
+		return nil, nil
+	}
+	key := emailCooldownKey(purpose, email)
+	retryAfter, reserved, err := store.ReserveCooldown(ctx, key, cooldown)
+	if err != nil {
+		return nil, err
+	}
+	if !reserved {
+		if retryAfter <= 0 {
+			retryAfter = cooldown
+		}
+		return nil, &EmailCooldownError{RetryAfter: retryAfter}
+	}
+	return func(ctx context.Context) error {
+		return store.ClearCooldown(ctx, key)
+	}, nil
+}
+
+func emailCooldownKey(purpose, email string) string {
+	purpose = strings.ToLower(strings.TrimSpace(purpose))
+	email = strings.ToLower(strings.TrimSpace(email))
+	sum := sha256.Sum256([]byte(purpose + "\n" + email))
+	return purpose + ":" + hex.EncodeToString(sum[:])
+}
+
+func durationSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 0
+	}
+	return int((d + time.Second - 1) / time.Second)
+}
+
 // RedisRFAStore 用 Redis 保存短期挑战和恢复授权。
 type RedisRFAStore struct {
 	Client *redis.Client
@@ -352,12 +426,39 @@ func (s *RedisRFAStore) GetGrant(ctx context.Context, token string) (*RecoveryGr
 	return &grant, nil
 }
 
+func (s *RedisRFAStore) ReserveCooldown(ctx context.Context, key string, ttl time.Duration) (time.Duration, bool, error) {
+	cooldownKey := s.cooldownKey(key)
+	ok, err := s.Client.SetNX(ctx, cooldownKey, "1", ttl).Result()
+	if err != nil {
+		return 0, false, err
+	}
+	if ok {
+		return 0, true, nil
+	}
+	retryAfter, err := s.Client.TTL(ctx, cooldownKey).Result()
+	if err != nil {
+		return 0, false, err
+	}
+	if retryAfter <= 0 {
+		retryAfter = ttl
+	}
+	return retryAfter, false, nil
+}
+
+func (s *RedisRFAStore) ClearCooldown(ctx context.Context, key string) error {
+	return s.Client.Del(ctx, s.cooldownKey(key)).Err()
+}
+
 func (s *RedisRFAStore) challengeKey(id string) string {
 	return s.Prefix + ":challenge:" + id
 }
 
 func (s *RedisRFAStore) grantKey(token string) string {
 	return s.Prefix + ":grant:" + token
+}
+
+func (s *RedisRFAStore) cooldownKey(key string) string {
+	return s.Prefix + ":cooldown:" + key
 }
 
 // SMTPConfig 是注册与恢复验证码邮件发送配置。

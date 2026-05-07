@@ -30,13 +30,13 @@ ai_gateway_sync "default" {
 server "auth_gateway" {
   listen       = ":8080"
   admin_token  = "148e8975201d395fa417e4846847de6f458410ed86415065094002631a81b0ab"
-  cors_origins = ["https://app.example.com", "https://ai.example.com"]
+  cors_origins = ["https://auth.xn--lbtx0e.cn", "https://ai.xn--lbtx0e.cn"]
 }
 
 server "auth_gateway_mtls" {
   listen       = ":8443"
   admin_token  = "148e8975201d395fa417e4846847de6f458410ed86415065094002631a81b0ab"
-  cors_origins = ["https://ai.example.com"]
+  cors_origins = ["https://ai.xn--lbtx0e.cn"]
 
   tls {
     enabled             = true

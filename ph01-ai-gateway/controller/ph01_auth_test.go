@@ -52,6 +52,51 @@ func TestLookupPH01IPLocationPrivateIP(t *testing.T) {
 	require.Equal(t, "local/private", lookupPH01IPLocation("127.0.0.1"))
 }
 
+func TestPH01ParseGeoLocationPayloadSupportsCommonAPIs(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "ip-api",
+			body: `{"status":"success","country":"China","regionName":"Hubei","city":"Wuhan"}`,
+			want: "China / Hubei / Wuhan",
+		},
+		{
+			name: "ipwho.is",
+			body: `{"success":true,"country":"中国","region":"湖北","city":"武汉"}`,
+			want: "中国 / 湖北 / 武汉",
+		},
+		{
+			name: "ipapi",
+			body: `{"country_name":"China","region":"Hubei","city":"Wuhan"}`,
+			want: "China / Hubei / Wuhan",
+		},
+		{
+			name: "nested",
+			body: `{"code":200,"data":{"country":"中国","province":"湖北","city":"武汉"}}`,
+			want: "中国 / 湖北 / 武汉",
+		},
+		{
+			name: "failure",
+			body: `{"success":false,"message":"reserved range"}`,
+			want: "",
+		},
+		{
+			name: "plain text",
+			body: `中国 湖北 武汉`,
+			want: "中国 湖北 武汉",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, ph01ParseGeoLocationPayload([]byte(tt.body)))
+		})
+	}
+}
+
 func TestPH01SignedLoginRequiresUserID(t *testing.T) {
 	req := PH01SignedLoginRequest{
 		Signature: "abcd",

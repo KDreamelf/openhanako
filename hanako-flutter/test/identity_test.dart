@@ -349,6 +349,34 @@ void main() {
       expect(loaded.mnemonic!.words, originalWords);
     });
 
+    test('regenerateStoryForCurrent → 使用已保存助记词重新生成故事', () async {
+      var calls = 0;
+      final repo2 = IdentityRepository(
+        keystore: FileSecureKeystore(hanaHome: tmp),
+        composer: StoryComposer(
+          caller:
+              ({
+                required String systemPrompt,
+                required String userPrompt,
+                int? maxTokens,
+              }) async {
+                calls++;
+                return '第 $calls 版故事：$userPrompt';
+              },
+        ),
+        parser: repo.parser,
+      );
+
+      final reg = await repo2.registerNew(pin: '1234');
+      final originalWords = reg.words;
+      await repo2.lock();
+
+      final regenerated = await repo2.regenerateStoryForCurrent(pin: '1234');
+      expect(regenerated.words, originalWords);
+      expect(regenerated.story, startsWith('第 2 版故事：'));
+      expect(regenerated.fallback, isFalse);
+    });
+
     test('LLM 失败 → fallback=true，账号仍然生成', () async {
       final repo2 = IdentityRepository(
         keystore: FileSecureKeystore(hanaHome: tmp),
