@@ -431,8 +431,54 @@ func ph01AllowedModelsForCarrier(userID int, carrier *model.Token) ([]string, st
 		}
 		models = append(models, modelName)
 	}
-	sort.Strings(models)
+	models = ph01OrderAllowedModels(carrier, models)
 	return models, usingGroup, nil
+}
+
+func ph01OrderAllowedModels(carrier *model.Token, models []string) []string {
+	sort.Strings(models)
+	if !carrier.ModelLimitsEnabled {
+		return models
+	}
+
+	remaining := make(map[string]struct{}, len(models))
+	for _, modelName := range models {
+		remaining[modelName] = struct{}{}
+	}
+
+	ordered := make([]string, 0, len(models))
+	add := func(modelName string) {
+		if _, ok := remaining[modelName]; !ok {
+			return
+		}
+		ordered = append(ordered, modelName)
+		delete(remaining, modelName)
+	}
+
+	for _, rawLimit := range carrier.GetModelLimits() {
+		limit := strings.TrimSpace(rawLimit)
+		if limit == "" {
+			continue
+		}
+		formattedLimit := ratio_setting.FormatMatchingModelName(limit)
+		for _, modelName := range models {
+			if _, ok := remaining[modelName]; !ok {
+				continue
+			}
+			formattedModelName := ratio_setting.FormatMatchingModelName(modelName)
+			if modelName == limit ||
+				formattedModelName == limit ||
+				modelName == formattedLimit ||
+				formattedModelName == formattedLimit {
+				add(modelName)
+			}
+		}
+	}
+
+	for _, modelName := range models {
+		add(modelName)
+	}
+	return ordered
 }
 
 func ph01BuildRelayBody(plaintext []byte) ([]byte, ph01ChatRequest, error) {

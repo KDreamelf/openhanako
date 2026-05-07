@@ -7,14 +7,14 @@
 // 与 MVP §10.5 对齐 + v2 改造（按用户 2026-04-27 设计）：
 //   - 旧版本输出扁平 ID 列表，客户端做全排列穷举，最坏 12! 次。
 //   - 新版本输出 12×K 矩阵，客户端按汉明距离递增枚举，最坏 K^12 次。
-//     第一阶段默认 K=2，全空间 2^12=4096，可直接 D=12 全量验证。
-//     通过 RFA 后可显式提高到 K=3/K=4 做深度恢复。
+//     第一阶段默认 K=5，依赖恢复器按汉明距离限制搜索深度。
+//     通过 RFA 后可显式提高 K 或搜索深度做深度恢复。
 //
 // 矩阵协议：
 //   {
 //     "columns": [
-//       [12, 73],          // 第 1 个意象：top-2 ID（rank-0 最像）
-//       [451, 980],        // 第 2 个意象：top-2 ID
+//       [12, 73, ...],     // 第 1 个意象：top-K ID（rank-0 最像）
+//       [451, 980, ...],   // 第 2 个意象：top-K ID
 //       ...
 //       [...]              // 共 12 列
 //     ]
@@ -26,8 +26,10 @@ import 'word_dict.dart';
 import 'story_composer.dart' show StoryLlmCaller;
 
 /// 第一阶段每列候选数（与 recovery.dart 中的 K 对齐）。
-/// K=2 时全矩阵只有 4096 个组合，可直接 D=12 全量验证。
-const int kStoryParserCandidatesPerColumn = 2;
+///
+/// K=5 用来容纳人脑复述时常见的近义词、错记词和同类实体替换；
+/// 恢复器会把硬搜索深度限制在 10 分钟 UX 预算内。
+const int kStoryParserCandidatesPerColumn = 5;
 
 /// 期望的列数（即助记词长度，固定 12）。
 const int kStoryParserColumns = 12;
@@ -79,6 +81,8 @@ class StoryParser {
   final StoryLlmCaller caller;
   final int candidatesPerColumn;
 
+  String get systemPromptForTesting => _buildSystemPrompt();
+
   /// 恢复期入口：用户输入 → 12×K 矩阵。
   ///
   /// [storyOrWords] 可以是模糊故事，也可以是用空格 / 逗号分隔的词组。
@@ -113,7 +117,7 @@ class StoryParser {
     return StoryParseResult(
       columns: exactWords,
       rawResponse: jsonEncode({'columns': exactWords}),
-      candidatesPerColumn: candidatesPerColumn,
+      candidatesPerColumn: 1,
       usedLlm: false,
     );
   }
@@ -143,10 +147,11 @@ class StoryParser {
 1. 用户给你的内容是一段故事或一组关键词；故事里隐含 $kStoryParserColumns 个核心意象。
 2. **按故事中意象出现的顺序**，把每个意象转成字典中最接近的 $candidatesPerColumn 个候选 ID（按相似度从高到低）。
 3. 同义词必须映射（如"西红柿"→"番茄"，"太空"→"宇宙"，"风琴"→"钢琴"）。
-4. 候选词的语义要尽量贴近，避免硬塞无关词。
-5. 如果你确实只能想到不足 $candidatesPerColumn 个候选，用最相似的那个重复填满。
-6. 只输出严格的 JSON：{"columns":[[$rowShape],[$rowShape],...]}，恰好 $kStoryParserColumns 个数组，每个数组恰好 $candidatesPerColumn 个整数。
-7. 不要输出任何解释、Markdown、前缀、注释。
+4. 如果用户写的是近义词或错记词，要把"用户写出的词"和"最可能的原始记忆词"都放进候选。例如"凳子"应同时考虑"凳子/板凳/长凳/椅子"，"石台"应优先考虑"石坛/石碑/石桥"，"冷风"应考虑"寒风/凉风/冬风"。
+5. 候选词的语义要尽量贴近，避免硬塞无关词。
+6. 如果你确实只能想到不足 $candidatesPerColumn 个候选，用最相似的那个重复填满。
+7. 只输出严格的 JSON：{"columns":[[$rowShape],[$rowShape],...]}，恰好 $kStoryParserColumns 个数组，每个数组恰好 $candidatesPerColumn 个整数。
+8. 不要输出任何解释、Markdown、前缀、注释。
 
 输出格式示例：
 {"columns":[${exampleRows.join(',')}]}
@@ -247,7 +252,9 @@ class StoryParser {
   }
 
   List<List<int>> _matrixFromIds(List<int> ids) {
-    return [for (final id in ids) List<int>.filled(candidatesPerColumn, id)];
+    return [
+      for (final id in ids) [id],
+    ];
   }
 }
 

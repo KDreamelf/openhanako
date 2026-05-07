@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import '../identity/identity.dart';
 import '../shared/hana_home.dart';
@@ -85,22 +86,21 @@ class HanaEngine {
             caller: ({required systemPrompt, required userPrompt, maxTokens}) =>
                 _callGatewayForStory(
                   gateway: gateway,
-                  modelManager: models,
                   systemPrompt: systemPrompt,
                   userPrompt: userPrompt,
-                  maxTokens: maxTokens,
                 ),
           ),
           parser: StoryParser(
             caller: ({required systemPrompt, required userPrompt, maxTokens}) =>
                 _callGatewayForStory(
                   gateway: gateway,
-                  modelManager: models,
                   systemPrompt: systemPrompt,
                   userPrompt: userPrompt,
-                  maxTokens: maxTokens,
                 ),
           ),
+          recoveryAccelerator: Platform.isWindows
+              ? const WindowsRecoveryAccelerator()
+              : null,
         );
     await _restoreSavedIdentity(identityRepo);
     final prefs = PreferencesManager(h);
@@ -272,13 +272,11 @@ Future<void> _restoreSavedIdentity(IdentityRepository repo) async {
 
 Future<String> _callGatewayForStory({
   required HanakoBackendClient gateway,
-  required ModelManager modelManager,
   required String systemPrompt,
   required String userPrompt,
-  int? maxTokens,
 }) async {
   final modelList = await gateway.listPublicStoryModels();
-  final model = _selectStoryModel(modelManager, modelList.models);
+  final model = _selectStoryModel(modelList.models);
   if (model == null) {
     throw StateError('未找到可用于故事生成/恢复的公开模型');
   }
@@ -289,16 +287,11 @@ Future<String> _callGatewayForStory({
       {'role': 'system', 'content': systemPrompt},
       {'role': 'user', 'content': userPrompt},
     ],
-    extra: maxTokens == null ? null : {'max_tokens': maxTokens},
   );
   return _extractAssistantText(response);
 }
 
-String? _selectStoryModel(ModelManager modelManager, List<String> models) {
-  final current = modelManager.currentModelId;
-  if (current != null && current.isNotEmpty && models.contains(current)) {
-    return current;
-  }
+String? _selectStoryModel(List<String> models) {
   if (models.isNotEmpty) return models.first;
   return null;
 }

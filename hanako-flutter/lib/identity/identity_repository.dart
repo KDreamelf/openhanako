@@ -20,6 +20,7 @@ import 'package:meta/meta.dart';
 import 'keypair.dart';
 import 'mnemonic.dart';
 import 'recovery.dart';
+import 'recovery_accelerator.dart';
 import 'secure_keystore.dart';
 import 'story_composer.dart';
 import 'story_parser.dart';
@@ -62,11 +63,13 @@ class IdentityRepository {
     required this.keystore,
     required this.composer,
     required this.parser,
+    this.recoveryAccelerator,
   });
 
   final SecureKeystore keystore;
   final StoryComposer composer;
   final StoryParser parser;
+  final RecoveryAccelerator? recoveryAccelerator;
 
   /// 当前进程内已加载的身份。null 表示尚未持有长期身份私钥。
   HanakoIdentity? _current;
@@ -146,8 +149,8 @@ class IdentityRepository {
   Future<LoginOutcome> verifyCurrentStory({
     required String storyOrWords,
     String? pin,
-    Duration softDeadline = const Duration(seconds: 30),
-    Duration hardDeadline = const Duration(seconds: 30),
+    Duration softDeadline = const Duration(minutes: 5),
+    Duration hardDeadline = const Duration(minutes: 10),
     void Function(int attempted, int elapsedMs, int currentHammingDistance)?
     onProgress,
   }) async {
@@ -172,15 +175,15 @@ class IdentityRepository {
   ///   - 在线恢复：先调 pubkey-service 把"该用户名下所有历史公钥"拉到本地，再传入
   /// [checker] 主 isolate 二次确认回调。worker isolate 命中 hash 后会传回种子，
   ///   主 isolate 用 [checker] 做最终确认（防 hash 碰撞 + 兼容历史公钥轮换语义）。
-  /// [softDeadline] / [hardDeadline] 软 / 硬超时；第一阶段缺省 30 秒。
+  /// [softDeadline] / [hardDeadline] 软 / 硬超时；第一阶段缺省 10 分钟硬预算。
   /// [onProgress] 进度回调，UI 用于显示"已尝试 X 次"。
   Future<LoginOutcome> loginWithStory({
     required String storyOrWords,
     String? pin,
     required Set<String> targetPublicKeyHashes,
     PublicKeyChecker? checker,
-    Duration softDeadline = const Duration(seconds: 30),
-    Duration hardDeadline = const Duration(seconds: 30),
+    Duration softDeadline = const Duration(minutes: 5),
+    Duration hardDeadline = const Duration(minutes: 10),
     void Function(int attempted, int elapsedMs, int currentHammingDistance)?
     onProgress,
   }) async {
@@ -234,9 +237,40 @@ class IdentityRepository {
     }
 
     setKnownPublicKeyHashes(targetPublicKeyHashes);
+    final dMaxHard = _hardHammingLimit(parsed.candidatesPerColumn);
+    final accelerated = await _tryAcceleratedRecovery(
+      parsed: parsed,
+      targetPublicKeyHashes: targetPublicKeyHashes,
+      checker: checker,
+      dMaxHard: dMaxHard,
+      hardDeadline: hardDeadline,
+      onProgress: onProgress,
+    );
+    if (accelerated != null) {
+      if (!accelerated.success) {
+        return LoginOutcome.failed(
+          attempted: accelerated.attempted,
+          timedOut: accelerated.timedOut,
+          elapsedMs: accelerated.elapsedMs,
+          hammingDistance: accelerated.hammingDistance,
+          usedLlm: parsed.usedLlm,
+        );
+      }
+      final identity = await _persistRecoveredSeed(accelerated.seed!, pin: pin);
+      return LoginOutcome.success(
+        identity,
+        attempted: accelerated.attempted,
+        elapsedMs: accelerated.elapsedMs,
+        hammingDistance: accelerated.hammingDistance,
+        usedLlm: parsed.usedLlm,
+      );
+    }
+
     final recovery = Recovery(
       checker: checker ?? ((pub) async => targetPublicKeyHashes.isNotEmpty),
       kPerColumn: parsed.candidatesPerColumn,
+      dMaxSoft: _softHammingLimit(parsed.candidatesPerColumn),
+      dMaxHard: dMaxHard,
       softDeadline: softDeadline,
       hardDeadline: hardDeadline,
       onProgress: onProgress == null
@@ -254,7 +288,83 @@ class IdentityRepository {
         usedLlm: parsed.usedLlm,
       );
     }
-    final seed = outcome.seed!;
+    final identity = await _persistRecoveredSeed(outcome.seed!, pin: pin);
+    return LoginOutcome.success(
+      identity,
+      attempted: outcome.attempted,
+      elapsedMs: outcome.elapsedMs,
+      hammingDistance: outcome.hammingDistance,
+      usedLlm: parsed.usedLlm,
+    );
+  }
+
+  Future<_RecoveredSeedResult?> _tryAcceleratedRecovery({
+    required StoryParseResult parsed,
+    required Set<String> targetPublicKeyHashes,
+    required PublicKeyChecker? checker,
+    required int dMaxHard,
+    required Duration hardDeadline,
+    required void Function(
+      int attempted,
+      int elapsedMs,
+      int currentHammingDistance,
+    )?
+    onProgress,
+  }) async {
+    final accelerator = recoveryAccelerator;
+    if (accelerator == null || targetPublicKeyHashes.isEmpty) {
+      return null;
+    }
+    onProgress?.call(0, 0, 0);
+    try {
+      final outcome = await accelerator.tryRecover(
+        matrix: parsed.columns,
+        targetPublicKeyHashes: targetPublicKeyHashes,
+        dMaxHard: dMaxHard,
+        hardDeadline: hardDeadline,
+      );
+      onProgress?.call(
+        outcome.attempted,
+        outcome.elapsedMs,
+        outcome.hammingDistance,
+      );
+      if (!outcome.found) {
+        return _RecoveredSeedResult.failed(
+          attempted: outcome.attempted,
+          timedOut: outcome.timedOut,
+          elapsedMs: outcome.elapsedMs,
+          hammingDistance: outcome.hammingDistance,
+        );
+      }
+      final ids = outcome.ids;
+      final publicKeyHex = outcome.publicKeyHex;
+      if (ids == null ||
+          ids.length != kMnemonicLength ||
+          publicKeyHex == null) {
+        return null;
+      }
+      if (checker != null && !await checker(publicKeyHex)) {
+        return null;
+      }
+      final seed = tryMnemonicFromIds(ids);
+      if (seed == null) {
+        return null;
+      }
+      return _RecoveredSeedResult.success(
+        seed,
+        attempted: outcome.attempted,
+        elapsedMs: outcome.elapsedMs,
+        hammingDistance: outcome.hammingDistance,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<HanakoIdentity> _persistRecoveredSeed(
+    MnemonicSeed seed, {
+    required String? pin,
+  }) async {
     final keyPair = HanakoKeyPair.fromPrivateKeyBytes(seed.privateKeyBytes);
     await keystore.writeVault(
       IdentityVault(
@@ -266,13 +376,7 @@ class IdentityRepository {
     );
     final identity = HanakoIdentity(keyPair: keyPair, mnemonic: seed);
     _current = identity;
-    return LoginOutcome.success(
-      identity,
-      attempted: outcome.attempted,
-      elapsedMs: outcome.elapsedMs,
-      hammingDistance: outcome.hammingDistance,
-      usedLlm: parsed.usedLlm,
-    );
+    return identity;
   }
 
   /// 注销：清空内存身份并删除本地密钥库（不可逆）。
@@ -291,6 +395,18 @@ class IdentityRepository {
   void debugSetCurrent(HanakoIdentity? id) => _current = id;
 }
 
+int _softHammingLimit(int candidatesPerColumn) {
+  if (candidatesPerColumn <= 1) return 0;
+  if (candidatesPerColumn == 2) return 8;
+  return 3;
+}
+
+int _hardHammingLimit(int candidatesPerColumn) {
+  if (candidatesPerColumn <= 1) return 0;
+  if (candidatesPerColumn == 2) return 12;
+  return 4;
+}
+
 MnemonicSeed? _mnemonicFromVault(IdentityVault vault) {
   final ids = vault.mnemonicIds;
   if (ids == null) return null;
@@ -299,6 +415,30 @@ MnemonicSeed? _mnemonicFromVault(IdentityVault vault) {
     throw StateError('身份 vault 中的助记词 ID 组校验失败');
   }
   return seed;
+}
+
+class _RecoveredSeedResult {
+  _RecoveredSeedResult.success(
+    this.seed, {
+    required this.attempted,
+    required this.elapsedMs,
+    required this.hammingDistance,
+  }) : timedOut = false;
+
+  _RecoveredSeedResult.failed({
+    required this.attempted,
+    required this.timedOut,
+    required this.elapsedMs,
+    required this.hammingDistance,
+  }) : seed = null;
+
+  final MnemonicSeed? seed;
+  final int attempted;
+  final bool timedOut;
+  final int elapsedMs;
+  final int hammingDistance;
+
+  bool get success => seed != null;
 }
 
 /// 登录尝试结果。

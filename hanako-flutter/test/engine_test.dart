@@ -72,6 +72,10 @@ void main() {
         backendClient: backend,
       );
       addTearDown(engine.dispose);
+      await engine.modelManager.replaceAvailableModels(const [
+        'public-story-model',
+        'gpt-5.5',
+      ], preferredModelId: 'gpt-5.5');
 
       final result = await engine.identityRepository.composer.compose(
         hanakoWordlist.take(12).toList(growable: false),
@@ -82,12 +86,16 @@ void main() {
       expect(backend.publicModelListCalls, 1);
       expect(backend.publicChatCalls, 1);
       expect(backend.requestedModels, ['public-story-model']);
+      expect(backend.extras.single, isNull);
       expect(backend.handshakeCalls, 0);
       expect(backend.privateChatCalls, 0);
     });
 
     test('故事恢复解析同样走 root 公开故事接口', () async {
-      final matrix = List.generate(12, (index) => [index, index]);
+      final matrix = List.generate(
+        12,
+        (index) => [index, index, index, index, index],
+      );
       final backend = _PublicStoryBackendClient(
         models: const ['public-story-model'],
         responses: [
@@ -168,6 +176,7 @@ class _PublicStoryBackendClient extends HanakoBackendClient {
   final List<String> models;
   final List<String> responses;
   final requestedModels = <String>[];
+  final extras = <Map<String, dynamic>?>[];
   int publicModelListCalls = 0;
   int publicChatCalls = 0;
   int handshakeCalls = 0;
@@ -186,6 +195,7 @@ class _PublicStoryBackendClient extends HanakoBackendClient {
     Map<String, dynamic>? extra,
   }) async {
     requestedModels.add(model);
+    extras.add(extra);
     final response = responses[publicChatCalls];
     publicChatCalls++;
     return {

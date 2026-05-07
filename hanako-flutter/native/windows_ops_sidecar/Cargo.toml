@@ -6,13 +6,18 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
+k256 = "0.13"
 libloading = "0.8"
 ocrs = "0.12.2"
 ort = { version = "2.0.0-rc.12", features = ["directml"] }
+pbkdf2 = "0.12"
+rayon = "1"
 rten = "0.24.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
 windows = { version = "0.58", features = [
     "Win32_Foundation",

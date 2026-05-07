@@ -204,7 +204,7 @@ void main() {
       expect(result.story, isNot(contains('第十二站')));
     });
 
-    test('StoryParser 默认第一阶段输出 top-2 矩阵', () async {
+    test('StoryParser 默认第一阶段输出 top-5 矩阵', () async {
       final parser = StoryParser(
         caller:
             ({
@@ -212,13 +212,30 @@ void main() {
               required String userPrompt,
               int? maxTokens,
             }) async =>
-                '{"columns":[[1,2],[3,4],[5,6],[7,8],[9,10],[11,12],[13,14],[15,16],[17,18],[19,20],[21,22],[23,24]]}',
+                '{"columns":[[1,2,3,4,5],[6,7,8,9,10],[11,12,13,14,15],[16,17,18,19,20],[21,22,23,24,25],[26,27,28,29,30],[31,32,33,34,35],[36,37,38,39,40],[41,42,43,44,45],[46,47,48,49,50],[51,52,53,54,55],[56,57,58,59,60]]}',
       );
 
       final parsed = await parser.parse('测试故事');
-      expect(parsed.candidatesPerColumn, 2);
+      expect(parsed.candidatesPerColumn, 5);
       expect(parsed.isWellFormed, isTrue);
-      expect(parsed.columns.first, [1, 2]);
+      expect(parsed.columns.first, [1, 2, 3, 4, 5]);
+    });
+
+    test('StoryParser prompt 要求为错记近义词保留 top-5 候选', () {
+      final parser = StoryParser(
+        caller:
+            ({
+              required String systemPrompt,
+              required String userPrompt,
+              int? maxTokens,
+            }) async => throw StateError('不应调用 LLM'),
+      );
+      final prompt = parser.systemPromptForTesting;
+
+      expect(prompt, contains('凳子/板凳'));
+      expect(prompt, contains('石台'));
+      expect(prompt, contains('冷风'));
+      expect(prompt, contains('5 个候选'));
     });
 
     test('StoryParser 直接识别 12 个准确助记词，不调用 LLM', () async {
@@ -236,7 +253,7 @@ void main() {
       final parsed = await parser.parse(mnemonic.words.join('，'));
       expect(parsed.isWellFormed, isTrue);
       expect(parsed.columns.map((column) => column.first).toList(), ids);
-      expect(parsed.columns.every((column) => column[0] == column[1]), isTrue);
+      expect(parsed.columns.every((column) => column.length == 1), isTrue);
     });
 
     test('StoryParser 直接识别故事正文里的 12 个准确助记词，不调用 LLM', () async {
@@ -256,7 +273,7 @@ void main() {
 
       expect(parsed.isWellFormed, isTrue);
       expect(parsed.columns.map((column) => column.first).toList(), ids);
-      expect(parsed.columns.every((column) => column[0] == column[1]), isTrue);
+      expect(parsed.columns.every((column) => column.length == 1), isTrue);
     });
 
     test('StoryParser 故事正文出现额外字典词时回退 LLM 解析', () async {
@@ -278,7 +295,7 @@ void main() {
 
       expect(called, isTrue);
       expect(parsed.isWellFormed, isTrue);
-      expect(parsed.columns.first, [1, 2]);
+      expect(parsed.columns.first.take(2), [1, 2]);
     });
 
     test('StoryParser 故事正文含同义词时保留 LLM 容错解析', () async {
@@ -305,7 +322,7 @@ void main() {
 
       expect(called, isTrue);
       expect(parsed.isWellFormed, isTrue);
-      expect(parsed.columns.first, [1, 2]);
+      expect(parsed.columns.first.take(2), [1, 2]);
     });
 
     test('StoryParser 可为 RFA 深度恢复显式输出 top-3 矩阵', () async {
@@ -502,6 +519,32 @@ void main() {
       expect(outcome.hammingDistance, 0);
     });
 
+    test('loginWithStory → 优先使用恢复加速后端', () async {
+      var targetIds = <int>[];
+      final accelerator = _FakeRecoveryAccelerator(() => targetIds);
+      final repo2 = IdentityRepository(
+        keystore: FileSecureKeystore(hanaHome: tmp),
+        composer: repo.composer,
+        parser: repo.parser,
+        recoveryAccelerator: accelerator,
+      );
+
+      final reg = await repo2.registerNew(pin: '1234');
+      targetIds = reg.words.map((word) => idByWord(word)!).toList();
+
+      final outcome = await repo2.verifyCurrentStory(
+        storyOrWords: reg.words.join(' '),
+        pin: '1234',
+        softDeadline: const Duration(seconds: 5),
+        hardDeadline: const Duration(seconds: 5),
+      );
+
+      expect(accelerator.calls, 1);
+      expect(outcome.success, isTrue);
+      expect(outcome.identity!.publicKeyHash, reg.identity.publicKeyHash);
+      expect(outcome.attempted, 7);
+    });
+
     test('loginWithStory → 确定性恢复失败后回退 LLM 语义解析', () async {
       var llmCalls = 0;
       var targetIds = <int>[];
@@ -567,4 +610,35 @@ void main() {
       expect(reg.identity.mnemonic!.words.length, 12);
     });
   });
+}
+
+class _FakeRecoveryAccelerator implements RecoveryAccelerator {
+  _FakeRecoveryAccelerator(this._ids);
+
+  final List<int> Function() _ids;
+  int calls = 0;
+
+  @override
+  Future<AcceleratedRecoveryOutcome> tryRecover({
+    required List<List<int>> matrix,
+    required Set<String> targetPublicKeyHashes,
+    required int dMaxHard,
+    required Duration hardDeadline,
+    int? workerCount,
+  }) async {
+    calls++;
+    final ids = _ids();
+    final seed = tryMnemonicFromIds(ids)!;
+    final pair = HanakoKeyPair.fromPrivateKeyBytes(seed.privateKeyBytes);
+    return AcceleratedRecoveryOutcome(
+      found: true,
+      ids: ids,
+      publicKeyHex: pair.publicKeyHex,
+      attempted: 7,
+      elapsedMs: 11,
+      hammingDistance: 0,
+      timedOut: false,
+      backend: 'fake',
+    );
+  }
 }

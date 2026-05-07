@@ -1,6 +1,7 @@
 mod capture;
 mod ocr;
 mod protocol;
+mod recovery;
 mod ui_parser;
 mod uia;
 

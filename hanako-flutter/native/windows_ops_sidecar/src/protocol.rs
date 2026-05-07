@@ -1,4 +1,4 @@
-use crate::{capture, ocr, ui_parser, uia};
+use crate::{capture, ocr, recovery, ui_parser, uia};
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -61,6 +61,11 @@ fn handle_request(request: RpcRequest) -> RpcResponse {
                         "status": true,
                         "parse": true,
                         "engine": "rust-yolo-rs+ocrs"
+                    },
+                    "recovery": {
+                        "status": true,
+                        "search": true,
+                        "backend": "rust_cpu"
                     }
                 }
             }),
@@ -78,7 +83,9 @@ fn handle_request(request: RpcRequest) -> RpcResponse {
                     "ocr.status",
                     "ocr.recognize",
                     "ui.status",
-                    "ui.parse_base64"
+                    "ui.parse_base64",
+                    "recovery.status",
+                    "recovery.search"
                 ]
             }),
         ),
@@ -143,6 +150,24 @@ fn handle_request(request: RpcRequest) -> RpcResponse {
                 "ui_parser_not_ready",
                 err.to_string(),
                 Some(json!({"method": "ui.parse_base64"})),
+            ),
+        },
+        "recovery.status" => match recovery::status_request(&request.params) {
+            Ok(result) => ok(request.id, result),
+            Err(err) => error(
+                request.id,
+                "recovery_not_ready",
+                err.to_string(),
+                Some(json!({"method": "recovery.status"})),
+            ),
+        },
+        "recovery.search" => match recovery::search_request(&request.params) {
+            Ok(result) => ok(request.id, result),
+            Err(err) => error(
+                request.id,
+                "recovery_failed",
+                err.to_string(),
+                Some(json!({"method": "recovery.search"})),
             ),
         },
         other => error(

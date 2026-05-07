@@ -290,8 +290,8 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
       final outcome = await repo.loginWithStory(
         storyOrWords: _recoveryText.trim(),
         targetPublicKeyHashes: hashes.toSet(),
-        softDeadline: const Duration(seconds: 30),
-        hardDeadline: const Duration(seconds: 30),
+        softDeadline: const Duration(minutes: 5),
+        hardDeadline: const Duration(minutes: 10),
         onProgress: (attempted, elapsedMs, currentHammingDistance) {
           if (!mounted) return;
           setState(() {

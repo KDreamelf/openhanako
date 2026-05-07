@@ -16,12 +16,14 @@
 //   - 单线程 5 分钟可枚举 ≈ 55,000 次
 //   - 4 核并行 + AOT (~2x) 估算 5 分钟 ≈ 400,000 次
 //
-// 第一阶段参数 (与 story_parser.kStoryParserCandidatesPerColumn = 2 对齐)：
-//   K = 2            每列 top-2 候选
-//   D_max = 12       直接覆盖全空间（2^12 = 4096）
-//   deadline = 30s   本地快速恢复预算
+// Dart fallback 第一阶段参数 (与 story_parser.kStoryParserCandidatesPerColumn = 5 对齐)：
+//   K = 5            每列 top-5 候选，覆盖常见同义词/错记词
+//   D_max = 4        在 10 分钟 UX 预算内优先覆盖小范围记忆误差
+//   deadline = 10min 登录/验证恢复最大等待预算
 //
-// 通过 RFA / 2FA 后可把 K 提高到 3/4，并使用 Windows GPU 后端加速。
+// Windows 生产路径会先尝试 RecoveryAccelerator / windows_ops sidecar；
+// 本文件保留为可移植 Dart fallback。GPU 后端必须在 sidecar 内明确实现并上报，
+// 不能仅靠这条 Dart isolate 路径声称 CUDA 加速。
 //
 // Isolate 并行：
 //   把"d 层枚举"按 (combo_index mod N_workers) 分给 N_workers 个 isolate；

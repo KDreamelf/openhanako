@@ -315,8 +315,8 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
         _textValue((_userConfig ?? const <String, dynamic>{})['name']);
     final outcome = await repo.verifyCurrentStory(
       storyOrWords: story,
-      softDeadline: const Duration(seconds: 30),
-      hardDeadline: const Duration(seconds: 30),
+      softDeadline: const Duration(minutes: 5),
+      hardDeadline: const Duration(minutes: 10),
       onProgress: onProgress,
     );
     ref.read(identityRevisionProvider.notifier).state++;
