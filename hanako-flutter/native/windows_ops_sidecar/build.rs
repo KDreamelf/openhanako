@@ -20,7 +20,7 @@ fn main() {
         .arg("-fatbin")
         .arg("-O3")
         .arg("-Xcompiler=/utf-8")
-        .arg("-gencode=arch=compute_75,code=sm_75")
+        .arg("-arch=all")
         .arg("-o")
         .arg(&fatbin_path)
         .arg(&source);
