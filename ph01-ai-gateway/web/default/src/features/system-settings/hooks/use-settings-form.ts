@@ -4,6 +4,7 @@ import {
   type UseFormProps,
   type FieldValues,
   type FieldNamesMarkedBoolean,
+  type FieldErrors,
 } from 'react-hook-form'
 import i18next from 'i18next'
 import { toast } from 'sonner'
@@ -142,6 +143,31 @@ function expandDotPaths<T extends FieldValues>(
   return result as T
 }
 
+function findFirstErrorMessage(
+  errors: FieldErrors<FieldValues>
+): string | null {
+  for (const error of Object.values(errors)) {
+    if (!error) {
+      continue
+    }
+
+    if (typeof error.message === 'string' && error.message.trim()) {
+      return error.message
+    }
+
+    if (isPlainObject(error)) {
+      const nestedMessage = findFirstErrorMessage(
+        error as FieldErrors<FieldValues>
+      )
+      if (nestedMessage) {
+        return nestedMessage
+      }
+    }
+  }
+
+  return null
+}
+
 /**
  * Unified hook for system settings forms
  *
@@ -252,6 +278,16 @@ export function useSettingsForm<T extends FieldValues>({
     form.reset(data)
   }
 
+  const handleInvalidSubmit = (errors: FieldErrors<T>) => {
+    const message = findFirstErrorMessage(errors as FieldErrors<FieldValues>)
+    const translatedMessage = message ? i18next.t(message) : null
+    toast.error(
+      translatedMessage
+        ? `${i18next.t('Please check the form fields')}: ${translatedMessage}`
+        : i18next.t('Please check the form fields')
+    )
+  }
+
   const handleReset = () => {
     form.reset(defaultValuesRef.current)
     toast.success(i18next.t('Form reset to saved values'))
@@ -260,7 +296,7 @@ export function useSettingsForm<T extends FieldValues>({
   return {
     form,
     // eslint-disable-next-line react-hooks/refs
-    handleSubmit: form.handleSubmit(handleSubmit),
+    handleSubmit: form.handleSubmit(handleSubmit, handleInvalidSubmit),
     handleReset,
     isDirty: form.formState.isDirty,
     isSubmitting: form.formState.isSubmitting,

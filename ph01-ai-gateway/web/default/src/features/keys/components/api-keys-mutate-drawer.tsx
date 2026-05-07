@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, type FieldErrors } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -88,7 +88,7 @@ function ApiKeyFormSection(props: ApiKeyFormSectionProps) {
           <Icon className='size-4 sm:size-5' />
         </div>
         <div className='min-w-0'>
-          <h3 className='text-sm font-medium leading-none'>{props.title}</h3>
+          <h3 className='text-sm leading-none font-medium'>{props.title}</h3>
           <p className='text-muted-foreground mt-0.5 text-xs sm:mt-1'>
             {props.description}
           </p>
@@ -97,6 +97,29 @@ function ApiKeyFormSection(props: ApiKeyFormSectionProps) {
       <div className='space-y-3 p-3 sm:space-y-4 sm:p-4'>{props.children}</div>
     </section>
   )
+}
+
+function getFirstFormErrorMessage(
+  errors: FieldErrors<ApiKeyFormValues>
+): string | null {
+  const pending: unknown[] = Object.values(errors)
+
+  while (pending.length > 0) {
+    const error = pending.shift()
+
+    if (!error || typeof error !== 'object') {
+      continue
+    }
+
+    const record = error as Record<string, unknown>
+    if (typeof record.message === 'string' && record.message.trim()) {
+      return record.message
+    }
+
+    pending.push(...Object.values(record))
+  }
+
+  return null
 }
 
 export function ApiKeysMutateDrawer({
@@ -157,17 +180,25 @@ export function ApiKeysMutateDrawer({
   // Load existing data when updating
   useEffect(() => {
     if (open && isUpdate && currentRow) {
+      form.reset(transformApiKeyToFormDefaults(currentRow))
+
       // For update, fetch fresh data
-      getApiKey(currentRow.id).then((result) => {
-        if (result.success && result.data) {
-          form.reset(transformApiKeyToFormDefaults(result.data))
-        }
-      })
+      getApiKey(currentRow.id)
+        .then((result) => {
+          if (result.success && result.data) {
+            form.reset(transformApiKeyToFormDefaults(result.data))
+          } else {
+            toast.error(result.message || t(ERROR_MESSAGES.LOAD_FAILED))
+          }
+        })
+        .catch(() => {
+          toast.error(t(ERROR_MESSAGES.LOAD_FAILED))
+        })
     } else if (open && !isUpdate) {
       // For create, reset to defaults
       form.reset(getApiKeyFormDefaultValues(defaultUseAutoGroup))
     }
-  }, [open, isUpdate, currentRow, form, defaultUseAutoGroup])
+  }, [open, isUpdate, currentRow, form, defaultUseAutoGroup, t])
 
   const onSubmit = async (data: ApiKeyFormValues) => {
     setIsSubmitting(true)
@@ -224,6 +255,15 @@ export function ApiKeysMutateDrawer({
     }
   }
 
+  const onInvalidSubmit = (errors: FieldErrors<ApiKeyFormValues>) => {
+    const message = getFirstFormErrorMessage(errors)
+    toast.error(
+      message
+        ? `${t('Please check the form fields')}: ${t(message)}`
+        : t('Please check the form fields')
+    )
+  }
+
   const handleSetExpiry = (months: number, days: number, hours: number) => {
     if (months === 0 && days === 0 && hours === 0) {
       form.setValue('expired_time', undefined)
@@ -276,7 +316,7 @@ export function ApiKeysMutateDrawer({
         <Form {...form}>
           <form
             id='api-key-form'
-            onSubmit={form.handleSubmit(onSubmit)}
+            onSubmit={form.handleSubmit(onSubmit, onInvalidSubmit)}
             className='min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-3 py-3 sm:space-y-4 sm:px-4 sm:py-4'
           >
             <ApiKeyFormSection
@@ -292,10 +332,7 @@ export function ApiKeysMutateDrawer({
                     <FormItem>
                       <FormLabel>{t('Name')}</FormLabel>
                       <FormControl>
-                        <Input
-                          {...field}
-                          placeholder={t('Enter a name')}
-                        />
+                        <Input {...field} placeholder={t('Enter a name')} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -501,90 +538,90 @@ export function ApiKeysMutateDrawer({
             </ApiKeyFormSection>
 
             <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
-                <section className='bg-card rounded-lg border'>
-                  <CollapsibleTrigger asChild>
-                    <button
-                      type='button'
-                      className='hover:bg-muted/50 flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors sm:gap-3 sm:px-4 sm:py-3'
-                    >
-                      <div className='bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-lg border sm:size-10'>
-                        <Settings2 className='size-4 sm:size-5' />
-                      </div>
-                      <div className='min-w-0 flex-1'>
-                        <h3 className='text-sm font-medium leading-none'>
-                          {t('Advanced Settings')}
-                        </h3>
-                        <p className='text-muted-foreground mt-1 text-xs'>
-                          {t('Set API key access restrictions')}
-                        </p>
-                      </div>
-                      <ChevronDown
-                        className={cn(
-                          'text-muted-foreground size-4 shrink-0 transition-transform',
-                          advancedOpen && 'rotate-180'
-                        )}
-                      />
-                    </button>
-                  </CollapsibleTrigger>
-                  <CollapsibleContent>
-                    <div className='space-y-3 border-t p-3 sm:space-y-4 sm:p-4'>
-                      <FormField
-                        control={form.control}
-                        name='model_limits'
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>{t('Model Limits')}</FormLabel>
-                            <FormControl>
-                              <MultiSelect
-                                options={models.map((m) => ({
-                                  label: m,
-                                  value: m,
-                                }))}
-                                selected={field.value}
-                                onChange={field.onChange}
-                                placeholder={t(
-                                  'Select models (empty for allow all)'
-                                )}
-                              />
-                            </FormControl>
-                            <FormDescription>
-                              {t('Limit which models can be used with this key')}
-                            </FormDescription>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-
-                      <FormField
-                        control={form.control}
-                        name='allow_ips'
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>
-                              {t('IP Whitelist (supports CIDR)')}
-                            </FormLabel>
-                            <FormControl>
-                              <Textarea
-                                {...field}
-                                className='min-h-20 resize-none'
-                                placeholder={t(
-                                  'One IP per line (empty for no restriction)'
-                                )}
-                                rows={3}
-                              />
-                            </FormControl>
-                            <FormDescription>
-                              {t(
-                                'Do not over-trust this feature. IP may be spoofed. Please use with nginx, CDN and other gateways.'
-                              )}
-                            </FormDescription>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
+              <section className='bg-card rounded-lg border'>
+                <CollapsibleTrigger asChild>
+                  <button
+                    type='button'
+                    className='hover:bg-muted/50 flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors sm:gap-3 sm:px-4 sm:py-3'
+                  >
+                    <div className='bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-lg border sm:size-10'>
+                      <Settings2 className='size-4 sm:size-5' />
                     </div>
-                  </CollapsibleContent>
-                </section>
+                    <div className='min-w-0 flex-1'>
+                      <h3 className='text-sm leading-none font-medium'>
+                        {t('Advanced Settings')}
+                      </h3>
+                      <p className='text-muted-foreground mt-1 text-xs'>
+                        {t('Set API key access restrictions')}
+                      </p>
+                    </div>
+                    <ChevronDown
+                      className={cn(
+                        'text-muted-foreground size-4 shrink-0 transition-transform',
+                        advancedOpen && 'rotate-180'
+                      )}
+                    />
+                  </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <div className='space-y-3 border-t p-3 sm:space-y-4 sm:p-4'>
+                    <FormField
+                      control={form.control}
+                      name='model_limits'
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>{t('Model Limits')}</FormLabel>
+                          <FormControl>
+                            <MultiSelect
+                              options={models.map((m) => ({
+                                label: m,
+                                value: m,
+                              }))}
+                              selected={field.value}
+                              onChange={field.onChange}
+                              placeholder={t(
+                                'Select models (empty for allow all)'
+                              )}
+                            />
+                          </FormControl>
+                          <FormDescription>
+                            {t('Limit which models can be used with this key')}
+                          </FormDescription>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name='allow_ips'
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>
+                            {t('IP Whitelist (supports CIDR)')}
+                          </FormLabel>
+                          <FormControl>
+                            <Textarea
+                              {...field}
+                              className='min-h-20 resize-none'
+                              placeholder={t(
+                                'One IP per line (empty for no restriction)'
+                              )}
+                              rows={3}
+                            />
+                          </FormControl>
+                          <FormDescription>
+                            {t(
+                              'Do not over-trust this feature. IP may be spoofed. Please use with nginx, CDN and other gateways.'
+                            )}
+                          </FormDescription>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+                </CollapsibleContent>
+              </section>
             </Collapsible>
           </form>
         </Form>

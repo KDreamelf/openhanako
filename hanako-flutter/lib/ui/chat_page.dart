@@ -188,14 +188,48 @@ class ChatNotifier extends StateNotifier<ChatState> {
     );
   }
 
-  void stopRetrying() {
-    if (!state.streaming || state.retrying == null) return;
-    _stopRetrying = true;
-    _activeCancelToken?.cancel('用户停止重试');
-    final delayCompleter = _retryDelayCompleter;
-    if (delayCompleter != null && !delayCompleter.isCompleted) {
-      delayCompleter.complete();
+  Future<void> interruptWith(String text) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) {
+      stopRetrying();
+      return;
     }
+    if (!state.streaming) {
+      await send(trimmed);
+      return;
+    }
+
+    if (!_restored) {
+      await restoreLastSession();
+    }
+    final eng = _ref.read(engineProvider);
+    final committedMessages = eng.sessionCoordinator.currentDisplayMessages();
+    final inFlightMessages = [
+      ...committedMessages,
+      RuntimeDisplayMessage.userText(trimmed),
+    ];
+    final generation = ++_sendGeneration;
+    _cancelActiveTurn('用户插话');
+    _stopRetrying = false;
+    state = ChatState(history: inFlightMessages, streaming: true);
+
+    await _sendWithRetries(
+      trimmed,
+      committedMessages: committedMessages,
+      inFlightMessages: inFlightMessages,
+      generation: generation,
+    );
+  }
+
+  void stopRetrying() {
+    if (!state.streaming) return;
+    ++_sendGeneration;
+    _cancelActiveTurn('用户停止当前回复');
+    final eng = _ref.read(engineProvider);
+    state = ChatState(
+      history: eng.sessionCoordinator.currentDisplayMessages(),
+      streaming: false,
+    );
   }
 
   /// 删除指定索引的消息。如果是流中状态，禁止删除。
@@ -285,6 +319,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
         stream,
         committedMessages: committedMessages,
         inFlightMessages: inFlightMessages,
+        generation: generation,
       );
       if (_activeCancelToken == token) {
         _activeCancelToken = null;
@@ -335,12 +370,14 @@ class ChatNotifier extends StateNotifier<ChatState> {
     Stream<LlmEvent> events, {
     required List<RuntimeDisplayMessage> committedMessages,
     required List<RuntimeDisplayMessage> inFlightMessages,
+    required int generation,
   }) async {
     final currentBlocks = <RuntimeDisplayBlock>[];
     final toolCallIndices = <String, int>{};
     var hadProgress = false;
 
     void updateBlocks() {
+      if (generation != _sendGeneration) return;
       state = state.copyWith(
         currentBlocks: List<RuntimeDisplayBlock>.from(currentBlocks),
         retrying: null,
@@ -411,6 +448,9 @@ class ChatNotifier extends StateNotifier<ChatState> {
           case ToolCallEnd():
             break;
           case MessageDone():
+            if (generation != _sendGeneration) {
+              return const _StreamConsumeResult.success();
+            }
             final eng = _ref.read(engineProvider);
             state = ChatState(
               history: eng.sessionCoordinator.currentDisplayMessages(),
@@ -418,6 +458,16 @@ class ChatNotifier extends StateNotifier<ChatState> {
             );
             return const _StreamConsumeResult.success();
           case LlmError(:final message, :final statusCode, :final details):
+            if (generation != _sendGeneration) {
+              return _StreamConsumeResult.failure(
+                _LlmFailure(
+                  message: message,
+                  statusCode: statusCode,
+                  details: details,
+                ),
+                hadProgress: hadProgress,
+              );
+            }
             final eng = _ref.read(engineProvider);
             state = state.copyWith(
               history: eng.sessionCoordinator.currentDisplayMessages(),
@@ -434,6 +484,9 @@ class ChatNotifier extends StateNotifier<ChatState> {
         }
       }
       if (currentBlocks.isNotEmpty) {
+        if (generation != _sendGeneration) {
+          return const _StreamConsumeResult.success();
+        }
         state = ChatState(
           history: [
             ...inFlightMessages,
@@ -446,6 +499,9 @@ class ChatNotifier extends StateNotifier<ChatState> {
         );
         return const _StreamConsumeResult.success();
       } else {
+        if (generation != _sendGeneration) {
+          return const _StreamConsumeResult.success();
+        }
         state = ChatState(history: committedMessages, streaming: false);
         return const _StreamConsumeResult.success();
       }
@@ -500,6 +556,15 @@ class ChatNotifier extends StateNotifier<ChatState> {
       if (_retryDelayCompleter == completer) {
         _retryDelayCompleter = null;
       }
+    }
+  }
+
+  void _cancelActiveTurn(String reason) {
+    _stopRetrying = true;
+    _activeCancelToken?.cancel(reason);
+    final delayCompleter = _retryDelayCompleter;
+    if (delayCompleter != null && !delayCompleter.isCompleted) {
+      delayCompleter.complete();
     }
   }
 
@@ -636,11 +701,8 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       });
     });
 
-    final canSend =
-        !state.streaming &&
-        activeAgent != null &&
-        identity != null &&
-        selectedModel != null;
+    final canUseComposer =
+        activeAgent != null && identity != null && selectedModel != null;
 
     return Scaffold(
       drawer: SessionDrawer(
@@ -727,11 +789,13 @@ class _ChatPageState extends ConsumerState<ChatPage> {
               ),
               _ComposerPanel(
                 controller: _input,
-                canSend: canSend,
+                canSend: canUseComposer,
+                streaming: state.streaming,
                 activeAgent: activeAgent,
                 identityReady: identity != null,
                 selectedModel: selectedModel,
                 onSend: _send,
+                onStop: () => ref.read(chatProvider.notifier).stopRetrying(),
               ),
             ],
           ),
@@ -745,7 +809,12 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     final text = _input.text.trim();
     if (text.isEmpty) return;
     _input.clear();
-    ref.read(chatProvider.notifier).send(text);
+    final notifier = ref.read(chatProvider.notifier);
+    if (ref.read(chatProvider).streaming) {
+      unawaited(notifier.interruptWith(text));
+      return;
+    }
+    unawaited(notifier.send(text));
   }
 
   Future<void> _unlockIdentity() async {
@@ -1103,14 +1172,18 @@ class _ComposerPanel extends StatefulWidget {
     required this.identityReady,
     required this.selectedModel,
     required this.onSend,
+    required this.onStop,
+    required this.streaming,
   });
 
   final TextEditingController controller;
   final bool canSend;
+  final bool streaming;
   final String? activeAgent;
   final bool identityReady;
   final String? selectedModel;
   final VoidCallback onSend;
+  final VoidCallback onStop;
 
   @override
   State<_ComposerPanel> createState() => _ComposerPanelState();
@@ -1124,10 +1197,20 @@ class _ComposerPanelState extends State<_ComposerPanel> {
     super.initState();
     _focusNode = FocusNode(debugLabel: 'chat-composer');
     _focusNode.onKeyEvent = _handleKeyEvent;
+    widget.controller.addListener(_onTextChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ComposerPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller == widget.controller) return;
+    oldWidget.controller.removeListener(_onTextChanged);
+    widget.controller.addListener(_onTextChanged);
   }
 
   @override
   void dispose() {
+    widget.controller.removeListener(_onTextChanged);
     _focusNode.dispose();
     super.dispose();
   }
@@ -1141,7 +1224,15 @@ class _ComposerPanelState extends State<_ComposerPanel> {
         ? '请先创建或解锁子体身份'
         : widget.selectedModel == null
         ? '请先选择模型'
+        : widget.streaming
+        ? '输入插话，或留空停止当前回复'
         : '输入消息，Enter 发送，Shift+Enter 换行';
+    final hasText = widget.controller.text.trim().isNotEmpty;
+    final stopOnly = widget.streaming && !hasText;
+    final buttonEnabled = widget.canSend && (hasText || stopOnly);
+    final buttonIcon = stopOnly ? Icons.stop : Icons.send;
+    final buttonLabel = stopOnly ? '停止' : '发送';
+    final buttonAction = stopOnly ? widget.onStop : widget.onSend;
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -1193,9 +1284,9 @@ class _ComposerPanelState extends State<_ComposerPanel> {
                   SizedBox(
                     height: 50,
                     child: FilledButton.icon(
-                      onPressed: widget.canSend ? widget.onSend : null,
-                      icon: const Icon(Icons.send, size: 18),
-                      label: const Text('发送'),
+                      onPressed: buttonEnabled ? buttonAction : null,
+                      icon: Icon(buttonIcon, size: 18),
+                      label: Text(buttonLabel),
                       style: FilledButton.styleFrom(
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(8),
@@ -1224,10 +1315,16 @@ class _ComposerPanelState extends State<_ComposerPanel> {
 
     if (HardwareKeyboard.instance.isShiftPressed) {
       _insertNewline();
+    } else if (widget.streaming && widget.controller.text.trim().isEmpty) {
+      widget.onStop();
     } else {
       widget.onSend();
     }
     return KeyEventResult.handled;
+  }
+
+  void _onTextChanged() {
+    if (mounted) setState(() {});
   }
 
   void _insertNewline() {

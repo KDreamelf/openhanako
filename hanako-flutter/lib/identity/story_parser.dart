@@ -79,7 +79,9 @@ class StoryParser {
   ///
   /// [storyOrWords] 可以是模糊故事，也可以是用空格 / 逗号分隔的词组。
   Future<StoryParseResult> parse(String storyOrWords) async {
-    final exactWords = _tryParseExactWords(storyOrWords);
+    final exactWords =
+        _tryParseExactWords(storyOrWords) ??
+        _tryParseEmbeddedExactWords(storyOrWords);
     if (exactWords != null) {
       return StoryParseResult(
         columns: exactWords,
@@ -191,12 +193,63 @@ class StoryParser {
         .toList(growable: false);
     if (words.length != kStoryParserColumns) return null;
 
-    final columns = <List<int>>[];
+    final ids = <int>[];
     for (final word in words) {
       final id = idByWord(word);
       if (id == null) return null;
-      columns.add(List<int>.filled(candidatesPerColumn, id));
+      ids.add(id);
     }
-    return columns;
+    return _matrixFromIds(ids);
+  }
+
+  /// 直接粘贴由 StoryComposer 生成的故事时，故事正文中会按顺序出现 12 个
+  /// 精确字典词。这里先做确定性扫描，避免 LLM 在语义匹配阶段改顺序或选近义词。
+  List<List<int>>? _tryParseEmbeddedExactWords(String input) {
+    final text = input.trim();
+    if (text.isEmpty) return null;
+
+    final ids = <int>[];
+    var offset = 0;
+    while (offset < text.length) {
+      _WordEntry? match;
+      for (final entry in _wordEntriesByLength) {
+        if (text.startsWith(entry.word, offset)) {
+          match = entry;
+          break;
+        }
+      }
+      if (match == null) {
+        offset++;
+        continue;
+      }
+      ids.add(match.id);
+      offset += match.word.length;
+      if (ids.length > kStoryParserColumns) return null;
+    }
+
+    if (ids.length != kStoryParserColumns) return null;
+    return _matrixFromIds(ids);
+  }
+
+  List<List<int>> _matrixFromIds(List<int> ids) {
+    return [for (final id in ids) List<int>.filled(candidatesPerColumn, id)];
   }
 }
+
+class _WordEntry {
+  const _WordEntry(this.word, this.id);
+
+  final String word;
+  final int id;
+}
+
+final List<_WordEntry> _wordEntriesByLength = List.unmodifiable(
+  [
+    for (var i = 0; i < hanakoWordlistSize; i++)
+      _WordEntry(hanakoWordlist[i], i),
+  ]..sort((a, b) {
+    final lengthOrder = b.word.length.compareTo(a.word.length);
+    if (lengthOrder != 0) return lengthOrder;
+    return a.id.compareTo(b.id);
+  }),
+);

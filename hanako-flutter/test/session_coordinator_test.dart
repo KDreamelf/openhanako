@@ -155,6 +155,11 @@ void main() {
       RuntimeDisplayTextBlock,
     ]);
     expect((display[1].blocks[1] as RuntimeDisplayToolCallBlock).name, 'ls');
+    expect(
+      (display[1].blocks[1] as RuntimeDisplayToolCallBlock).resultContent,
+      contains('"ok":true'),
+    );
+    expect(display[1].visibleText, '需要工具\n\n旧格式回答');
     final lines = file.readAsLinesSync();
     expect(jsonDecode(lines.first), containsPair('type', 'session'));
     expect(

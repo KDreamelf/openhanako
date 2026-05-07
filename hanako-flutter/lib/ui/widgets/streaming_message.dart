@@ -1,11 +1,8 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
-import 'package:path/path.dart' as p;
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/runtime_session_store.dart';
 import '../../local_tools/local_tools.dart';
@@ -84,188 +81,9 @@ class _DisplayBlockView extends StatelessWidget {
       case RuntimeDisplayThinkingBlock(:final text):
         if (text.trim().isEmpty) return const SizedBox.shrink();
         return _ThinkingBlock(text: text);
-      case RuntimeDisplayToolCallBlock(:final name, :final argsJson):
-        if (name == LocalToolNames.presentFiles) {
-          return _PresentedFilesCard(argsJson: argsJson);
-        }
-        if (name == LocalToolNames.createArtifact) {
-          return _ArtifactCard(argsJson: argsJson);
-        }
-        return _ToolCallChip(name: name, args: argsJson);
+      case RuntimeDisplayToolCallBlock():
+        return _ToolCallCard(block: block as RuntimeDisplayToolCallBlock);
     }
-  }
-}
-
-class _PresentedFilesCard extends StatelessWidget {
-  const _PresentedFilesCard({required this.argsJson});
-
-  final String argsJson;
-
-  @override
-  Widget build(BuildContext context) {
-    final files = _presentedPaths(argsJson);
-    if (files.isEmpty) {
-      return const _ToolCallChip(name: LocalToolNames.presentFiles, args: '{}');
-    }
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(10),
-      decoration: _toolCardDecoration(context),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.folder_open, size: 16),
-              const SizedBox(width: 6),
-              Text('文件', style: Theme.of(context).textTheme.labelMedium),
-            ],
-          ),
-          const SizedBox(height: 8),
-          for (final path in files) _PresentedFileRow(path: path),
-        ],
-      ),
-    );
-  }
-}
-
-class _PresentedFileRow extends StatelessWidget {
-  const _PresentedFileRow({required this.path});
-
-  final String path;
-
-  @override
-  Widget build(BuildContext context) {
-    final file = File(path);
-    final exists = file.existsSync();
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Row(
-        children: [
-          Icon(
-            exists ? Icons.insert_drive_file_outlined : Icons.error_outline,
-            size: 16,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              p.basename(path),
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.copy, size: 16),
-            tooltip: '复制路径',
-            visualDensity: VisualDensity.compact,
-            onPressed: () => Clipboard.setData(ClipboardData(text: path)),
-          ),
-          IconButton(
-            icon: const Icon(Icons.open_in_new, size: 16),
-            tooltip: '打开文件',
-            visualDensity: VisualDensity.compact,
-            onPressed: exists ? () => launchUrl(Uri.file(path)) : null,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ArtifactCard extends StatelessWidget {
-  const _ArtifactCard({required this.argsJson});
-
-  final String argsJson;
-
-  @override
-  Widget build(BuildContext context) {
-    final data = _artifactArgs(argsJson);
-    if (data == null) {
-      return const _ToolCallChip(
-        name: LocalToolNames.createArtifact,
-        args: '{}',
-      );
-    }
-    return InkWell(
-      onTap: () => _showArtifact(context, data),
-      borderRadius: BorderRadius.circular(6),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.all(10),
-        decoration: _toolCardDecoration(context),
-        child: Row(
-          children: [
-            Icon(_artifactIcon(data.type), size: 18),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    data.title,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelLarge,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    data.language == null || data.language!.isEmpty
-                        ? data.type
-                        : '${data.type} · ${data.language}',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
-              ),
-            ),
-            const Icon(Icons.chevron_right, size: 18),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showArtifact(BuildContext context, _ArtifactArgs data) {
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(data.title),
-        content: SizedBox(
-          width: 720,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 560),
-            child: SingleChildScrollView(child: _ArtifactBody(data: data)),
-          ),
-        ),
-        actions: [
-          TextButton.icon(
-            onPressed: () =>
-                Clipboard.setData(ClipboardData(text: data.content)),
-            icon: const Icon(Icons.copy, size: 18),
-            label: const Text('复制'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('关闭'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ArtifactBody extends StatelessWidget {
-  const _ArtifactBody({required this.data});
-
-  final _ArtifactArgs data;
-
-  @override
-  Widget build(BuildContext context) {
-    if (data.type == 'markdown') {
-      return MarkdownBody(data: data.content, selectable: true);
-    }
-    return SelectableText(
-      data.content,
-      style: const TextStyle(fontFamily: 'monospace', height: 1.45),
-    );
   }
 }
 
@@ -294,43 +112,6 @@ class _ThinkingBlock extends StatelessWidget {
   }
 }
 
-List<String> _presentedPaths(String argsJson) {
-  final raw = _decodeArgs(argsJson);
-  if (raw == null) return const [];
-  final out = <String>[];
-  final filepaths = raw['filepaths'];
-  if (filepaths is List) {
-    for (final item in filepaths) {
-      final path = item.toString().trim();
-      if (path.isNotEmpty) out.add(path);
-    }
-  }
-  final single = raw['filePath'];
-  if (single is String && single.trim().isNotEmpty) out.add(single.trim());
-  return out;
-}
-
-_ArtifactArgs? _artifactArgs(String argsJson) {
-  final raw = _decodeArgs(argsJson);
-  if (raw == null) return null;
-  final type = raw['type']?.toString().trim();
-  final title = raw['title']?.toString().trim();
-  final content = raw['content']?.toString();
-  if (type == null ||
-      type.isEmpty ||
-      title == null ||
-      title.isEmpty ||
-      content == null) {
-    return null;
-  }
-  return _ArtifactArgs(
-    type: type,
-    title: title,
-    content: content,
-    language: raw['language']?.toString(),
-  );
-}
-
 Map<String, dynamic>? _decodeArgs(String argsJson) {
   try {
     final raw = jsonDecode(argsJson);
@@ -346,62 +127,255 @@ BoxDecoration _toolCardDecoration(BuildContext context) => BoxDecoration(
   border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
 );
 
-IconData _artifactIcon(String type) => switch (type) {
-  'markdown' => Icons.article_outlined,
-  'html' => Icons.web_asset_outlined,
-  'code' => Icons.code,
-  _ => Icons.widgets_outlined,
-};
+class _ToolCallCard extends StatelessWidget {
+  const _ToolCallCard({required this.block});
 
-class _ArtifactArgs {
-  const _ArtifactArgs({
-    required this.type,
-    required this.title,
-    required this.content,
-    this.language,
-  });
-
-  final String type;
-  final String title;
-  final String content;
-  final String? language;
-}
-
-class _ToolCallChip extends StatelessWidget {
-  const _ToolCallChip({required this.name, required this.args});
-
-  final String name;
-  final String args;
+  final RuntimeDisplayToolCallBlock block;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.build, size: 14),
-              const SizedBox(width: 4),
-              Text(name, style: Theme.of(context).textTheme.labelSmall),
-            ],
-          ),
-          if (args.isNotEmpty && args.trim() != '{}')
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
+    final c = Theme.of(context).colorScheme;
+    final status = _toolStatus(block);
+    return InkWell(
+      onTap: () => _showToolDetails(context, block),
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: _toolCardDecoration(context),
+        child: Row(
+          children: [
+            Icon(Icons.build, size: 16, color: c.onSurfaceVariant),
+            const SizedBox(width: 6),
+            Text(block.name, style: Theme.of(context).textTheme.labelMedium),
+            const SizedBox(width: 8),
+            Expanded(
               child: Text(
-                args,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                _toolSummary(block),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: c.onSurfaceVariant,
+                  fontFamily: 'monospace',
+                ),
               ),
             ),
+            const SizedBox(width: 8),
+            _ToolStatusPill(status: status),
+            const SizedBox(width: 4),
+            Icon(Icons.chevron_right, size: 16, color: c.onSurfaceVariant),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showToolDetails(
+    BuildContext context,
+    RuntimeDisplayToolCallBlock block,
+  ) {
+    final auditText = _toolAuditText(block);
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('工具调用：${block.name}'),
+        content: SizedBox(
+          width: 760,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 620),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _DetailSection(
+                    title: '参数',
+                    content: _prettyJson(block.argsJson),
+                  ),
+                  const SizedBox(height: 14),
+                  _DetailSection(
+                    title: block.resultIsError ? '结果（失败）' : '结果',
+                    content: block.resultContent?.trim().isNotEmpty == true
+                        ? _prettyJson(block.resultContent!)
+                        : '尚未收到执行结果',
+                  ),
+                  if (block.resultDetails != null) ...[
+                    const SizedBox(height: 14),
+                    _DetailSection(
+                      title: '详情',
+                      content: const JsonEncoder.withIndent(
+                        '  ',
+                      ).convert(block.resultDetails),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton.icon(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: auditText));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('工具详情已复制'),
+                  duration: Duration(seconds: 1),
+                ),
+              );
+            },
+            icon: const Icon(Icons.copy, size: 18),
+            label: const Text('复制全部'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
         ],
       ),
     );
   }
+}
+
+class _ToolStatusPill extends StatelessWidget {
+  const _ToolStatusPill({required this.status});
+
+  final _ToolStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = Theme.of(context).colorScheme;
+    final (label, color) = switch (status) {
+      _ToolStatus.running => ('执行中', c.tertiary),
+      _ToolStatus.success => ('完成', c.primary),
+      _ToolStatus.failed => ('失败', c.error),
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withAlpha(24),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withAlpha(96)),
+      ),
+      child: Text(
+        label,
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(color: color),
+      ),
+    );
+  }
+}
+
+class _DetailSection extends StatelessWidget {
+  const _DetailSection({required this.title, required this.content});
+
+  final String title;
+  final String content;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: Theme.of(context).textTheme.labelLarge),
+        const SizedBox(height: 6),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: c.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: c.outlineVariant),
+          ),
+          child: SelectableText(
+            content,
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 12,
+              height: 1.45,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+enum _ToolStatus { running, success, failed }
+
+_ToolStatus _toolStatus(RuntimeDisplayToolCallBlock block) {
+  final content = block.resultContent;
+  if (content == null) return _ToolStatus.running;
+  if (block.resultIsError) return _ToolStatus.failed;
+  final decoded = _decodeArgs(content);
+  if (decoded != null && decoded['ok'] == false) return _ToolStatus.failed;
+  return _ToolStatus.success;
+}
+
+String _toolSummary(RuntimeDisplayToolCallBlock block) {
+  final args = _decodeArgs(block.argsJson);
+  if (args == null || args.isEmpty) return '无参数';
+  if (block.name == LocalToolNames.bash) {
+    return _oneLine(args['command']?.toString() ?? block.argsJson);
+  }
+  const preferredKeys = [
+    'path',
+    'file_path',
+    'filePath',
+    'url',
+    'query',
+    'pattern',
+    'action',
+    'id',
+    'title',
+    'name',
+  ];
+  for (final key in preferredKeys) {
+    final value = args[key];
+    if (value == null) continue;
+    return '$key=${_oneLine(value.toString())}';
+  }
+  final first = args.entries.first;
+  return '${first.key}=${_oneLine(first.value.toString())}';
+}
+
+String _toolAuditText(RuntimeDisplayToolCallBlock block) {
+  final parts = <String>[
+    '工具：${block.name}',
+    '调用 ID：${block.id}',
+    '状态：${switch (_toolStatus(block)) {
+      _ToolStatus.running => '执行中',
+      _ToolStatus.success => '完成',
+      _ToolStatus.failed => '失败',
+    }}',
+    '参数：',
+    _prettyJson(block.argsJson),
+    '结果：',
+    block.resultContent?.trim().isNotEmpty == true
+        ? _prettyJson(block.resultContent!)
+        : '尚未收到执行结果',
+  ];
+  if (block.resultDetails != null) {
+    parts
+      ..add('详情：')
+      ..add(const JsonEncoder.withIndent('  ').convert(block.resultDetails));
+  }
+  return parts.join('\n');
+}
+
+String _prettyJson(String raw) {
+  final text = raw.trim();
+  if (text.isEmpty) return '';
+  try {
+    final decoded = jsonDecode(text);
+    return const JsonEncoder.withIndent('  ').convert(decoded);
+  } catch (_) {
+    return text;
+  }
+}
+
+String _oneLine(String value) {
+  final text = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+  const max = 180;
+  if (text.length <= max) return text;
+  return '${text.substring(0, max)}...';
 }

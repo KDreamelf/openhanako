@@ -167,6 +167,42 @@ void main() {
   });
 
   group('recovery', () {
+    test('StoryComposer prompt 强制固定顺序且禁止可见编号', () {
+      final prompt = StoryComposer.systemPromptForTesting;
+      expect(prompt, contains('严格按用户输入顺序'));
+      expect(prompt, contains('不要输出任何编号'));
+      expect(prompt, contains('连续移动路径'));
+      expect(prompt, contains('不要堆砌额外实体名词'));
+      expect(prompt, isNot(contains('①②③④⑤⑥⑦⑧⑨⑩⑪⑫')));
+    });
+
+    test('StoryComposer 会清理模型误加的顺序标记', () async {
+      final words = hanakoWordlist.take(4).toList(growable: false);
+      final composer = StoryComposer(
+        caller:
+            ({
+              required String systemPrompt,
+              required String userPrompt,
+              int? maxTokens,
+            }) async =>
+                '①${words[0]}撞开②${words[1]}，（3）${words[2]}飞进第十二站${words[3]}',
+      );
+
+      final result = await composer.compose([
+        ...words,
+        ...hanakoWordlist.skip(4).take(8),
+      ]);
+
+      expect(result.story, contains(words[0]));
+      expect(result.story, contains(words[1]));
+      expect(result.story, contains(words[2]));
+      expect(result.story, contains(words[3]));
+      expect(result.story, isNot(contains('①')));
+      expect(result.story, isNot(contains('②')));
+      expect(result.story, isNot(contains('（3）')));
+      expect(result.story, isNot(contains('第十二站')));
+    });
+
     test('StoryParser 默认第一阶段输出 top-2 矩阵', () async {
       final parser = StoryParser(
         caller:
@@ -200,6 +236,75 @@ void main() {
       expect(parsed.isWellFormed, isTrue);
       expect(parsed.columns.map((column) => column.first).toList(), ids);
       expect(parsed.columns.every((column) => column[0] == column[1]), isTrue);
+    });
+
+    test('StoryParser 直接识别故事正文里的 12 个准确助记词，不调用 LLM', () async {
+      final words = hanakoWordlist.take(12).toList(growable: false);
+      final ids = words.map((word) => idByWord(word)!).toList();
+      final parser = StoryParser(
+        caller:
+            ({
+              required String systemPrompt,
+              required String userPrompt,
+              int? maxTokens,
+            }) async => throw StateError('不应调用 LLM'),
+      );
+
+      final story = words.map((word) => '$word突然发光').join('，');
+      final parsed = await parser.parse(story);
+
+      expect(parsed.isWellFormed, isTrue);
+      expect(parsed.columns.map((column) => column.first).toList(), ids);
+      expect(parsed.columns.every((column) => column[0] == column[1]), isTrue);
+    });
+
+    test('StoryParser 故事正文出现额外字典词时回退 LLM 解析', () async {
+      final words = hanakoWordlist.take(13).toList(growable: false);
+      var called = false;
+      final parser = StoryParser(
+        caller:
+            ({
+              required String systemPrompt,
+              required String userPrompt,
+              int? maxTokens,
+            }) async {
+              called = true;
+              return '{"columns":[[1,2],[3,4],[5,6],[7,8],[9,10],[11,12],[13,14],[15,16],[17,18],[19,20],[21,22],[23,24]]}';
+            },
+      );
+
+      final parsed = await parser.parse(words.join('，'));
+
+      expect(called, isTrue);
+      expect(parsed.isWellFormed, isTrue);
+      expect(parsed.columns.first, [1, 2]);
+    });
+
+    test('StoryParser 故事正文含同义词时保留 LLM 容错解析', () async {
+      final words = hanakoWordlist.take(12).toList(growable: false);
+      var called = false;
+      final parser = StoryParser(
+        caller:
+            ({
+              required String systemPrompt,
+              required String userPrompt,
+              int? maxTokens,
+            }) async {
+              called = true;
+              return '{"columns":[[1,2],[3,4],[5,6],[7,8],[9,10],[11,12],[13,14],[15,16],[17,18],[19,20],[21,22],[23,24]]}';
+            },
+      );
+
+      final story = [
+        ...words.take(5),
+        '西红柿',
+        ...words.skip(6),
+      ].map((word) => '$word突然发光').join('，');
+      final parsed = await parser.parse(story);
+
+      expect(called, isTrue);
+      expect(parsed.isWellFormed, isTrue);
+      expect(parsed.columns.first, [1, 2]);
     });
 
     test('StoryParser 可为 RFA 深度恢复显式输出 top-3 矩阵', () async {

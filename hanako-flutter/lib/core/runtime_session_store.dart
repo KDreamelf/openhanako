@@ -230,6 +230,7 @@ class RuntimeSessionStore {
   ) {
     final out = <RuntimeDisplayMessage>[];
     var assistantBlocks = <RuntimeDisplayBlock>[];
+    var toolCallIndices = <String, int>{};
 
     void flushAssistant() {
       if (assistantBlocks.isEmpty) return;
@@ -240,6 +241,7 @@ class RuntimeSessionStore {
         ),
       );
       assistantBlocks = <RuntimeDisplayBlock>[];
+      toolCallIndices = <String, int>{};
     }
 
     for (final message in runtimeMessages) {
@@ -270,13 +272,40 @@ class RuntimeSessionStore {
                       argsJson: block.openAiArgumentsJson,
                     ),
                   );
+                  toolCallIndices[block.id] = assistantBlocks.length - 1;
                 }
               case RuntimeDetailsBlock():
                 break;
             }
           }
         case 'toolResult':
-          break;
+          final toolCallId = message.toolCallId?.trim();
+          if (toolCallId == null || toolCallId.isEmpty) break;
+          final resultContent = message.visibleText;
+          final resultDetails = _detailsFromMessage(message);
+          final existingIndex = toolCallIndices[toolCallId];
+          if (existingIndex != null && existingIndex < assistantBlocks.length) {
+            final existing = assistantBlocks[existingIndex];
+            if (existing is RuntimeDisplayToolCallBlock) {
+              assistantBlocks[existingIndex] = existing.copyWith(
+                resultContent: resultContent,
+                resultIsError: message.isError,
+                resultDetails: resultDetails,
+              );
+              break;
+            }
+          }
+          assistantBlocks.add(
+            RuntimeDisplayToolCallBlock(
+              id: toolCallId,
+              name: message.toolName ?? 'unknown_tool',
+              argsJson: '{}',
+              resultContent: resultContent,
+              resultIsError: message.isError,
+              resultDetails: resultDetails,
+            ),
+          );
+          toolCallIndices[toolCallId] = assistantBlocks.length - 1;
       }
     }
     flushAssistant();
@@ -348,12 +377,25 @@ class RuntimeDisplayMessage {
           if (text.trim().isNotEmpty) parts.add(text.trim());
         case RuntimeDisplayThinkingBlock(:final text):
           if (text.trim().isNotEmpty) parts.add('思考：\n${text.trim()}');
-        case RuntimeDisplayToolCallBlock(:final name, :final argsJson):
-          parts.add(
+        case RuntimeDisplayToolCallBlock(
+          :final name,
+          :final argsJson,
+          :final resultContent,
+          :final resultIsError,
+        ):
+          final lines = <String>[
             argsJson.trim().isEmpty || argsJson.trim() == '{}'
                 ? '工具调用：$name'
-                : '工具调用：$name\n$argsJson',
-          );
+                : '工具调用：$name\n参数：\n$argsJson',
+          ];
+          if (resultContent?.trim().isNotEmpty == true) {
+            lines.add(
+              resultIsError
+                  ? '执行结果（失败）：\n${resultContent!.trim()}'
+                  : '执行结果：\n${resultContent!.trim()}',
+            );
+          }
+          parts.add(lines.join('\n\n'));
       }
     }
     return parts.join('\n\n');
@@ -381,9 +423,37 @@ class RuntimeDisplayToolCallBlock extends RuntimeDisplayBlock {
     required this.id,
     required this.name,
     required this.argsJson,
+    this.resultContent,
+    this.resultIsError = false,
+    this.resultDetails,
   });
 
   final String id;
   final String name;
   final String argsJson;
+  final String? resultContent;
+  final bool resultIsError;
+  final Map<String, dynamic>? resultDetails;
+
+  RuntimeDisplayToolCallBlock copyWith({
+    String? name,
+    String? argsJson,
+    String? resultContent,
+    bool? resultIsError,
+    Map<String, dynamic>? resultDetails,
+  }) => RuntimeDisplayToolCallBlock(
+    id: id,
+    name: name ?? this.name,
+    argsJson: argsJson ?? this.argsJson,
+    resultContent: resultContent ?? this.resultContent,
+    resultIsError: resultIsError ?? this.resultIsError,
+    resultDetails: resultDetails ?? this.resultDetails,
+  );
+}
+
+Map<String, dynamic>? _detailsFromMessage(RuntimeMessage message) {
+  for (final block in message.content) {
+    if (block is RuntimeDetailsBlock) return block.details;
+  }
+  return null;
 }

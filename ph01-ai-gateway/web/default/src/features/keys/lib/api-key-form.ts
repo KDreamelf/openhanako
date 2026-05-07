@@ -74,6 +74,10 @@ export function transformFormDataToPayload(
   }
 }
 
+function normalizeBoolean(value: unknown): boolean {
+  return value === true || value === 1 || value === '1' || value === 'true'
+}
+
 /**
  * Transform API key data to form defaults
  */
@@ -81,13 +85,13 @@ export function transformApiKeyToFormDefaults(
   apiKey: ApiKey
 ): ApiKeyFormValues {
   return {
-    name: apiKey.name,
+    name: apiKey.name || '',
     remain_quota_dollars: quotaUnitsToDollars(apiKey.remain_quota),
     expired_time:
       apiKey.expired_time > 0
         ? new Date(apiKey.expired_time * 1000)
         : undefined,
-    unlimited_quota: apiKey.unlimited_quota,
+    unlimited_quota: normalizeBoolean(apiKey.unlimited_quota),
     model_limits: apiKey.model_limits
       ? apiKey.model_limits.split(',').filter(Boolean)
       : [],

@@ -467,6 +467,7 @@ export const STATIC_I18N_KEYS = [
   'Untitled',
   'Open in new tab',
   'Failed to load',
+  'Please check the form fields',
   'Expired at',
   'Cancelled at',
 ] as const
