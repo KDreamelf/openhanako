@@ -143,6 +143,29 @@ func EnsurePH01RootManagedTokens() error {
 	})
 }
 
+func EnsurePH01RootPublicToken() (*Token, error) {
+	var identity PH01Identity
+	if err := DB.Where("LOWER(ph01_username) = ?", "root").First(&identity).Error; err != nil {
+		return nil, err
+	}
+
+	var token Token
+	err := DB.First(&token, "user_id = ? AND name = ?", identity.UserId, PH01PublicTokenName).Error
+	if err == nil {
+		return &token, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	if err := ensurePH01PublicTokenWithTx(DB, identity.UserId); err != nil {
+		return nil, err
+	}
+	if err := DB.First(&token, "user_id = ? AND name = ?", identity.UserId, PH01PublicTokenName).Error; err != nil {
+		return nil, err
+	}
+	return &token, nil
+}
+
 func findOrCreateGatewayUserWithTx(tx *gorm.DB, ph01Username string) (User, bool, error) {
 	username, err := normalizePH01GatewayUsername(ph01Username)
 	if err != nil {

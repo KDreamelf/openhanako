@@ -37,8 +37,10 @@ class MemoryCompiler {
 
   File _file(String name) => File(p.join(memoryDir.path, name));
 
-  Future<CompileStatus> compileToday(
-      {DateTime? now, bool daily = false}) async {
+  Future<CompileStatus> compileToday({
+    DateTime? now,
+    bool daily = false,
+  }) async {
     final base = now ?? DateTime.now();
     final cutoff = base.subtract(const Duration(hours: 24));
     final input = _gatherSummaries(after: cutoff);
@@ -68,8 +70,7 @@ class MemoryCompiler {
       output: _file('week.md'),
       input: input,
       cacheKey: 'week',
-      systemPrompt:
-          '将本周的对话摘要整合成一段概要（500字以内）。突出趋势和持续主题，保留具体决策点。直接输出概要文本。',
+      systemPrompt: '将本周的对话摘要整合成一段概要（500字以内）。突出趋势和持续主题，保留具体决策点。直接输出概要文本。',
       maxTokens: _weekBudget,
     );
   }
@@ -81,16 +82,19 @@ class MemoryCompiler {
     final oldLong = _file('longterm.md').existsSync()
         ? _file('longterm.md').readAsStringSync()
         : '';
-    if (week.trim().isEmpty && oldLong.trim().isEmpty) {
+    if (week.trim().isEmpty) {
+      if (oldLong.trim().isNotEmpty) return CompileStatus.cached;
       _atomicWrite(_file('longterm.md'), '');
       return CompileStatus.empty;
     }
+    final fingerprint = _md5(week.trim());
+    if (_cacheMatches('longterm', fingerprint)) return CompileStatus.cached;
     return _compile(
       output: _file('longterm.md'),
       input: '## 旧长期记忆\n$oldLong\n\n## 本周\n$week',
       cacheKey: 'longterm',
-      systemPrompt:
-          '将"旧长期记忆"与"本周"整合更新为新的长期记忆（300字以内）。保留稳定的人物特征、关系、关键事件。直接输出。',
+      cacheFingerprint: fingerprint,
+      systemPrompt: '将"旧长期记忆"与"本周"整合更新为新的长期记忆（300字以内）。保留稳定的人物特征、关系、关键事件。直接输出。',
       maxTokens: _longtermBudget,
     );
   }
@@ -101,17 +105,27 @@ class MemoryCompiler {
     final base = now ?? DateTime.now();
     final cutoff = base.subtract(const Duration(days: 30));
     final all = _gatherSummaries(after: cutoff);
+    final prevFacts = _file('facts.md').existsSync()
+        ? _file('facts.md').readAsStringSync().trim()
+        : '';
     if (all.isEmpty) {
-      _atomicWrite(_file('facts.md'), '');
+      if (prevFacts.isEmpty) _atomicWrite(_file('facts.md'), '');
       return CompileStatus.empty;
     }
     final factsBlocks = <String>[];
     final factsRe = RegExp(r'## 重要事实\s*\n([\s\S]*?)(?=\n## |\Z)');
     for (final m in factsRe.allMatches(all)) {
       final block = m.group(1)?.trim();
-      if (block != null && block.isNotEmpty) factsBlocks.add(block);
+      if (block != null && block.isNotEmpty && block != '无') {
+        factsBlocks.add(block);
+      }
     }
-    final combined = factsBlocks.join('\n').trim();
+    if (factsBlocks.isEmpty) {
+      if (prevFacts.isEmpty) _atomicWrite(_file('facts.md'), '');
+      return CompileStatus.empty;
+    }
+    final newFacts = factsBlocks.join('\n').trim();
+    final combined = prevFacts.isEmpty ? newFacts : '$prevFacts\n$newFacts';
 
     final fingerprint = _md5(combined);
     if (_cacheMatches('facts', fingerprint)) return CompileStatus.cached;
@@ -135,12 +149,13 @@ class MemoryCompiler {
   Future<void> assemble() async {
     String read(String name) {
       final f = _file(name);
-      if (!f.existsSync()) return '（暂无记忆）';
+      if (!f.existsSync()) return '（暂无）';
       final s = f.readAsStringSync().trim();
-      return s.isEmpty ? '（暂无记忆）' : s;
+      return s.isEmpty ? '（暂无）' : s;
     }
 
-    final out = '''
+    final out =
+        '''
 ## 重要事实
 ${read('facts.md')}
 
@@ -161,8 +176,7 @@ ${read('longterm.md')}
   String _gatherSummaries({required DateTime after}) {
     if (!summaries.summariesDir.existsSync()) return '';
     final pieces = <String>[];
-    for (final f
-        in summaries.summariesDir.listSync().whereType<File>()) {
+    for (final f in summaries.summariesDir.listSync().whereType<File>()) {
       if (!f.path.endsWith('.json')) continue;
       try {
         final j = jsonDecode(f.readAsStringSync()) as Map<String, dynamic>;
@@ -220,8 +234,7 @@ ${read('longterm.md')}
     errFile.writeAsStringSync('$line\n', mode: FileMode.append, flush: true);
   }
 
-  String _md5(String s) =>
-      crypto.md5.convert(utf8.encode(s)).toString();
+  String _md5(String s) => crypto.md5.convert(utf8.encode(s)).toString();
 
   File _cacheFile() => _file('.compile-cache.json');
 

@@ -4,9 +4,8 @@ import '../shared/hana_home.dart';
 /// ChannelManager 与 legacy core/channel-manager.js 对齐：
 /// 频道 CRUD + 成员管理 + 消息追加 + 退群清理。
 ///
-/// 注：legacy 的 ChannelTriage / Hub 自动判断回复机制**不在 Flutter 分支移植范围**。
-/// 频道在 Flutter 端定位为「人 ↔ agent」单线对话的存档/记录形态，自动 multi-agent
-/// triage 由调用方 / 外部 hub 工具自行实现。
+/// 注：频道文件读写仍保持轻量；自动 multi-agent triage 由协作运行时编排，
+/// 避免 ChannelStore 直接依赖 LLM/runtime。
 class ChannelManager {
   ChannelManager(HanaHome home) : store = ChannelStore(home.channelsDir);
 
@@ -44,13 +43,18 @@ class ChannelManager {
 
   /// 追加消息（system / agent / user 都用这个）。
   Future<void> appendMessage(
-      String channelId, String sender, String body) async {
+    String channelId,
+    String sender,
+    String body,
+  ) async {
     store.appendMessage(channelId, sender, body);
   }
 
   /// 读取最近消息。
-  Future<List<ChannelMessage>> readRecent(String channelId,
-      {int limit = 50}) async {
+  Future<List<ChannelMessage>> readRecent(
+    String channelId, {
+    int limit = 50,
+  }) async {
     return store.readRecent(channelId, limit: limit);
   }
 }

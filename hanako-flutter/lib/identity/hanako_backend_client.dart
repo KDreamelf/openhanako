@@ -299,6 +299,26 @@ class HanakoBackendClient {
     );
   }
 
+  /// 读取注册/恢复期公开故事流程允许使用的模型列表。
+  ///
+  /// 该接口走 AI 网关的 PH01 root public carrier，不依赖当前身份，也不会覆盖
+  /// 普通聊天的 ECDH [_channel]。
+  Future<GatewayModelList> listPublicStoryModels() async {
+    try {
+      final resp = await _dio.getUri<Map<String, dynamic>>(
+        Uri.parse('$aiBaseUrl/api/v1/public/story/models'),
+        options: Options(contentType: Headers.jsonContentType),
+      );
+      final body = resp.data!;
+      return GatewayModelList(
+        models: (body['models'] as List?)?.cast<String>() ?? const <String>[],
+        tier: body['tier'] as String?,
+      );
+    } on DioException catch (e) {
+      throw await HanakoBackendException.fromDio(e, action: '获取公开故事模型列表');
+    }
+  }
+
   /// 非流式 LLM 调用（解密响应整体返回）。
   Future<Map<String, dynamic>> chat({
     required String model,
@@ -345,6 +365,32 @@ class HanakoBackendClient {
       tagHex: env['tag'] as String,
     );
     return jsonDecode(utf8.decode(pt)) as Map<String, dynamic>;
+  }
+
+  /// 注册/恢复期公开故事 LLM 调用。
+  ///
+  /// 只用于助记词故事生成与故事解析；服务端会使用 root 用户的
+  /// `PH01 Public Key` 托管配置执行调用。
+  Future<Map<String, dynamic>> publicStoryChat({
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    Map<String, dynamic>? extra,
+  }) async {
+    try {
+      final resp = await _dio.postUri<Map<String, dynamic>>(
+        Uri.parse('$aiBaseUrl/api/v1/public/story/chat'),
+        data: _chatPayload(
+          model: model,
+          messages: messages,
+          stream: false,
+          extra: extra,
+        ),
+        options: Options(contentType: Headers.jsonContentType),
+      );
+      return resp.data!;
+    } on DioException catch (e) {
+      throw await HanakoBackendException.fromDio(e, action: '调用公开故事模型');
+    }
   }
 
   /// 流式 LLM 调用：只返回正文文本，兼容旧调用点。

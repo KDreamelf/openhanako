@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 /// 子目录：
 ///   user/preferences.json
 ///   agents/{id}/{config.yaml, identity.md, ishiki.md, sessions/, memory/, ...}
+///   desk/{cron-jobs.json, cron-runs/}
 ///   models.json, auth.json
 ///   channels/{id}.md
 ///   skills/
@@ -53,12 +54,20 @@ class HanaHome {
   Directory get userDir => _ensure(p.join(root.path, 'user'));
   Directory get agentsDir => _ensure(p.join(root.path, 'agents'));
   Directory get channelsDir => _ensure(p.join(root.path, 'channels'));
+  Directory get deskDir => _ensure(p.join(root.path, 'desk'));
   Directory get skillsDir => _ensure(p.join(root.path, 'skills'));
   Directory get logsDir => _ensure(p.join(root.path, 'logs'));
 
   File get preferencesFile => File(p.join(userDir.path, 'preferences.json'));
   File get modelsJson => File(p.join(root.path, 'models.json'));
   File get authJson => File(p.join(root.path, 'auth.json'));
+  File get cronJobsFile => File(p.join(deskDir.path, 'cron-jobs.json'));
+  Directory get cronRunsDir => _ensure(p.join(deskDir.path, 'cron-runs'));
+  File get heartbeatConfigFile =>
+      File(p.join(deskDir.path, 'heartbeat-config.json'));
+  File get jianRegistryFile => File(p.join(deskDir.path, 'jian-registry.json'));
+  File get activityFile => File(p.join(deskDir.path, 'activities.json'));
+  Directory get activityDir => _ensure(p.join(deskDir.path, 'activity'));
 
   Directory agentDir(String agentId) =>
       _ensure(p.join(agentsDir.path, agentId));
@@ -71,6 +80,9 @@ class HanaHome {
 
   Directory agentMemory(String agentId) =>
       _ensure(p.join(agentDir(agentId).path, 'memory'));
+
+  Directory agentDesk(String agentId) =>
+      _ensure(p.join(agentDir(agentId).path, 'desk'));
 
   File agentFactsDb(String agentId) =>
       File(p.join(agentMemory(agentId).path, 'facts.db'));

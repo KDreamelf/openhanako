@@ -9,6 +9,7 @@ import 'package:hanako/core/model_manager.dart';
 import 'package:hanako/core/preferences_manager.dart';
 import 'package:hanako/core/runtime_session_store.dart';
 import 'package:hanako/core/session_coordinator.dart';
+import 'package:hanako/core/skill_manager.dart';
 import 'package:hanako/identity/identity.dart';
 import 'package:hanako/llm/provider.dart';
 import 'package:hanako/shared/hana_home.dart';
@@ -85,6 +86,24 @@ void main() {
       '旧会话',
       '旧回复',
     ]);
+  });
+
+  test('新会话默认工作目录收敛到当前 Agent desk', () async {
+    final coordinator = _coordinator(
+      home: home,
+      agents: agents,
+      models: models,
+      config: config,
+      identityRepository: identityRepository,
+    );
+
+    final session = await coordinator.createSession();
+
+    expect(session.cwd, home.agentDesk('agent_01').path);
+    final header =
+        jsonDecode(File(session.path).readAsLinesSync().first)
+            as Map<String, dynamic>;
+    expect(header['cwd'], session.cwd);
   });
 
   test('读取旧扁平 JSONL 时迁移为 entry 格式', () async {
@@ -212,6 +231,68 @@ void main() {
     expect(request.where((msg) => msg['role'] == 'tool'), hasLength(1));
     expect(request.last['role'], 'user');
     expect(request.last['content'], '继续');
+  });
+
+  test('已启用 Skill 会注入 system prompt，禁用后移除', () async {
+    final skills = SkillManager(home);
+    await skills.initialize();
+    await skills.installFromContent(
+      'agent_01',
+      skillContent: '''---
+name: prompt-skill
+description: 用于检查 prompt 注入。
+---
+
+完整说明。
+''',
+      enable: true,
+    );
+    await _prepareOnlineState(
+      identityRepository: identityRepository,
+      models: models,
+    );
+    final enabledBackend = _FakeBackendClient([
+      [const TextDelta('ok')],
+    ]);
+    final enabledCoordinator = _coordinator(
+      home: home,
+      agents: agents,
+      models: models,
+      config: config,
+      identityRepository: identityRepository,
+      backendClient: enabledBackend,
+      skillManager: skills,
+    );
+    await enabledCoordinator.createSession(cwd: tmp.path);
+
+    await _drain(enabledCoordinator.prompt('检查 skill'));
+
+    expect(
+      enabledBackend.requests.single.first['content'],
+      contains('prompt-skill'),
+    );
+
+    await skills.setSkillEnabled('agent_01', 'prompt-skill', false);
+    final disabledBackend = _FakeBackendClient([
+      [const TextDelta('ok')],
+    ]);
+    final disabledCoordinator = _coordinator(
+      home: home,
+      agents: agents,
+      models: models,
+      config: config,
+      identityRepository: identityRepository,
+      backendClient: disabledBackend,
+      skillManager: skills,
+    );
+    await disabledCoordinator.createSession(cwd: tmp.path);
+
+    await _drain(disabledCoordinator.prompt('再次检查'));
+
+    expect(
+      disabledBackend.requests.single.first['content'],
+      isNot(contains('prompt-skill')),
+    );
   });
 
   test('工具执行失败作为 tool result 继续交给模型', () async {
@@ -375,6 +456,7 @@ SessionCoordinator _coordinator({
   required ConfigCoordinator config,
   required IdentityRepository identityRepository,
   HanakoBackendClient? backendClient,
+  SkillManager? skillManager,
 }) {
   return SessionCoordinator(
     home: home,
@@ -383,6 +465,7 @@ SessionCoordinator _coordinator({
     config: config,
     identityRepository: identityRepository,
     backendClient: backendClient ?? HanakoBackendClient(),
+    skillManager: skillManager,
   );
 }
 

@@ -4,6 +4,11 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../core/browser_manager.dart';
+import '../core/channel_manager.dart';
+import '../core/collaboration_manager.dart';
+import '../core/cron_store.dart';
+import '../core/skill_manager.dart';
 import '../llm/provider.dart';
 
 class LocalToolRegistry {
@@ -30,6 +35,13 @@ class LocalToolRegistry {
     Map<String, dynamic> arguments, {
     String? cwd,
     String? agentDir,
+    String? activeAgentId,
+    CronStore? cronStore,
+    Future<CronRunRecord> Function(String jobId)? runCronNow,
+    SkillManager? skillManager,
+    BrowserManager? browserManager,
+    ChannelManager? channelManager,
+    CollaborationManager? collaborationManager,
   }) async {
     try {
       final result = switch (name) {
@@ -53,6 +65,7 @@ class LocalToolRegistry {
         LocalToolNames.searchMemory => await _searchMemory(arguments, agentDir),
         LocalToolNames.pinMemory => await _pinMemory(arguments, agentDir),
         LocalToolNames.unpinMemory => await _unpinMemory(arguments, agentDir),
+        LocalToolNames.listPinnedMemory => await _listPinnedMemory(agentDir),
         LocalToolNames.recallExperience => await _recallExperience(
           arguments,
           agentDir,
@@ -61,17 +74,42 @@ class LocalToolRegistry {
           arguments,
           agentDir,
         ),
+        LocalToolNames.cron => await _cron(
+          arguments,
+          cronStore: cronStore,
+          activeAgentId: activeAgentId,
+          runCronNow: runCronNow,
+        ),
         LocalToolNames.presentFiles => _presentFiles(arguments),
         LocalToolNames.createArtifact => _createArtifact(arguments),
         LocalToolNames.notify => _notify(arguments),
-        LocalToolNames.cron ||
-        LocalToolNames.channel ||
-        LocalToolNames.askAgent ||
-        LocalToolNames.dm ||
-        LocalToolNames.messageAgent ||
-        LocalToolNames.browser ||
-        LocalToolNames.installSkill ||
-        LocalToolNames.delegate => _notAvailableYet(name),
+        LocalToolNames.browser => await _browser(arguments, browserManager),
+        LocalToolNames.channel => await _channel(
+          arguments,
+          channelManager,
+          collaborationManager,
+          activeAgentId,
+        ),
+        LocalToolNames.askAgent => await _askAgent(
+          arguments,
+          collaborationManager,
+          activeAgentId,
+        ),
+        LocalToolNames.dm || LocalToolNames.messageAgent => await _dm(
+          arguments,
+          collaborationManager,
+          activeAgentId,
+        ),
+        LocalToolNames.delegate => await _delegate(
+          arguments,
+          collaborationManager,
+          activeAgentId,
+        ),
+        LocalToolNames.installSkill => await _installSkill(
+          arguments,
+          activeAgentId: activeAgentId,
+          skillManager: skillManager,
+        ),
         _ => <String, dynamic>{
           'ok': false,
           'error': 'unknown_tool',
@@ -495,7 +533,7 @@ class LocalToolRegistry {
     String? agentDir,
   ) async {
     final dir = _requireAgentDir(agentDir);
-    final content = _requiredString(args, 'content');
+    final content = _scrubPii(_requiredString(args, 'content'));
     final file = File(p.join(dir, 'pinned.md'));
     file.parent.createSync(recursive: true);
     final existing = file.existsSync() ? await file.readAsString() : '';
@@ -513,14 +551,14 @@ class LocalToolRegistry {
     String? agentDir,
   ) async {
     final dir = _requireAgentDir(agentDir);
-    final keyword = _requiredString(args, 'keyword');
+    final keyword = _requiredString(args, 'keyword').toLowerCase();
     final file = File(p.join(dir, 'pinned.md'));
     if (!file.existsSync()) return {'ok': true, 'removed': 0};
     final lines = await file.readAsLines();
     final remaining = <String>[];
     var removed = 0;
     for (final line in lines) {
-      if (line.contains(keyword)) {
+      if (line.toLowerCase().contains(keyword)) {
         removed++;
       } else {
         remaining.add(line);
@@ -528,6 +566,24 @@ class LocalToolRegistry {
     }
     await file.writeAsString('${remaining.join('\n')}\n');
     return {'ok': true, 'removed': removed};
+  }
+
+  static Future<Map<String, dynamic>> _listPinnedMemory(
+    String? agentDir,
+  ) async {
+    final dir = _requireAgentDir(agentDir);
+    final file = File(p.join(dir, 'pinned.md'));
+    if (!file.existsSync()) {
+      return {'ok': true, 'path': file.path, 'items': const <String>[]};
+    }
+    final lines = await file.readAsLines();
+    final items = lines
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .map((line) => line.replaceFirst(RegExp(r'^-\s*'), '').trim())
+        .where((line) => line.isNotEmpty)
+        .toList(growable: false);
+    return {'ok': true, 'path': file.path, 'items': items};
   }
 
   static Future<Map<String, dynamic>> _recallExperience(
@@ -617,8 +673,317 @@ class LocalToolRegistry {
         'content': content,
         'language': args['language'],
       },
-      'message': '当前 Flutter 客户端尚未接入 artifact 预览面板，已将内容作为工具结果返回。',
+      'message': '已创建 Artifact，客户端会在会话中显示预览入口。',
     };
+  }
+
+  static Future<Map<String, dynamic>> _installSkill(
+    Map<String, dynamic> args, {
+    required String? activeAgentId,
+    required SkillManager? skillManager,
+  }) async {
+    final manager = skillManager;
+    final agentId = activeAgentId?.trim();
+    if (manager == null || agentId == null || agentId.isEmpty) {
+      return {
+        'ok': false,
+        'error': 'not_configured',
+        'message': 'Skill 管理器或当前 Agent 尚未初始化。',
+      };
+    }
+    final enable = args['enabled'] is bool ? args['enabled'] as bool : true;
+    final content = _optionalString(args, 'skill_content');
+    final sourcePath =
+        _optionalString(args, 'source_path') ?? _optionalString(args, 'path');
+    final githubUrl = _optionalString(args, 'github_url');
+    try {
+      final skill = content != null
+          ? await manager.installFromContent(
+              agentId,
+              skillContent: content,
+              skillName: _optionalString(args, 'skill_name'),
+              enable: enable,
+            )
+          : sourcePath != null
+          ? await manager.installFromPath(agentId, sourcePath, enable: enable)
+          : throw ArgumentError(
+              githubUrl == null
+                  ? '需要 skill_content 或 source_path 参数'
+                  : '当前 Flutter 客户端暂未接入 GitHub 拉取，请改用 source_path 或 skill_content',
+            );
+      return {
+        'ok': true,
+        'skill': skill.toJson(),
+        'enabled': manager.enabledSkillNames(agentId),
+        'message': '已安装 Skill：${skill.name}${enable ? "（已启用）" : ""}',
+      };
+    } catch (e) {
+      return {'ok': false, 'error': 'invalid_skill', 'message': e.toString()};
+    }
+  }
+
+  static Future<Map<String, dynamic>> _cron(
+    Map<String, dynamic> args, {
+    required CronStore? cronStore,
+    required String? activeAgentId,
+    required Future<CronRunRecord> Function(String jobId)? runCronNow,
+  }) async {
+    final store = cronStore;
+    if (store == null) {
+      return {
+        'ok': false,
+        'tool': LocalToolNames.cron,
+        'error': 'not_configured',
+        'message': 'Cron 运行时尚未初始化。',
+      };
+    }
+    final action = _requiredString(args, 'action').replaceAll('_', '-');
+    switch (action) {
+      case 'list':
+        final jobs = store.listJobs();
+        return {
+          'ok': true,
+          'jobs': jobs.map(_cronJobJsonWithHistory).toList(growable: false),
+          'message': jobs.isEmpty
+              ? '没有定时任务'
+              : jobs
+                    .map((job) {
+                      final status = job.enabled ? '✓' : '✗';
+                      final next =
+                          job.nextRunAt?.toLocal().toIso8601String() ?? '无';
+                      return '[$status] ${job.id}: ${job.label} (${job.type}, 下次: $next)';
+                    })
+                    .join('\n'),
+        };
+      case 'add':
+        final type = _requiredString(args, 'type');
+        final schedule = args['schedule'];
+        final prompt = _requiredString(args, 'prompt');
+        if (schedule == null || schedule.toString().trim().isEmpty) {
+          return {
+            'ok': false,
+            'error': 'missing_schedule',
+            'message': 'add 需要 schedule 参数。',
+          };
+        }
+        final agentId =
+            _optionalString(args, 'agent') ??
+            _optionalString(args, 'agentId') ??
+            activeAgentId;
+        if (agentId == null || agentId.trim().isEmpty) {
+          return {
+            'ok': false,
+            'error': 'missing_agent',
+            'message': 'add 需要当前 Agent 或显式 agent 参数。',
+          };
+        }
+        final everyMs = type == 'every'
+            ? int.tryParse(schedule.toString().trim())
+            : null;
+        if (type == 'every' && (everyMs == null || everyMs <= 0)) {
+          return {
+            'ok': false,
+            'error': 'invalid_schedule',
+            'message': 'every 类型的 schedule 必须是正整数毫秒。',
+          };
+        }
+        final job = store.addJob(
+          agentId: agentId,
+          type: type,
+          schedule: type == 'every' ? everyMs! : schedule.toString(),
+          prompt: prompt,
+          label: _optionalString(args, 'label') ?? '',
+          model: _optionalString(args, 'model') ?? '',
+        );
+        return {
+          'ok': true,
+          'action': 'added',
+          'job': job.toJson(),
+          'jobs': store.listJobs().map((job) => job.toJson()).toList(),
+          'message': '已创建定时任务：${job.label} (${job.id})',
+        };
+      case 'remove':
+        final id = _requiredString(args, 'id');
+        final removed = store.removeJob(id);
+        return {
+          'ok': removed,
+          'action': 'remove',
+          'id': id,
+          'jobs': store.listJobs().map((job) => job.toJson()).toList(),
+          'message': removed ? '已删除任务 $id' : '任务 $id 不存在',
+          if (!removed) 'error': 'not_found',
+        };
+      case 'toggle':
+        final id = _requiredString(args, 'id');
+        final enabled = args['enabled'] is bool
+            ? args['enabled'] as bool
+            : null;
+        final job = store.toggleJob(id, enabled: enabled);
+        if (job == null) {
+          return {
+            'ok': false,
+            'action': 'toggle',
+            'id': id,
+            'error': 'not_found',
+            'message': '任务 $id 不存在',
+          };
+        }
+        return {
+          'ok': true,
+          'action': 'toggle',
+          'job': job.toJson(),
+          'jobs': store.listJobs().map((job) => job.toJson()).toList(),
+          'message': '任务 ${job.id} ${job.enabled ? "已启用" : "已禁用"}',
+        };
+      case 'run-now':
+        final run = runCronNow;
+        if (run == null) {
+          return {
+            'ok': false,
+            'error': 'not_configured',
+            'message': 'Cron 调度器尚未接入 run-now。',
+          };
+        }
+        final id = _requiredString(args, 'id');
+        final record = await run(id);
+        return {
+          'ok': record.status == 'success',
+          'action': 'run-now',
+          'run': record.toJson(),
+          'message': record.status == 'success'
+              ? '任务 $id 已立即执行'
+              : '任务 $id 执行结果：${record.status}',
+        };
+      case 'history':
+        final id = _requiredString(args, 'id');
+        final limit = _boundedInt(args['limit'], 20, 1, 100);
+        return {
+          'ok': true,
+          'action': 'history',
+          'id': id,
+          'runs': store
+              .getRunHistory(id, limit: limit)
+              .map((run) => run.toJson())
+              .toList(growable: false),
+        };
+      default:
+        return {
+          'ok': false,
+          'error': 'unknown_action',
+          'message': '未知 cron 操作：$action',
+        };
+    }
+  }
+
+  static Map<String, dynamic> _cronJobJsonWithHistory(CronJob job) => {
+    ...job.toJson(),
+  };
+
+  static Future<Map<String, dynamic>> _browser(
+    Map<String, dynamic> args,
+    BrowserManager? browserManager,
+  ) async {
+    final manager = browserManager;
+    if (manager == null) {
+      return _notConfigured(LocalToolNames.browser, 'Browser 运行时尚未初始化。');
+    }
+    return manager.execute(args);
+  }
+
+  static Future<Map<String, dynamic>> _channel(
+    Map<String, dynamic> args,
+    ChannelManager? channelManager,
+    CollaborationManager? collaborationManager,
+    String? activeAgentId,
+  ) async {
+    final manager = collaborationManager;
+    if (manager != null) {
+      return manager.channel(args, sourceAgentId: activeAgentId);
+    }
+    final channels = channelManager;
+    if (channels == null) {
+      return _notConfigured(LocalToolNames.channel, 'Channel 运行时尚未初始化。');
+    }
+    final action = _requiredString(args, 'action');
+    switch (action) {
+      case 'list':
+        final list = await channels.listChannels();
+        return {
+          'ok': true,
+          'channels': list.map((channel) => channel.toJson()).toList(),
+        };
+      case 'create':
+        final channel = await channels.createChannel(
+          id: _optionalString(args, 'channel'),
+          name: _optionalString(args, 'name'),
+          description: _optionalString(args, 'description'),
+          members: _stringList(args['members']),
+          intro: _optionalString(args, 'intro'),
+        );
+        return {'ok': true, 'channel': channel.toJson()};
+      case 'read':
+        final messages = await channels.readRecent(
+          _requiredString(args, 'channel'),
+          limit: _boundedInt(args['count'], 50, 1, 200),
+        );
+        return {
+          'ok': true,
+          'messages': messages.map((message) => message.toJson()).toList(),
+        };
+      case 'post':
+        await channels.appendMessage(
+          _requiredString(args, 'channel'),
+          'agent:${activeAgentId ?? "unknown"}',
+          _requiredString(args, 'content'),
+        );
+        return {'ok': true, 'message': '已写入频道消息'};
+      default:
+        return {
+          'ok': false,
+          'error': 'unknown_action',
+          'message': '未知 channel 操作：$action',
+        };
+    }
+  }
+
+  static Future<Map<String, dynamic>> _askAgent(
+    Map<String, dynamic> args,
+    CollaborationManager? collaborationManager,
+    String? activeAgentId,
+  ) async {
+    final manager = collaborationManager;
+    if (manager == null) {
+      return _notConfigured(LocalToolNames.askAgent, '多 Agent 协作运行时尚未初始化。');
+    }
+    return manager.delegate(
+      args,
+      sourceAgentId: activeAgentId,
+      toolName: LocalToolNames.askAgent,
+    );
+  }
+
+  static Future<Map<String, dynamic>> _dm(
+    Map<String, dynamic> args,
+    CollaborationManager? collaborationManager,
+    String? activeAgentId,
+  ) async {
+    final manager = collaborationManager;
+    if (manager == null) {
+      return _notConfigured(LocalToolNames.dm, 'DM 协作运行时尚未初始化。');
+    }
+    return manager.dm(args, sourceAgentId: activeAgentId);
+  }
+
+  static Future<Map<String, dynamic>> _delegate(
+    Map<String, dynamic> args,
+    CollaborationManager? collaborationManager,
+    String? activeAgentId,
+  ) async {
+    final manager = collaborationManager;
+    if (manager == null) {
+      return _notConfigured(LocalToolNames.delegate, 'Delegate 协作运行时尚未初始化。');
+    }
+    return manager.delegate(args, sourceAgentId: activeAgentId);
   }
 
   static Map<String, dynamic> _notify(Map<String, dynamic> args) => {
@@ -634,13 +999,6 @@ class LocalToolRegistry {
     'tool': name,
     'error': 'not_configured',
     'message': message,
-  };
-
-  static Map<String, dynamic> _notAvailableYet(String name) => {
-    'ok': false,
-    'tool': name,
-    'error': 'not_available_in_flutter_client',
-    'message': '该工具已按原项目工具面注册，但 Flutter 子体客户端尚未接入对应执行模块。',
   };
 
   static String _resolvePath(String? raw, String? cwd) {
@@ -676,8 +1034,26 @@ class LocalToolRegistry {
     return null;
   }
 
+  static List<String> _stringList(Object? raw) {
+    if (raw is List) {
+      return raw
+          .map((item) => item.toString().trim())
+          .where((item) => item.isNotEmpty)
+          .toList(growable: false);
+    }
+    final text = raw?.toString() ?? '';
+    if (text.trim().isEmpty) return const [];
+    return text
+        .split(',')
+        .map((item) => item.trim())
+        .where((item) => item.isNotEmpty)
+        .toList(growable: false);
+  }
+
   static int _boundedInt(Object? value, int fallback, int min, int max) {
-    final raw = value is num ? value.toInt() : fallback;
+    final raw = value is num
+        ? value.toInt()
+        : int.tryParse(value?.toString() ?? '') ?? fallback;
     if (raw < min) return min;
     if (raw > max) return max;
     return raw;
@@ -741,6 +1117,21 @@ class LocalToolRegistry {
   static String _truncate(String text, int maxLength) {
     if (text.length <= maxLength) return text;
     return '${text.substring(0, maxLength)}\n\n[... 内容已截断，共 ${text.length} 字符]';
+  }
+
+  static String _scrubPii(String text) {
+    var out = text;
+    out = out.replaceAll(
+      RegExp(r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'),
+      '[REDACTED:CARD]',
+    );
+    out = out.replaceAll(RegExp(r'\b\d{17}[\dXx]\b'), '[REDACTED:ID]');
+    out = out.replaceAll(RegExp(r'\b1[3-9]\d{9}\b'), '[REDACTED:PHONE]');
+    out = out.replaceAll(
+      RegExp(r'\b[\w.+-]+@[\w-]+\.[\w.-]+\b'),
+      '[REDACTED:EMAIL]',
+    );
+    return out;
   }
 
   static bool _isRedirect(int code) =>
@@ -833,6 +1224,7 @@ class LocalToolNames {
   static const todo = 'todo';
   static const pinMemory = 'pin_memory';
   static const unpinMemory = 'unpin_memory';
+  static const listPinnedMemory = 'list_pinned_memory';
   static const recallExperience = 'recall_experience';
   static const recordExperience = 'record_experience';
   static const cron = 'cron';
@@ -1062,6 +1454,15 @@ const _toolSpecs = <_ToolSpec>[
     },
   ),
   _ToolSpec(
+    name: LocalToolNames.listPinnedMemory,
+    description: '列出当前 Agent 的置顶记忆。',
+    parameters: {
+      'type': 'object',
+      'additionalProperties': false,
+      'properties': <String, Object>{},
+    },
+  ),
+  _ToolSpec(
     name: LocalToolNames.recallExperience,
     description: '查看当前 Agent 的经验库索引或指定分类。',
     parameters: {
@@ -1087,13 +1488,13 @@ const _toolSpecs = <_ToolSpec>[
   ),
   _ToolSpec(
     name: LocalToolNames.cron,
-    description: '创建和管理定时任务。Flutter 客户端暂未接入执行模块。',
+    description: '创建和管理定时任务。到期后会在后台打开独立 session 执行指定 prompt。',
     parameters: {
       'type': 'object',
       'properties': {
         'action': {
           'type': 'string',
-          'enum': ['list', 'add', 'remove', 'toggle'],
+          'enum': ['list', 'add', 'remove', 'toggle', 'run-now', 'history'],
         },
         'type': {
           'type': 'string',
@@ -1103,7 +1504,11 @@ const _toolSpecs = <_ToolSpec>[
         'prompt': {'type': 'string'},
         'label': {'type': 'string'},
         'model': {'type': 'string'},
+        'agent': {'type': 'string'},
+        'agentId': {'type': 'string'},
         'id': {'type': 'string'},
+        'enabled': {'type': 'boolean'},
+        'limit': {'type': 'integer'},
       },
       'required': ['action'],
     },
@@ -1144,16 +1549,31 @@ const _toolSpecs = <_ToolSpec>[
   ),
   _ToolSpec(
     name: LocalToolNames.channel,
-    description: '管理频道消息。Flutter 客户端暂未接入执行模块。',
+    description: '管理频道消息，并可触发多 Agent channel triage。',
     parameters: {
       'type': 'object',
       'properties': {
         'action': {
           'type': 'string',
-          'enum': ['read', 'post', 'create', 'list'],
+          'enum': [
+            'read',
+            'post',
+            'create',
+            'list',
+            'triage',
+            'status',
+            'configure',
+          ],
         },
         'channel': {'type': 'string'},
         'content': {'type': 'string'},
+        'description': {'type': 'string'},
+        'sender': {'type': 'string'},
+        'agent': {'type': 'string'},
+        'targetAgentId': {'type': 'string'},
+        'auto_triage': {'type': 'boolean'},
+        'enabled': {'type': 'boolean'},
+        'triage': {'type': 'boolean'},
         'name': {'type': 'string'},
         'members': {
           'type': 'array',
@@ -1167,44 +1587,57 @@ const _toolSpecs = <_ToolSpec>[
   ),
   _ToolSpec(
     name: LocalToolNames.askAgent,
-    description: '向另一个 Agent 发起一次同步任务。Flutter 客户端暂未接入执行模块。',
+    description: '向另一个 Agent 发起一次同步任务，并返回结果 session 路径与摘要。',
     parameters: {
       'type': 'object',
       'properties': {
         'agent': {'type': 'string'},
+        'targetAgentId': {'type': 'string'},
         'task': {'type': 'string'},
+        'model': {'type': 'string'},
+        'depth': {'type': 'integer'},
       },
-      'required': ['agent', 'task'],
+      'required': ['task'],
     },
   ),
   _ToolSpec(
     name: LocalToolNames.dm,
-    description: '给另一个 Agent 发送私信。Flutter 客户端暂未接入执行模块。',
+    description: '给另一个 Agent 发送私信，或配置 DM 自动回复开关。',
     parameters: {
       'type': 'object',
       'properties': {
+        'action': {
+          'type': 'string',
+          'enum': ['send', 'status', 'configure'],
+        },
         'to': {'type': 'string'},
+        'agent': {'type': 'string'},
         'message': {'type': 'string'},
+        'auto_reply': {'type': 'boolean'},
+        'enabled': {'type': 'boolean'},
+        'depth': {'type': 'integer'},
       },
-      'required': ['to', 'message'],
+      'required': [],
     },
   ),
   _ToolSpec(
     name: LocalToolNames.messageAgent,
-    description: '向另一个 Agent 发送消息并等待回复。Flutter 客户端暂未接入执行模块。',
+    description: '向另一个 Agent 发送消息并等待回复。',
     parameters: {
       'type': 'object',
       'properties': {
         'to': {'type': 'string'},
+        'agent': {'type': 'string'},
         'message': {'type': 'string'},
         'max_rounds': {'type': 'integer'},
+        'depth': {'type': 'integer'},
       },
       'required': ['to', 'message'],
     },
   ),
   _ToolSpec(
     name: LocalToolNames.browser,
-    description: '控制浏览器进行网页浏览、点击、输入、截图等。Flutter 客户端暂未接入执行模块。',
+    description: '控制浏览器打开网页、读取页面标题/文本和查看状态；复杂交互会返回中文限制说明。',
     parameters: {
       'type': 'object',
       'properties': {
@@ -1224,6 +1657,7 @@ const _toolSpecs = <_ToolSpec>[
             'wait',
             'evaluate',
             'show',
+            'status',
           ],
         },
         'url': {'type': 'string'},
@@ -1246,16 +1680,18 @@ const _toolSpecs = <_ToolSpec>[
   ),
   _ToolSpec(
     name: LocalToolNames.installSkill,
-    description: '为当前 Agent 安装技能。Flutter 客户端暂未接入执行模块。',
+    description: '为当前 Agent 安装 Anthropic Agent Skill，并可立即启用。',
     parameters: {
       'type': 'object',
       'properties': {
         'github_url': {'type': 'string'},
+        'source_path': {'type': 'string'},
+        'path': {'type': 'string'},
         'skill_content': {'type': 'string'},
         'skill_name': {'type': 'string'},
         'reason': {'type': 'string'},
+        'enabled': {'type': 'boolean'},
       },
-      'required': ['reason'],
     },
   ),
   _ToolSpec(
@@ -1273,12 +1709,15 @@ const _toolSpecs = <_ToolSpec>[
   ),
   _ToolSpec(
     name: LocalToolNames.delegate,
-    description: '委派独立子任务给后台 Agent。Flutter 客户端暂未接入执行模块。',
+    description: '委派独立子任务给后台 Agent，结果会写入目标 Agent session 和活动记录。',
     parameters: {
       'type': 'object',
       'properties': {
+        'agent': {'type': 'string'},
+        'targetAgentId': {'type': 'string'},
         'task': {'type': 'string'},
         'model': {'type': 'string'},
+        'depth': {'type': 'integer'},
       },
       'required': ['task'],
     },

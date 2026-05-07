@@ -84,6 +84,7 @@ void main(List<String> args) async {
     await DesktopSetup.quitApp();
     return;
   }
+  engine.startAutomation();
 
   // 主题模式从 SharedPreferences 读取（设置窗口写入）。
   final sp = await SharedPreferences.getInstance();

@@ -10,15 +10,22 @@ import '../identity/identity.dart';
 import '../llm/provider.dart';
 import '../local_tools/local_tools.dart';
 import '../shared/hana_home.dart';
+import '../shared/yaml_io.dart';
 import '../windows_ops/windows_ops_capabilities.dart';
 import '../windows_ops/windows_ops_client.dart';
 import '../windows_ops/windows_ops_tools.dart';
 import 'agent_runtime.dart';
 import 'agent_manager.dart';
+import 'browser_manager.dart';
+import 'channel_manager.dart';
+import 'collaboration_manager.dart';
 import 'config_coordinator.dart';
+import 'cron_scheduler.dart';
+import 'cron_store.dart';
 import 'model_manager.dart';
 import 'runtime_session_store.dart';
 import 'session.dart';
+import 'skill_manager.dart';
 
 /// SessionCoordinator 与 legacy core/session-coordinator.js 对齐。
 /// Phase 2 spike 版：能 createSession / switchSession / prompt（流式）/ listSessions。
@@ -31,6 +38,12 @@ class SessionCoordinator {
     required this.identityRepository,
     required this.backendClient,
     WindowsOpsClient? windowsOpsClient,
+    this.cronStore,
+    this.runCronNow,
+    this.skillManager,
+    this.browserManager,
+    this.channelManager,
+    this.collaborationManager,
   }) : _windowsOpsClient = windowsOpsClient ?? WindowsOpsClient();
 
   final HanaHome home;
@@ -40,6 +53,12 @@ class SessionCoordinator {
   final IdentityRepository identityRepository;
   final HanakoBackendClient backendClient;
   final WindowsOpsClient _windowsOpsClient;
+  final CronStore? cronStore;
+  final Future<CronRunRecord> Function(String jobId)? runCronNow;
+  final SkillManager? skillManager;
+  final BrowserManager? browserManager;
+  final ChannelManager? channelManager;
+  CollaborationManager? collaborationManager;
 
   Session? _current;
   final _uuid = const Uuid();
@@ -57,10 +76,15 @@ class SessionCoordinator {
     if (agentId == null) {
       throw StateError('No active agent');
     }
+    final effectiveCwd = _effectiveSessionCwd(agentId, cwd);
     final sessionId = _uuid.v4();
     final dir = home.agentSessions(agentId);
     final path = p.join(dir.path, '$sessionId.jsonl');
-    RuntimeSessionStore.createSessionFile(path, sessionId: sessionId, cwd: cwd);
+    RuntimeSessionStore.createSessionFile(
+      path,
+      sessionId: sessionId,
+      cwd: effectiveCwd,
+    );
 
     // 写 session-meta.json
     final metaFile = File(p.join(dir.path, 'session-meta.json'));
@@ -71,7 +95,7 @@ class SessionCoordinator {
       } catch (_) {}
     }
     meta[sessionId] = {
-      'cwd': cwd,
+      'cwd': effectiveCwd,
       'memoryEnabled': memoryEnabled,
       'createdAt': DateTime.now().toUtc().toIso8601String(),
     };
@@ -84,7 +108,7 @@ class SessionCoordinator {
       path: path,
       title: '',
       agentId: agentId,
-      cwd: cwd,
+      cwd: effectiveCwd,
       memoryEnabled: memoryEnabled,
     );
     _current = s;
@@ -226,7 +250,164 @@ class SessionCoordinator {
       await createSession();
     }
     final session = _current!;
-    final cfg = config.read();
+    yield* _runRuntimeTurnForSession(
+      session,
+      cancelToken: cancelToken,
+      run: run,
+    );
+  }
+
+  Future<IsolatedCronSessionResult> runIsolatedPrompt({
+    required String agentId,
+    required String prompt,
+    String? cwd,
+    String? modelId,
+    String source = 'cron',
+  }) async {
+    final session = _createIsolatedSession(
+      agentId: agentId,
+      cwd: cwd,
+      source: source,
+    );
+    LlmError? lastError;
+    await for (final event in _runRuntimeTurnForSession(
+      session,
+      modelOverride: modelId,
+      run: (runtime) => runtime.runUserPrompt(prompt),
+    )) {
+      if (event is LlmError) lastError = event;
+    }
+    if (lastError != null) {
+      throw StateError(
+        lastError.details == null
+            ? lastError.message
+            : '${lastError.message}: ${lastError.details}',
+      );
+    }
+    return IsolatedCronSessionResult(sessionPath: session.path);
+  }
+
+  Future<BridgePromptResult> runBridgePrompt({
+    required String agentId,
+    required String sessionKey,
+    required String prompt,
+    String? existingSessionPath,
+  }) async {
+    final session = _resolveBridgeSession(
+      agentId: agentId,
+      sessionKey: sessionKey,
+      existingSessionPath: existingSessionPath,
+    );
+    LlmError? lastError;
+    final assistantBuf = StringBuffer();
+    await for (final event in _runRuntimeTurnForSession(
+      session,
+      run: (runtime) => runtime.runUserPrompt(prompt),
+    )) {
+      if (event is TextDelta) assistantBuf.write(event.text);
+      if (event is LlmError) lastError = event;
+    }
+    if (lastError != null) {
+      throw StateError(
+        lastError.details == null
+            ? lastError.message
+            : '${lastError.message}: ${lastError.details}',
+      );
+    }
+    final reply = assistantBuf.toString().trim();
+    return BridgePromptResult(
+      sessionPath: session.path,
+      reply: reply.isEmpty ? null : reply,
+    );
+  }
+
+  Session _resolveBridgeSession({
+    required String agentId,
+    required String sessionKey,
+    String? existingSessionPath,
+  }) {
+    final existing = existingSessionPath?.trim();
+    if (existing != null && existing.isNotEmpty) {
+      final file = File(existing);
+      final sessionsDir = p.normalize(
+        home.agentSessions(agentId).absolute.path,
+      );
+      final sessionPath = p.normalize(file.absolute.path);
+      final inAgentSessions =
+          p.equals(p.dirname(sessionPath), sessionsDir) ||
+          p.isWithin(sessionsDir, sessionPath);
+      if (inAgentSessions && file.existsSync()) {
+        final sessionId = p.basenameWithoutExtension(sessionPath);
+        final meta = _readMeta(p.dirname(sessionPath));
+        final mEntry = meta[sessionId] as Map<String, dynamic>?;
+        return Session(
+          path: sessionPath,
+          title:
+              _readTitle(p.dirname(sessionPath), sessionId) ??
+              'bridge:$sessionKey',
+          agentId: agentId,
+          cwd: mEntry?['cwd'] as String? ?? _effectiveSessionCwd(agentId, null),
+          memoryEnabled: mEntry?['memoryEnabled'] as bool? ?? true,
+        );
+      }
+    }
+    return _createIsolatedSession(
+      agentId: agentId,
+      cwd: null,
+      source: 'bridge:$sessionKey',
+    );
+  }
+
+  Session _createIsolatedSession({
+    required String agentId,
+    String? cwd,
+    required String source,
+  }) {
+    final effectiveCwd = _effectiveSessionCwd(agentId, cwd);
+    final sessionId = _uuid.v4();
+    final dir = home.agentSessions(agentId);
+    final path = p.join(dir.path, '$sessionId.jsonl');
+    RuntimeSessionStore.createSessionFile(
+      path,
+      sessionId: sessionId,
+      cwd: effectiveCwd,
+    );
+
+    final metaFile = File(p.join(dir.path, 'session-meta.json'));
+    Map<String, dynamic> meta = <String, dynamic>{};
+    if (metaFile.existsSync()) {
+      try {
+        meta = jsonDecode(metaFile.readAsStringSync()) as Map<String, dynamic>;
+      } catch (_) {}
+    }
+    meta[sessionId] = {
+      'cwd': effectiveCwd,
+      'memoryEnabled': true,
+      'source': source,
+      'createdAt': DateTime.now().toUtc().toIso8601String(),
+    };
+    metaFile.writeAsStringSync(
+      const JsonEncoder.withIndent('  ').convert(meta),
+      flush: true,
+    );
+    return Session(
+      path: path,
+      title: source,
+      agentId: agentId,
+      cwd: effectiveCwd,
+      memoryEnabled: true,
+    );
+  }
+
+  Stream<LlmEvent> _runRuntimeTurnForSession(
+    Session session, {
+    CancelToken? cancelToken,
+    String? modelOverride,
+    required Stream<LlmEvent> Function(AgentRuntimeLoop runtime) run,
+  }) async* {
+    final cfg = session.agentId == config.agentId
+        ? config.read()
+        : YamlIo.readMap(home.agentConfig(session.agentId));
 
     final identity = identityRepository.current;
     if (identity == null) {
@@ -234,7 +415,12 @@ class SessionCoordinator {
       return;
     }
 
-    var modelId = _configuredChatModelId(cfg) ?? modelManager.currentModelId;
+    var modelId =
+        (modelOverride?.trim().isNotEmpty == true
+            ? modelOverride!.trim()
+            : null) ??
+        _configuredChatModelId(cfg) ??
+        modelManager.currentModelId;
     if (modelId == null || !modelManager.contains(modelId)) {
       try {
         await _syncGatewayModels(identity, preferredModelId: modelId);
@@ -299,6 +485,12 @@ class SessionCoordinator {
   }
 
   // -- internals --
+  String _effectiveSessionCwd(String agentId, String? cwd) {
+    final value = cwd?.trim();
+    if (value != null && value.isNotEmpty) return value;
+    return home.agentDesk(agentId).path;
+  }
+
   Future<List<Tool>> _buildAvailableTools() async {
     final localTools = LocalToolRegistry.buildTools();
     final windowsTools = WindowsOpsToolRegistry.buildTools(
@@ -376,6 +568,13 @@ class SessionCoordinator {
       args,
       cwd: session.cwd,
       agentDir: home.agentDir(session.agentId).path,
+      activeAgentId: session.agentId,
+      cronStore: cronStore,
+      runCronNow: runCronNow,
+      skillManager: skillManager,
+      browserManager: browserManager,
+      channelManager: channelManager,
+      collaborationManager: collaborationManager,
     );
     return RuntimeToolExecutionResult(
       content: content,
@@ -421,6 +620,10 @@ class SessionCoordinator {
 
   Future<String> _buildSystemPrompt(Session session) async {
     final agent = await agentManager.getAgent(session.agentId);
+    final cfg = session.agentId == config.agentId
+        ? config.read()
+        : YamlIo.readMap(home.agentConfig(session.agentId));
+    final skillsPrompt = _skillsPromptForAgent(session.agentId, cfg);
     final parts = <String>[
       '你运行在用户本机的“幻宙01”子体客户端中。',
       '需要本地信息或桌面操作时，使用请求中提供的原生 function tools；不要把工具调用写成正文。',
@@ -432,8 +635,29 @@ class SessionCoordinator {
         'Agent 身份：\n${agent!.identity!.trim()}',
       if (agent?.ishiki?.trim().isNotEmpty == true)
         'Agent 意识/行为设定：\n${agent!.ishiki!.trim()}',
+      if (skillsPrompt.trim().isNotEmpty) skillsPrompt,
     ];
     return parts.where((part) => part.trim().isNotEmpty).join('\n\n');
+  }
+
+  String _skillsPromptForAgent(String agentId, Map<String, dynamic> cfg) {
+    final manager = skillManager;
+    if (manager == null) return '';
+    final skills = cfg['skills'] as Map?;
+    final enabled = skills?['enabled'];
+    if (enabled is! List) return '';
+    final names = enabled
+        .map((item) => item.toString().trim())
+        .where((item) => item.isNotEmpty)
+        .toList(growable: false);
+    final result = manager.getSkillsForAgent(agentId, names);
+    final prompt = SkillManager.formatForPrompt(result.skills);
+    if (result.diagnostics.isEmpty) return prompt;
+    return [
+      prompt,
+      '## Skill Diagnostics',
+      ...result.diagnostics.map((line) => '- $line'),
+    ].where((line) => line.trim().isNotEmpty).join('\n');
   }
 
   String _agentIdFromPath(String sessionPath) {
@@ -533,4 +757,11 @@ class SessionListEntry {
     'agentId': agentId,
     'modified': modified.toIso8601String(),
   };
+}
+
+class BridgePromptResult {
+  const BridgePromptResult({required this.sessionPath, this.reply});
+
+  final String sessionPath;
+  final String? reply;
 }

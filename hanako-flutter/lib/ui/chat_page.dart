@@ -10,6 +10,7 @@ import '../app/window_factory.dart';
 import '../core/engine.dart';
 import '../core/runtime_session_store.dart';
 import '../llm/provider.dart';
+import 'desk/desk_page.dart';
 import 'memory/memory_page.dart';
 import 'onboarding/onboarding_page.dart';
 import 'perf/perf_hud.dart';
@@ -661,6 +662,9 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                   canClear: state.history.isNotEmpty && !state.streaming,
                   onOpenSessions: () => Scaffold.of(shellContext).openDrawer(),
                   onClear: () => ref.read(chatProvider.notifier).clear(),
+                  onOpenDesk: () => Navigator.of(
+                    context,
+                  ).push(MaterialPageRoute(builder: (_) => const DeskPage())),
                   onOpenMemory: () => Navigator.of(
                     context,
                   ).push(MaterialPageRoute(builder: (_) => const MemoryPage())),
@@ -834,6 +838,7 @@ class _ChatHeader extends StatelessWidget {
     required this.canClear,
     required this.onOpenSessions,
     required this.onClear,
+    required this.onOpenDesk,
     required this.onOpenMemory,
     required this.onOpenSkills,
     required this.onOpenSettings,
@@ -849,6 +854,7 @@ class _ChatHeader extends StatelessWidget {
   final bool canClear;
   final VoidCallback onOpenSessions;
   final VoidCallback onClear;
+  final VoidCallback onOpenDesk;
   final VoidCallback onOpenMemory;
   final VoidCallback onOpenSkills;
   final VoidCallback onOpenSettings;
@@ -872,6 +878,11 @@ class _ChatHeader extends StatelessWidget {
           icon: Icons.psychology_outlined,
           tooltip: '记忆',
           onPressed: onOpenMemory,
+        ),
+        _HeaderAction(
+          icon: Icons.folder_outlined,
+          tooltip: '书桌',
+          onPressed: onOpenDesk,
         ),
         _HeaderAction(
           icon: Icons.extension_outlined,

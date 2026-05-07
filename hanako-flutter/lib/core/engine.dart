@@ -3,9 +3,17 @@ import 'dart:async';
 import '../identity/identity.dart';
 import '../shared/hana_home.dart';
 import 'agent_manager.dart';
+import 'browser_manager.dart';
+import 'bridge_source_manager.dart';
+import 'activity_store.dart';
 import 'bridge_session_manager.dart';
 import 'channel_manager.dart';
+import 'collaboration_manager.dart';
 import 'config_coordinator.dart';
+import 'cron_scheduler.dart';
+import 'cron_store.dart';
+import 'desk_manager.dart';
+import 'heartbeat_runtime.dart';
 import 'model_manager.dart';
 import 'preferences_manager.dart';
 import 'session_coordinator.dart';
@@ -24,8 +32,16 @@ class HanaEngine {
     required this.identityRepository,
     required this.backendClient,
     required this.sessionCoordinator,
+    required this.activityStore,
+    required this.cronStore,
+    required this.cronScheduler,
+    required this.heartbeatRuntime,
+    required this.deskManager,
+    required this.browserManager,
     required this.channelManager,
+    required this.collaborationManager,
     required this.bridgeSessionManager,
+    required this.bridgeSourceManager,
     required this.skillManager,
   });
 
@@ -37,8 +53,16 @@ class HanaEngine {
   final IdentityRepository identityRepository;
   final HanakoBackendClient backendClient;
   final SessionCoordinator sessionCoordinator;
+  final ActivityStore activityStore;
+  final CronStore cronStore;
+  final CronScheduler cronScheduler;
+  final HeartbeatRuntime heartbeatRuntime;
+  final DeskManager deskManager;
+  final BrowserManager browserManager;
   final ChannelManager channelManager;
+  final CollaborationManager collaborationManager;
   final BridgeSessionManager bridgeSessionManager;
+  final BridgeSourceManager bridgeSourceManager;
   final SkillManager skillManager;
 
   bool _initialized = false;
@@ -61,14 +85,22 @@ class HanaEngine {
             caller: ({required systemPrompt, required userPrompt, maxTokens}) =>
                 _callGatewayForStory(
                   gateway: gateway,
-                  identityRepository: identityRepo,
                   modelManager: models,
                   systemPrompt: systemPrompt,
                   userPrompt: userPrompt,
                   maxTokens: maxTokens,
                 ),
           ),
-          parser: StoryParser(caller: _missingLlmCaller),
+          parser: StoryParser(
+            caller: ({required systemPrompt, required userPrompt, maxTokens}) =>
+                _callGatewayForStory(
+                  gateway: gateway,
+                  modelManager: models,
+                  systemPrompt: systemPrompt,
+                  userPrompt: userPrompt,
+                  maxTokens: maxTokens,
+                ),
+          ),
         );
     await _restoreSavedIdentity(identityRepo);
     final prefs = PreferencesManager(h);
@@ -88,6 +120,16 @@ class HanaEngine {
     models = ModelManager(h);
     await models.initialize();
 
+    final activityStore = ActivityStore(file: h.activityFile);
+    final cronStore = CronStore(
+      jobsFile: h.cronJobsFile,
+      runsDir: h.cronRunsDir,
+    );
+    final skills = SkillManager(h);
+    await skills.initialize();
+    final browser = BrowserManager(preferences: prefs);
+    final channels = ChannelManager(h);
+    late final CronScheduler cronScheduler;
     final sessions = SessionCoordinator(
       home: h,
       agentManager: agents,
@@ -95,9 +137,51 @@ class HanaEngine {
       config: cfg,
       identityRepository: identityRepo,
       backendClient: gateway,
+      cronStore: cronStore,
+      runCronNow: (jobId) => cronScheduler.runNow(jobId),
+      skillManager: skills,
+      browserManager: browser,
+      channelManager: channels,
+    );
+    cronScheduler = CronScheduler(
+      cronStore: cronStore,
+      executeJob: (job) => sessions.runIsolatedPrompt(
+        agentId: job.agentId,
+        prompt: job.prompt,
+        modelId: job.model.isEmpty ? null : job.model,
+        source: 'cron:${job.id}',
+      ),
+    );
+    final heartbeat = HeartbeatRuntime(
+      configFile: h.heartbeatConfigFile,
+      registryFile: h.jianRegistryFile,
+      activityStore: activityStore,
+      resolveAgentId: () => agents.activeAgentId ?? activeId ?? '_no_agent',
+      executeJian: ({required agentId, required prompt, required cwd}) =>
+          sessions.runIsolatedPrompt(
+            agentId: agentId,
+            prompt: prompt,
+            cwd: cwd,
+            source: 'heartbeat',
+          ),
     );
 
-    final channels = ChannelManager(h);
+    final deskManager = DeskManager(h);
+    final collaboration = CollaborationManager(
+      preferences: prefs,
+      agentManager: agents,
+      channelManager: channels,
+      activityStore: activityStore,
+      executeAgentTask:
+          ({required agentId, required prompt, modelId, required source}) =>
+              sessions.runIsolatedPrompt(
+                agentId: agentId,
+                prompt: prompt,
+                modelId: modelId,
+                source: source,
+              ),
+    );
+    sessions.collaborationManager = collaboration;
     final bridge = BridgeSessionManager(
       home: h,
       agentManager: agents,
@@ -106,7 +190,10 @@ class HanaEngine {
       preferences: prefs,
       sessionCoordinator: sessions,
     );
-    final skills = SkillManager(h);
+    final bridgeSources = BridgeSourceManager(
+      preferences: prefs,
+      bridgeSessionManager: bridge,
+    );
 
     final eng = HanaEngine._(
       home: h,
@@ -117,8 +204,16 @@ class HanaEngine {
       identityRepository: identityRepo,
       backendClient: gateway,
       sessionCoordinator: sessions,
+      activityStore: activityStore,
+      cronStore: cronStore,
+      cronScheduler: cronScheduler,
+      heartbeatRuntime: heartbeat,
+      deskManager: deskManager,
+      browserManager: browser,
       channelManager: channels,
+      collaborationManager: collaboration,
       bridgeSessionManager: bridge,
+      bridgeSourceManager: bridgeSources,
       skillManager: skills,
     );
     eng._initialized = true;
@@ -127,7 +222,15 @@ class HanaEngine {
 
   bool get isInitialized => _initialized;
 
+  void startAutomation() {
+    cronScheduler.start();
+    heartbeatRuntime.start();
+    unawaited(bridgeSourceManager.startEnabled());
+  }
+
   Future<void> dispose() async {
+    await heartbeatRuntime.stop();
+    await cronScheduler.stop();
     await config.dispose();
     await sessionCoordinator.dispose();
     await bridgeSessionManager.dispose();
@@ -167,37 +270,20 @@ Future<void> _restoreSavedIdentity(IdentityRepository repo) async {
   }
 }
 
-Future<String> _missingLlmCaller({
-  required String systemPrompt,
-  required String userPrompt,
-  int? maxTokens,
-}) async {
-  throw UnsupportedError('LLM 网关尚未接入，故事生成走 fallback 路径');
-}
-
 Future<String> _callGatewayForStory({
   required HanakoBackendClient gateway,
-  required IdentityRepository identityRepository,
   required ModelManager modelManager,
   required String systemPrompt,
   required String userPrompt,
   int? maxTokens,
 }) async {
-  final identity = identityRepository.current;
-  if (identity == null) {
-    throw StateError('身份未解锁，无法调用 AI 网关生成故事');
-  }
-
-  final channel = await _ensureGatewayChannel(
-    gateway: gateway,
-    identity: identity,
-  );
-  final model = _selectStoryModel(modelManager, channel);
+  final modelList = await gateway.listPublicStoryModels();
+  final model = _selectStoryModel(modelManager, modelList.models);
   if (model == null) {
-    throw StateError('未找到可用于生成故事的模型');
+    throw StateError('未找到可用于故事生成/恢复的公开模型');
   }
 
-  final response = await gateway.chat(
+  final response = await gateway.publicStoryChat(
     model: model,
     messages: [
       {'role': 'system', 'content': systemPrompt},
@@ -208,26 +294,13 @@ Future<String> _callGatewayForStory({
   return _extractAssistantText(response);
 }
 
-Future<HanakoChannel> _ensureGatewayChannel({
-  required HanakoBackendClient gateway,
-  required HanakoIdentity identity,
-}) async {
-  final current = gateway.channel;
-  if (current != null && DateTime.now().isBefore(current.expiresAt)) {
-    return current;
-  }
-  return gateway.handshake(keyPair: identity.keyPair);
-}
-
-String? _selectStoryModel(ModelManager modelManager, HanakoChannel channel) {
+String? _selectStoryModel(ModelManager modelManager, List<String> models) {
   final current = modelManager.currentModelId;
-  if (current != null &&
-      current.isNotEmpty &&
-      channel.allowedModels.contains(current)) {
+  if (current != null && current.isNotEmpty && models.contains(current)) {
     return current;
   }
-  if (channel.allowedModels.isNotEmpty) return channel.allowedModels.first;
-  return current?.isEmpty == false ? current : null;
+  if (models.isNotEmpty) return models.first;
+  return null;
 }
 
 String _extractAssistantText(Map<String, dynamic> response) {

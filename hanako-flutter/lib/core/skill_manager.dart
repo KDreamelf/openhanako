@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../shared/hana_home.dart';
+import '../shared/yaml_io.dart';
 
 /// SkillManager 实现 **Anthropic Agent Skills 标准**。
 ///
@@ -47,11 +48,9 @@ class SkillManager {
   Future<void> reload() async {
     _allSkills.clear();
     if (_home.skillsDir.existsSync()) {
-      _allSkills.addAll(_scanDir(
-        _home.skillsDir,
-        source: 'builtin',
-        agentId: null,
-      ));
+      _allSkills.addAll(
+        _scanDir(_home.skillsDir, source: 'builtin', agentId: null),
+      );
     }
     if (_home.agentsDir.existsSync()) {
       for (final agentDir
@@ -59,11 +58,9 @@ class SkillManager {
         final agentId = p.basename(agentDir.path);
         final learned = Directory(p.join(agentDir.path, 'learned-skills'));
         if (!learned.existsSync()) continue;
-        _allSkills.addAll(_scanDir(
-          learned,
-          source: 'learned',
-          agentId: agentId,
-        ));
+        _allSkills.addAll(
+          _scanDir(learned, source: 'learned', agentId: agentId),
+        );
       }
     }
   }
@@ -92,6 +89,113 @@ class SkillManager {
     return (skills: out, diagnostics: diags);
   }
 
+  List<String> enabledSkillNames(String agentId) {
+    final cfgFile = _home.agentConfig(agentId);
+    if (!cfgFile.existsSync()) return const [];
+    final cfg = YamlIo.readMap(cfgFile);
+    final skills = cfg['skills'] as Map?;
+    final enabled = skills?['enabled'];
+    if (enabled is! List) return const [];
+    return enabled
+        .map((item) => item.toString().trim())
+        .where((item) => item.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  Future<void> setSkillEnabled(
+    String agentId,
+    String skillName,
+    bool enabled,
+  ) async {
+    final name = _normalizeSkillName(skillName);
+    final cfgFile = _home.agentConfig(agentId);
+    if (!cfgFile.existsSync()) throw StateError('Agent $agentId not found');
+    final cfg = YamlIo.readMap(cfgFile);
+    final skillsBlock = Map<String, dynamic>.from(
+      (cfg['skills'] as Map?)?.cast<String, dynamic>() ?? const {},
+    );
+    final current = enabledSkillNames(agentId).toSet();
+    if (enabled) {
+      if (!_allSkills.any(
+        (skill) =>
+            skill.name == name &&
+            (skill.agentId == null || skill.agentId == agentId),
+      )) {
+        throw StateError('Skill $name not found');
+      }
+      current.add(name);
+    } else {
+      current.remove(name);
+    }
+    skillsBlock['enabled'] = current.toList()..sort();
+    cfg['skills'] = skillsBlock;
+    YamlIo.writeWhole(cfgFile, cfg);
+  }
+
+  Future<SkillSpec> installFromPath(
+    String agentId,
+    String sourcePath, {
+    bool enable = true,
+  }) async {
+    final source = FileSystemEntity.typeSync(sourcePath);
+    if (source == FileSystemEntityType.notFound) {
+      throw StateError('Skill 来源不存在：$sourcePath');
+    }
+    final sourceDir = source == FileSystemEntityType.directory
+        ? Directory(sourcePath)
+        : File(sourcePath).parent;
+    final skillFile = File(p.join(sourceDir.path, 'SKILL.md'));
+    if (!skillFile.existsSync()) {
+      throw StateError('无效 Skill：缺少 SKILL.md');
+    }
+    final spec = _specFromSkillFile(
+      skillFile,
+      source: 'learned',
+      agentId: agentId,
+    );
+    final targetDir = _learnedSkillTarget(agentId, spec.name);
+    _copyDirectory(sourceDir, targetDir);
+    await reload();
+    if (enable) await setSkillEnabled(agentId, spec.name, true);
+    await reload();
+    return _requireSkill(agentId, spec.name);
+  }
+
+  Future<SkillSpec> installFromContent(
+    String agentId, {
+    required String skillContent,
+    String? skillName,
+    bool enable = true,
+  }) async {
+    final parsed = _parseFrontmatter(skillContent);
+    final rawName = parsed['name'] ?? skillName;
+    if (rawName == null || rawName.trim().isEmpty) {
+      throw StateError('无效 Skill：frontmatter 缺少 name');
+    }
+    if ((parsed['description'] ?? '').trim().isEmpty) {
+      throw StateError('无效 Skill：frontmatter 缺少 description');
+    }
+    final name = _normalizeSkillName(rawName);
+    final targetDir = _learnedSkillTarget(agentId, name);
+    if (targetDir.existsSync()) targetDir.deleteSync(recursive: true);
+    targetDir.createSync(recursive: true);
+    File(
+      p.join(targetDir.path, 'SKILL.md'),
+    ).writeAsStringSync(_contentWithName(skillContent, name), flush: true);
+    await reload();
+    if (enable) await setSkillEnabled(agentId, name, true);
+    await reload();
+    return _requireSkill(agentId, name);
+  }
+
+  Future<void> deleteLearnedSkill(String agentId, String skillName) async {
+    final name = _normalizeSkillName(skillName);
+    final dir = _learnedSkillTarget(agentId, name);
+    if (dir.existsSync()) dir.deleteSync(recursive: true);
+    await setSkillEnabled(agentId, name, false);
+    await reload();
+  }
+
   /// 把 enabled skills 列表格式化为 system prompt 段，让模型知道有哪些 skill
   /// 可用、做什么、文件在哪。模型决定要用时自己 `read_file` 加载完整 SKILL.md。
   ///
@@ -103,8 +207,9 @@ class SkillManager {
       ..writeln('## Available Skills')
       ..writeln()
       ..writeln(
-          'Read the SKILL.md file at the listed path to load the skill\'s '
-          'full instructions before using it.')
+        'Read the SKILL.md file at the listed path to load the skill\'s '
+        'full instructions before using it.',
+      )
       ..writeln();
     for (final s in skills) {
       buf
@@ -139,13 +244,15 @@ class SkillManager {
       _watcher = _home.skillsDir
           .watch(recursive: true, events: FileSystemEvent.all)
           .listen((event) {
-        final name = p.basename(event.path);
-        if (name.startsWith('.') || name.endsWith('~') || name.endsWith('#')) {
-          return;
-        }
-        _reloadTimer?.cancel();
-        _reloadTimer = Timer(const Duration(seconds: 1), _autoReload);
-      });
+            final name = p.basename(event.path);
+            if (name.startsWith('.') ||
+                name.endsWith('~') ||
+                name.endsWith('#')) {
+              return;
+            }
+            _reloadTimer?.cancel();
+            _reloadTimer = Timer(const Duration(seconds: 1), _autoReload);
+          });
     } catch (_) {}
   }
 
@@ -175,24 +282,99 @@ class SkillManager {
       final skillFile = File(p.join(entry.path, 'SKILL.md'));
       if (!skillFile.existsSync()) continue;
       try {
-        final fm = _parseFrontmatter(skillFile.readAsStringSync());
-        final folderName = p.basename(entry.path);
-        final name = fm['name'] ?? folderName;
-        final displayName = fm['title'] ?? name; // legacy 兼容
-        final allowedTools = _parseList(fm['allowed-tools']);
-        yield SkillSpec(
-          name: name,
-          displayName: displayName,
-          description: fm['description'] ?? '',
-          license: fm['license'],
-          allowedTools: allowedTools,
-          filePath: skillFile.path,
-          baseDir: entry.path,
-          source: source,
-          agentId: agentId,
-        );
+        yield _specFromSkillFile(skillFile, source: source, agentId: agentId);
       } catch (_) {}
     }
+  }
+
+  SkillSpec _specFromSkillFile(
+    File skillFile, {
+    required String source,
+    String? agentId,
+  }) {
+    final fm = _parseFrontmatter(skillFile.readAsStringSync());
+    final folderName = p.basename(skillFile.parent.path);
+    final name = _normalizeSkillName(fm['name'] ?? folderName);
+    final description = (fm['description'] ?? '').trim();
+    if (description.isEmpty) {
+      throw StateError('无效 Skill：frontmatter 缺少 description');
+    }
+    final displayName = fm['title'] ?? name; // legacy 兼容
+    final allowedTools = _parseList(fm['allowed-tools']);
+    return SkillSpec(
+      name: name,
+      displayName: displayName,
+      description: description,
+      license: fm['license'],
+      allowedTools: allowedTools,
+      filePath: skillFile.path,
+      baseDir: skillFile.parent.path,
+      source: source,
+      agentId: agentId,
+    );
+  }
+
+  SkillSpec _requireSkill(String agentId, String skillName) {
+    final name = _normalizeSkillName(skillName);
+    return _allSkills.firstWhere(
+      (skill) =>
+          skill.name == name &&
+          (skill.agentId == null || skill.agentId == agentId),
+      orElse: () => throw StateError('Skill $name not found after reload'),
+    );
+  }
+
+  Directory _learnedSkillTarget(String agentId, String skillName) {
+    final learnedDir = _home.agentLearnedSkills(agentId);
+    final name = _normalizeSkillName(skillName);
+    final target = Directory(p.join(learnedDir.path, name));
+    final root = p.normalize(p.absolute(learnedDir.path));
+    final targetPath = p.normalize(p.absolute(target.path));
+    final rootKey = Platform.isWindows ? root.toLowerCase() : root;
+    final targetKey = Platform.isWindows
+        ? targetPath.toLowerCase()
+        : targetPath;
+    if (targetKey != rootKey &&
+        !targetKey.startsWith('$rootKey${p.separator}')) {
+      throw ArgumentError.value(skillName, 'skillName', 'invalid skill name');
+    }
+    return target;
+  }
+
+  void _copyDirectory(Directory source, Directory target) {
+    if (target.existsSync()) target.deleteSync(recursive: true);
+    target.createSync(recursive: true);
+    for (final entity in source.listSync(recursive: true, followLinks: false)) {
+      final relative = p.relative(entity.path, from: source.path);
+      if (relative == '.' || relative.startsWith('..')) continue;
+      final to = p.join(target.path, relative);
+      if (entity is Directory) {
+        Directory(to).createSync(recursive: true);
+      } else if (entity is File) {
+        File(to).parent.createSync(recursive: true);
+        entity.copySync(to);
+      }
+    }
+  }
+
+  String _normalizeSkillName(String raw) {
+    final name = raw.trim().toLowerCase();
+    if (!RegExp(r'^[a-z0-9][a-z0-9_-]*$').hasMatch(name)) {
+      throw ArgumentError.value(raw, 'skillName', 'invalid skill name');
+    }
+    return name;
+  }
+
+  String _contentWithName(String content, String name) {
+    final current = _parseFrontmatter(content)['name'];
+    if (current == null) {
+      return content.replaceFirst(RegExp(r'^---\s*\n'), '---\nname: $name\n');
+    }
+    if (current.trim().toLowerCase() == name) return content;
+    return content.replaceFirst(
+      RegExp(r'^name\s*:.*$', multiLine: true),
+      'name: $name',
+    );
   }
 
   Map<String, String> _parseFrontmatter(String content) {
@@ -266,14 +448,14 @@ class SkillSpec {
   );
 
   Map<String, dynamic> toJson() => {
-        'name': name,
-        'displayName': displayName,
-        'description': description,
-        if (license != null) 'license': license,
-        if (allowedTools.isNotEmpty) 'allowed-tools': allowedTools,
-        'filePath': filePath,
-        'baseDir': baseDir,
-        'source': source,
-        if (agentId != null) 'agentId': agentId,
-      };
+    'name': name,
+    'displayName': displayName,
+    'description': description,
+    if (license != null) 'license': license,
+    if (allowedTools.isNotEmpty) 'allowed-tools': allowedTools,
+    'filePath': filePath,
+    'baseDir': baseDir,
+    'source': source,
+    if (agentId != null) 'agentId': agentId,
+  };
 }

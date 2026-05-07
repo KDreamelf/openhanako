@@ -100,6 +100,80 @@ void main() {
     expect(state.error, isNull);
   });
 
+  test('不可重试错误后的下一条请求会合并连续 user 上下文', () async {
+    final tmp = await Directory.systemTemp.createTemp(
+      'hanako_chat_context_after_403_',
+    );
+    addTearDown(() async {
+      if (await tmp.exists()) {
+        await tmp.delete(recursive: true);
+      }
+    });
+
+    final home = HanaHome.debugFromDirectory(tmp);
+    final prefs = PreferencesManager(home);
+    final agents = AgentManager(home, prefs);
+    await agents.createAgent(name: '测试 Agent', id: 'agent_01');
+
+    final repo =
+        IdentityRepository(
+          keystore: _MemoryKeystore(),
+          composer: StoryComposer(caller: _unusedLlmCaller),
+          parser: StoryParser(caller: _unusedLlmCaller),
+        )..debugSetCurrent(
+          HanakoIdentity(keyPair: HanakoKeyPair.generate(), mnemonic: null),
+        );
+    final backend = _FakeBackendClient([
+      [
+        const LlmError(
+          message: '发送对话失败：当前身份无权使用该模型',
+          statusCode: 403,
+          details: 'HTTP 403',
+        ),
+      ],
+      [const TextDelta('收到完整上下文')],
+    ]);
+    final engine = await HanaEngine.initialize(
+      home: home,
+      identityRepository: repo,
+      backendClient: backend,
+    );
+    addTearDown(engine.dispose);
+    await engine.modelManager.replaceAvailableModels(const [
+      'test-model',
+    ], preferredModelId: 'test-model');
+
+    final container = ProviderContainer(
+      overrides: [
+        engineProvider.overrideWithValue(engine),
+        identityRepositoryProvider.overrideWithValue(repo),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(chatProvider.notifier).send('你好');
+
+    expect(container.read(chatProvider).errorStatusCode, 403);
+    expect(engine.sessionCoordinator.currentMessages().map((m) => m.content), [
+      '你好',
+    ]);
+
+    await container.read(chatProvider.notifier).send('了');
+
+    expect(backend.requests, hasLength(2));
+    final userMessages = backend.requests[1]
+        .where((message) => message['role'] == 'user')
+        .toList(growable: false);
+    expect(userMessages, hasLength(1));
+    expect(userMessages.single['content'], contains('你好'));
+    expect(userMessages.single['content'], contains('了'));
+    expect(engine.sessionCoordinator.currentMessages().map((m) => m.content), [
+      '你好',
+      '了',
+      '收到完整上下文',
+    ]);
+  });
+
   test('重试中出现有效输出后结束当前重试段，后续错误从第 1 次重新计数', () async {
     final tmp = await Directory.systemTemp.createTemp(
       'hanako_chat_retry_reset_',

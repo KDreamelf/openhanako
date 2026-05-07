@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -24,6 +26,68 @@ func TestPH01ListModelsRequiresChannelID(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), ph01ErrInvalidPayload)
+}
+
+func TestPH01PublicStoryModelsUsesRootPublicTokenLimits(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Token{}, &model.PH01Identity{}))
+
+	oldSelfUseModeEnabled := operation_setting.SelfUseModeEnabled
+	operation_setting.SelfUseModeEnabled = true
+	t.Cleanup(func() {
+		operation_setting.SelfUseModeEnabled = oldSelfUseModeEnabled
+	})
+
+	rootUser, _, err := model.FindOrCreateUserFromPH01(1, "root", "beef")
+	require.NoError(t, err)
+	var publicToken model.Token
+	require.NoError(t, db.First(&publicToken, "user_id = ? AND name = ?", rootUser.Id, model.PH01PublicTokenName).Error)
+	require.NoError(t, db.Model(&publicToken).Updates(map[string]any{
+		"group":                "default",
+		"unlimited_quota":      false,
+		"remain_quota":         200,
+		"model_limits_enabled": true,
+		"model_limits":         "story-model",
+	}).Error)
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "story-model", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "chat-model", ChannelId: 1, Enabled: true},
+	}).Error)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/public/story/models", nil)
+
+	PH01PublicStoryModels(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body struct {
+		Models []string `json:"models"`
+		Tier   string   `json:"tier"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "public", body.Tier)
+	require.Equal(t, []string{"story-model"}, body.Models)
+	require.NoError(t, db.First(&publicToken, "id = ?", publicToken.Id).Error)
+	require.False(t, publicToken.UnlimitedQuota)
+	require.Equal(t, 200, publicToken.RemainQuota)
+}
+
+func TestPH01PublicStoryChatRejectsStreamAndTools(t *testing.T) {
+	require.NoError(t, ph01ValidatePublicStoryChatRequest(ph01ChatRequest{
+		Model:    "story-model",
+		Messages: []map[string]interface{}{{"role": "user", "content": "hi"}},
+	}))
+	require.Error(t, ph01ValidatePublicStoryChatRequest(ph01ChatRequest{
+		Model:    "story-model",
+		Messages: []map[string]interface{}{{"role": "user", "content": "hi"}},
+		Stream:   true,
+	}))
+	require.Error(t, ph01ValidatePublicStoryChatRequest(ph01ChatRequest{
+		Model:    "story-model",
+		Messages: []map[string]interface{}{{"role": "user", "content": "hi"}},
+		Tools:    []map[string]interface{}{{"type": "function"}},
+	}))
 }
 
 func TestPH01ChannelStoreMemoryRoundTrip(t *testing.T) {

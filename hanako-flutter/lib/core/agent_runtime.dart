@@ -508,7 +508,9 @@ List<Map<String, dynamic>> runtimeMessagesToOpenAi(
   List<RuntimeMessage> messages, {
   String? systemPrompt,
 }) {
-  final transformed = _insertSyntheticToolResults(messages);
+  final transformed = _mergeConsecutiveUserMessages(
+    _insertSyntheticToolResults(messages),
+  );
   final out = <Map<String, dynamic>>[
     if (systemPrompt != null && systemPrompt.trim().isNotEmpty)
       {'role': 'system', 'content': systemPrompt.trim()},
@@ -518,6 +520,27 @@ List<Map<String, dynamic>> runtimeMessagesToOpenAi(
     if (openAi != null) out.add(openAi);
   }
   return out;
+}
+
+List<RuntimeMessage> _mergeConsecutiveUserMessages(
+  List<RuntimeMessage> messages,
+) {
+  final result = <RuntimeMessage>[];
+  for (final message in messages) {
+    if (message.role == 'user' &&
+        result.isNotEmpty &&
+        result.last.role == 'user') {
+      final previous = result.removeLast();
+      final merged = [previous.visibleText, message.visibleText]
+          .map((text) => text.trim())
+          .where((text) => text.isNotEmpty)
+          .join('\n\n');
+      result.add(RuntimeMessage.userText(merged));
+      continue;
+    }
+    result.add(message);
+  }
+  return result;
 }
 
 List<RuntimeMessage> _insertSyntheticToolResults(

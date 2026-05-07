@@ -47,6 +47,7 @@ const (
 	ph01ErrInternalError     = "internal_error"
 	ph01ErrUserDisabled      = "user_disabled"
 	ph01ErrRateLimitExceeded = "rate_limit_exceeded"
+	ph01ErrAccessDenied      = "access_denied"
 )
 
 type ph01SignedRequest struct {
@@ -201,6 +202,54 @@ func PH01ListModels(c *gin.Context) {
 		"models": ch.AllowedModels,
 		"tier":   ch.Tier,
 	})
+}
+
+func PH01PublicStoryModels(c *gin.Context) {
+	_, _, allowedModels, ok := ph01RequireRootPublicStoryCarrier(c)
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"models": allowedModels,
+		"tier":   "public",
+	})
+}
+
+func PH01PublicStoryChat(c *gin.Context) {
+	rawBody, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		ph01ProtocolError(c, http.StatusBadRequest, ph01ErrInvalidPayload, err.Error())
+		return
+	}
+	relayBody, chatReq, err := ph01BuildRelayBody(rawBody)
+	if err != nil {
+		ph01ProtocolError(c, http.StatusBadRequest, ph01ErrInvalidPayload, err.Error())
+		return
+	}
+	if err := ph01ValidatePublicStoryChatRequest(chatReq); err != nil {
+		ph01ProtocolError(c, http.StatusBadRequest, ph01ErrInvalidPayload, err.Error())
+		return
+	}
+
+	carrier, usingGroup, allowedModels, ok := ph01RequireRootPublicStoryCarrier(c)
+	if !ok {
+		return
+	}
+	if !ph01ModelAllowed(allowedModels, chatReq.Model) {
+		ph01ProtocolError(c, http.StatusForbidden, ph01ErrModelNotAllowed, "model "+chatReq.Model+" not allowed")
+		return
+	}
+	if !carrier.UnlimitedQuota && carrier.RemainQuota <= 0 {
+		ph01ProtocolError(c, http.StatusTooManyRequests, ph01ErrRateLimitExceeded, "")
+		return
+	}
+
+	status, responseBody := ph01RelayChat(c, carrier, usingGroup, relayBody)
+	if status >= http.StatusBadRequest {
+		ph01ProtocolError(c, status, ph01ErrInternalError, string(responseBody))
+		return
+	}
+	c.Data(status, "application/json", responseBody)
 }
 
 func PH01Chat(c *gin.Context) {
@@ -412,6 +461,58 @@ func ph01BuildRelayBody(plaintext []byte) ([]byte, ph01ChatRequest, error) {
 		return nil, ph01ChatRequest{}, errors.New("model required")
 	}
 	return body, chatReq, nil
+}
+
+func ph01ValidatePublicStoryChatRequest(chatReq ph01ChatRequest) error {
+	if chatReq.Stream {
+		return errors.New("public story chat does not support stream")
+	}
+	if len(chatReq.Tools) > 0 {
+		return errors.New("public story chat does not support tools")
+	}
+	return nil
+}
+
+func ph01RequireRootPublicStoryCarrier(c *gin.Context) (*model.Token, string, []string, bool) {
+	carrier, err := model.EnsurePH01RootPublicToken()
+	if err != nil {
+		ph01ProtocolError(c, http.StatusServiceUnavailable, ph01ErrInternalError, err.Error())
+		return nil, "", nil, false
+	}
+	if !model.IsPH01PublicToken(carrier) {
+		ph01ProtocolError(c, http.StatusServiceUnavailable, ph01ErrInvalidChannel, "PH01 public carrier key mismatch")
+		return nil, "", nil, false
+	}
+	if !ph01CarrierAllowsClientIP(c, carrier) {
+		ph01ProtocolError(c, http.StatusForbidden, ph01ErrAccessDenied, "client IP is not allowed")
+		return nil, "", nil, false
+	}
+	if !carrier.UnlimitedQuota && carrier.RemainQuota <= 0 {
+		ph01ProtocolError(c, http.StatusTooManyRequests, ph01ErrRateLimitExceeded, "")
+		return nil, "", nil, false
+	}
+	allowedModels, usingGroup, err := ph01AllowedModelsForCarrier(carrier.UserId, carrier)
+	if err != nil {
+		ph01ProtocolError(c, http.StatusForbidden, ph01ErrModelNotAllowed, err.Error())
+		return nil, "", nil, false
+	}
+	if len(allowedModels) == 0 {
+		ph01ProtocolError(c, http.StatusForbidden, ph01ErrModelNotAllowed, "no public story model available")
+		return nil, "", nil, false
+	}
+	return carrier, usingGroup, allowedModels, true
+}
+
+func ph01CarrierAllowsClientIP(c *gin.Context, carrier *model.Token) bool {
+	allowIps := carrier.GetIpLimits()
+	if len(allowIps) == 0 {
+		return true
+	}
+	ip := net.ParseIP(c.ClientIP())
+	if ip == nil {
+		return false
+	}
+	return common.IsIpInCIDRList(ip, allowIps)
 }
 
 func ph01RequireChannel(c *gin.Context, id string) (*ph01Channel, bool) {

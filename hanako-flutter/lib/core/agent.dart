@@ -6,6 +6,7 @@ class Agent {
     this.yuan = 'hanako',
     this.identity,
     this.ishiki,
+    this.avatarPath,
     this.isPrimary = false,
   });
 
@@ -21,15 +22,19 @@ class Agent {
   /// ishiki.md 内容（意识流模板）
   final String? ishiki;
 
+  /// 本地头像文件路径。
+  final String? avatarPath;
+
   /// 是否为主 agent（preferences.json:primaryAgent）
   final bool isPrimary;
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'yuan': yuan,
-        if (identity != null) 'identity': identity,
-        if (ishiki != null) 'ishiki': ishiki,
-        'isPrimary': isPrimary,
-      };
+    'id': id,
+    'name': name,
+    'yuan': yuan,
+    if (identity != null) 'identity': identity,
+    if (ishiki != null) 'ishiki': ishiki,
+    if (avatarPath != null) 'avatarPath': avatarPath,
+    'isPrimary': isPrimary,
+  };
 }

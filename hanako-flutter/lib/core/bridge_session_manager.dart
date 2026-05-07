@@ -6,7 +6,6 @@ import 'package:path/path.dart' as p;
 
 import '../bridge/bridge_adapter.dart';
 import '../bridge/bridge_identity_resolver.dart';
-import '../llm/provider.dart';
 import '../shared/hana_home.dart';
 import 'agent_manager.dart';
 import 'config_coordinator.dart';
@@ -36,8 +35,8 @@ class BridgeSessionManager {
     required this.preferences,
     required this.sessionCoordinator,
     BridgeIdentityResolver? identityResolver,
-  }) : identityResolver = identityResolver ??
-            PreferencesBridgeIdentityResolver(preferences);
+  }) : identityResolver =
+           identityResolver ?? PreferencesBridgeIdentityResolver(preferences);
 
   final HanaHome home;
   final AgentManager agentManager;
@@ -54,11 +53,18 @@ class BridgeSessionManager {
   Future<void> register(BridgeAdapter adapter) async {
     _adapters[adapter.platform] = adapter;
     _adapterSubs[adapter.platform]?.cancel();
-    _adapterSubs[adapter.platform] =
-        adapter.messages.listen((msg) => _onIncoming(adapter, msg));
+    _adapterSubs[adapter.platform] = adapter.messages.listen(
+      (msg) => _onIncoming(adapter, msg),
+    );
   }
 
   BridgeAdapter? get(String platform) => _adapters[platform];
+
+  Future<void> unregister(String platform) async {
+    await _adapterSubs.remove(platform)?.cancel();
+    final adapter = _adapters.remove(platform);
+    await adapter?.dispose();
+  }
 
   bool isSessionStreaming(String sessionKey) =>
       _streamingSessions.contains(sessionKey);
@@ -80,19 +86,20 @@ class BridgeSessionManager {
 
   // ---------------- bridge-sessions.json 索引 ----------------
 
-  File _indexFile() {
-    final agentId = agentManager.activeAgentId;
-    if (agentId == null) {
+  File _indexFile([String? targetAgentId]) {
+    final agentId = targetAgentId ?? agentManager.activeAgentId;
+    if (agentId == null || agentId.trim().isEmpty) {
       throw StateError('no active agent for bridge index');
     }
-    final dir = Directory(p.join(home.agentDir(agentId).path, 'sessions', 'bridge'))
-      ..createSync(recursive: true);
+    final dir = Directory(
+      p.join(home.agentDir(agentId).path, 'sessions', 'bridge'),
+    )..createSync(recursive: true);
     return File(p.join(dir.path, 'bridge-sessions.json'));
   }
 
-  Map<String, dynamic> readIndex() {
+  Map<String, dynamic> readIndex([String? agentId]) {
     try {
-      final f = _indexFile();
+      final f = _indexFile(agentId);
       if (!f.existsSync()) return <String, dynamic>{};
       return (jsonDecode(f.readAsStringSync()) as Map<String, dynamic>);
     } catch (_) {
@@ -100,9 +107,9 @@ class BridgeSessionManager {
     }
   }
 
-  void writeIndex(Map<String, dynamic> index) {
+  void writeIndex(Map<String, dynamic> index, [String? agentId]) {
     try {
-      final f = _indexFile();
+      final f = _indexFile(agentId);
       f.writeAsStringSync(
         const JsonEncoder.withIndent('  ').convert(index),
         flush: true,
@@ -114,7 +121,8 @@ class BridgeSessionManager {
 
   Future<void> _onIncoming(BridgeAdapter adapter, IncomingMessage msg) async {
     final platform = adapter.platform;
-    final isGroup = (msg.raw['chat_type'] == 'group') ||
+    final isGroup =
+        (msg.raw['chat_type'] == 'group') ||
         (msg.chatId != null && msg.chatId!.startsWith('oc_')) ||
         (msg.raw['message']?['chat_type'] == 'group');
     final platformPrefix = switch (platform) {
@@ -135,22 +143,26 @@ class BridgeSessionManager {
     );
     final isOwner = scope == HanakoIdentityScope.owner;
 
-    final reply = await executeExternalMessage(
-      msg.text,
-      sessionKey,
-      meta: {
-        'name': msg.userName,
-        'userId': msg.userId,
-      },
-      guest: !isOwner,
-      contextTag: '与外部用户 (${platform}) 对话',
-    );
+    String? reply;
+    try {
+      reply = await executeExternalMessage(
+        msg.text,
+        sessionKey,
+        agentId: await _configuredAgentId(platform),
+        meta: {'name': msg.userName, 'userId': msg.userId},
+        guest: !isOwner,
+        contextTag: '与外部用户 ($platform) 对话',
+      );
+    } catch (e) {
+      reply = '桥接处理失败：${_humanError(e)}';
+      // ignore: avoid_print
+      print('[bridge] incoming failed: $e');
+    }
 
     if (reply != null && reply.isNotEmpty && msg.chatId != null) {
-      final result = await adapter.send(OutgoingMessage(
-        chatId: msg.chatId!,
-        text: reply,
-      ));
+      final result = await adapter.send(
+        OutgoingMessage(chatId: msg.chatId!, text: reply),
+      );
       if (result is BridgeError) {
         // 显式错误（规避 BUG-4 静默失败）
         // ignore: avoid_print
@@ -159,50 +171,94 @@ class BridgeSessionManager {
     }
   }
 
+  String _humanError(Object error) {
+    final text = error.toString();
+    return text.startsWith('Bad state: ')
+        ? text.substring('Bad state: '.length)
+        : text;
+  }
+
   /// 外部消息触发的 session prompt：根据 guest 标志决定模式。
   Future<String?> executeExternalMessage(
     String prompt,
     String sessionKey, {
+    String? agentId,
     Map<String, dynamic>? meta,
     bool guest = true,
     String? contextTag,
   }) async {
-    if (_streamingSessions.contains(sessionKey)) {
+    final targetAgentId = await _resolveTargetAgentId(agentId);
+    final streamingKey = '$targetAgentId:$sessionKey';
+    if (_streamingSessions.contains(streamingKey)) {
       // 已在生成中，把新消息追加到 buffer 由 SessionCoordinator 内部处理
       return null;
     }
-    _streamingSessions.add(sessionKey);
+    _streamingSessions.add(streamingKey);
     try {
-      // 当前 spike：复用 SessionCoordinator.prompt 把消息传给同一个 active session。
-      // 完整 owner/guest 模式（独立 SessionManager + tools 过滤 + custom system prompt）
-      // 在 SessionCoordinator 接入 bridge sub-session 后激活。当前先记录 meta。
-      final assistantBuf = StringBuffer();
-      await for (final ev in sessionCoordinator.prompt(prompt)) {
-        if (ev is TextDelta) assistantBuf.write(ev.text);
-        if (ev is LlmError) {
-          // ignore: avoid_print
-          print('[bridge] llm error: ${ev.message}');
-          break;
-        }
+      final index = readIndex(targetAgentId);
+      final entry =
+          (index[sessionKey] as Map?)?.cast<String, dynamic>() ??
+          <String, dynamic>{};
+      BridgePromptResult result;
+      try {
+        result = await sessionCoordinator.runBridgePrompt(
+          agentId: targetAgentId,
+          sessionKey: sessionKey,
+          prompt: prompt,
+          existingSessionPath: entry['sessionPath']?.toString(),
+        );
+      } catch (e) {
+        // ignore: avoid_print
+        print('[bridge] llm error: $e');
+        rethrow;
       }
       // 更新索引
-      final index = readIndex();
-      final entry = (index[sessionKey] as Map?)?.cast<String, dynamic>() ??
-          <String, dynamic>{};
-      entry.addAll({
+      final updated = <String, dynamic>{
+        'agentId': targetAgentId,
+        'sessionPath': result.sessionPath,
         'lastUsedAt': DateTime.now().toUtc().toIso8601String(),
-        if (meta != null) ...meta,
+        ...?meta,
         'guest': guest,
-        if (contextTag != null) 'contextTag': contextTag,
-      });
+      };
+      if (contextTag != null) updated['contextTag'] = contextTag;
+      entry.addAll(updated);
       index[sessionKey] = entry;
-      writeIndex(index);
-      return assistantBuf.toString().trim().isEmpty
-          ? null
-          : assistantBuf.toString().trim();
+      writeIndex(index, targetAgentId);
+      return result.reply;
     } finally {
-      _streamingSessions.remove(sessionKey);
+      _streamingSessions.remove(streamingKey);
     }
+  }
+
+  Future<String?> _configuredAgentId(String platform) async {
+    final bridge = preferences.get<Map>('bridge');
+    final key = platform == 'lark' ? 'feishu' : platform;
+    final raw = bridge?[key];
+    if (raw is Map) {
+      final configured = raw['agentId']?.toString().trim();
+      if (configured != null && configured.isNotEmpty) return configured;
+    }
+    return null;
+  }
+
+  Future<String> _resolveTargetAgentId(String? configuredAgentId) async {
+    final clean = configuredAgentId?.trim();
+    if (clean != null && clean.isNotEmpty) {
+      final agent = await agentManager.getAgent(clean);
+      if (agent == null) {
+        throw StateError('桥接目标 Agent 不存在：$clean');
+      }
+      return clean;
+    }
+    final active = agentManager.activeAgentId;
+    if (active != null && await agentManager.getAgent(active) != null) {
+      return active;
+    }
+    final fallback = await agentManager.resolveDefaultAgentId();
+    if (fallback == null) {
+      throw StateError('没有可用 Agent');
+    }
+    return fallback;
   }
 
   /// session_key 解析（platform / type）。

@@ -45,10 +45,13 @@ class SessionSummaryStore {
 
   void save(SessionSummary s) {
     final f = _file(s.sessionId);
-    f.writeAsStringSync(
-      const JsonEncoder.withIndent('  ').convert(s.toJson()),
+    final tmp = File('${f.path}.tmp');
+    tmp.writeAsStringSync(
+      '${const JsonEncoder.withIndent('  ').convert(s.toJson())}\n',
       flush: true,
     );
+    if (f.existsSync()) f.deleteSync();
+    tmp.renameSync(f.path);
   }
 
   /// 列出所有"脏"摘要（summary != snapshot），供 deep-memory 处理。
@@ -71,10 +74,12 @@ class SessionSummaryStore {
   void markProcessed(String sessionId) {
     final s = load(sessionId);
     if (s == null) return;
-    save(s.copyWith(
-      snapshot: s.summary,
-      snapshotAt: DateTime.now().toUtc().toIso8601String(),
-    ));
+    save(
+      s.copyWith(
+        snapshot: s.summary,
+        snapshotAt: DateTime.now().toUtc().toIso8601String(),
+      ),
+    );
   }
 
   /// 滚动摘要：把 session 历史 messages 滚成一段两节摘要。
@@ -98,11 +103,13 @@ class SessionSummaryStore {
     }
 
     final turnCount = messages.where((m) => m.role == 'user').length;
-    final totalBudget =
-        turnCount * 40 < _summaryCapTotal ? turnCount * 40 : _summaryCapTotal;
+    final totalBudget = turnCount * 40 < _summaryCapTotal
+        ? turnCount * 40
+        : _summaryCapTotal;
     final adjusted = totalBudget < _summaryFloor ? _summaryFloor : totalBudget;
-    final factsBudget =
-        (adjusted * 0.3).round() < 15 ? 15 : (adjusted * 0.3).round();
+    final factsBudget = (adjusted * 0.3).round() < 15
+        ? 15
+        : (adjusted * 0.3).round();
     final eventsBudget = adjusted - factsBudget;
 
     final convoText = StringBuffer();
@@ -114,12 +121,13 @@ class SessionSummaryStore {
       convoText.writeln('[${m.role}] $content');
     }
 
-    final systemPrompt = '''
+    final systemPrompt =
+        '''
 你是会话摘要助手。请按以下两节格式输出，每节单独标题：
 ## 重要事实
-（用户侧稳定信息：偏好、决定、习惯、身份特征。${factsBudget}字以内。）
+（用户侧稳定信息：偏好、决定、习惯、身份特征。$factsBudget字以内。）
 ## 事情经过
-（按时间顺序，带 HH:MM 标注，抓重点脉络。${eventsBudget}字以内。）
+（按时间顺序，带 HH:MM 标注，抓重点脉络。$eventsBudget字以内。）
 
 总字数严格控制在 $adjusted 字以内。
 不输出其他内容。''';
@@ -157,11 +165,15 @@ class SessionSummaryStore {
   static String _scrubPii(String s) {
     var out = s;
     out = out.replaceAll(
-        RegExp(r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'), '[REDACTED:CARD]');
+      RegExp(r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'),
+      '[REDACTED:CARD]',
+    );
     out = out.replaceAll(RegExp(r'\b\d{17}[\dXx]\b'), '[REDACTED:ID]');
     out = out.replaceAll(RegExp(r'\b1[3-9]\d{9}\b'), '[REDACTED:PHONE]');
     out = out.replaceAll(
-        RegExp(r'\b[\w.+-]+@[\w-]+\.[\w.-]+\b'), '[REDACTED:EMAIL]');
+      RegExp(r'\b[\w.+-]+@[\w-]+\.[\w.-]+\b'),
+      '[REDACTED:EMAIL]',
+    );
     return out;
   }
 }
@@ -189,31 +201,30 @@ class SessionSummary {
     String? snapshot,
     String? snapshotAt,
     String? updatedAt,
-  }) =>
-      SessionSummary(
-        sessionId: sessionId,
-        createdAt: createdAt,
-        updatedAt: updatedAt ?? this.updatedAt,
-        summary: summary ?? this.summary,
-        snapshot: snapshot ?? this.snapshot,
-        snapshotAt: snapshotAt ?? this.snapshotAt,
-      );
+  }) => SessionSummary(
+    sessionId: sessionId,
+    createdAt: createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+    summary: summary ?? this.summary,
+    snapshot: snapshot ?? this.snapshot,
+    snapshotAt: snapshotAt ?? this.snapshotAt,
+  );
 
   Map<String, dynamic> toJson() => {
-        'session_id': sessionId,
-        'created_at': createdAt,
-        'updated_at': updatedAt,
-        'summary': summary,
-        'snapshot': snapshot,
-        if (snapshotAt != null) 'snapshot_at': snapshotAt,
-      };
+    'session_id': sessionId,
+    'created_at': createdAt,
+    'updated_at': updatedAt,
+    'summary': summary,
+    'snapshot': snapshot,
+    if (snapshotAt != null) 'snapshot_at': snapshotAt,
+  };
 
   static SessionSummary fromJson(Map<String, dynamic> j) => SessionSummary(
-        sessionId: j['session_id'] as String,
-        createdAt: j['created_at'] as String,
-        updatedAt: j['updated_at'] as String,
-        summary: j['summary'] as String? ?? '',
-        snapshot: j['snapshot'] as String? ?? '',
-        snapshotAt: j['snapshot_at'] as String?,
-      );
+    sessionId: j['session_id'] as String,
+    createdAt: j['created_at'] as String,
+    updatedAt: j['updated_at'] as String,
+    summary: j['summary'] as String? ?? '',
+    snapshot: j['snapshot'] as String? ?? '',
+    snapshotAt: j['snapshot_at'] as String?,
+  );
 }

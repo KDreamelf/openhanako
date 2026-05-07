@@ -43,16 +43,22 @@ class AgentManager {
         final yuan = (agentBlock?['yuan'] as String?) ?? 'hanako';
         final identityFile = File(p.join(entry.path, 'identity.md'));
         final ishikiFile = File(p.join(entry.path, 'ishiki.md'));
-        out.add(Agent(
-          id: id,
-          name: name,
-          yuan: yuan,
-          identity:
-              identityFile.existsSync() ? identityFile.readAsStringSync() : null,
-          ishiki:
-              ishikiFile.existsSync() ? ishikiFile.readAsStringSync() : null,
-          isPrimary: primary == id,
-        ));
+        final avatarFile = File(p.join(entry.path, 'avatars', 'avatar.png'));
+        out.add(
+          Agent(
+            id: id,
+            name: name,
+            yuan: yuan,
+            identity: identityFile.existsSync()
+                ? identityFile.readAsStringSync()
+                : null,
+            ishiki: ishikiFile.existsSync()
+                ? ishikiFile.readAsStringSync()
+                : null,
+            avatarPath: avatarFile.existsSync() ? avatarFile.path : null,
+            isPrimary: primary == id,
+          ),
+        );
       }
     }
     _listCache = (raw: out, ts: now);
@@ -76,17 +82,75 @@ class AgentManager {
       'agent': {'name': name, 'yuan': yuan},
       'user': {'name': 'User'},
       'memory': {'enabled': true},
+      'skills': {'enabled': <String>[]},
     });
-    File(p.join(dir.path, 'identity.md'))
-        .writeAsStringSync('# $name\n\n身份描述...\n');
+    File(
+      p.join(dir.path, 'identity.md'),
+    ).writeAsStringSync('# $name\n\n身份描述...\n');
     File(p.join(dir.path, 'ishiki.md')).writeAsStringSync('# 意识流模板\n');
 
     _home.agentSessions(agentId);
     _home.agentMemory(agentId);
     _home.agentLearnedSkills(agentId);
+    Directory(p.join(dir.path, 'avatars')).createSync(recursive: true);
+    _home.agentDesk(agentId);
 
     _listCache = null;
     return Agent(id: agentId, name: name, yuan: yuan);
+  }
+
+  Future<Agent> updateAgent(
+    String agentId, {
+    String? name,
+    String? yuan,
+    String? identity,
+    String? ishiki,
+    String? avatarSourcePath,
+    bool removeAvatar = false,
+  }) async {
+    final dir = Directory(p.join(_home.agentsDir.path, agentId));
+    if (!dir.existsSync() || !_home.agentConfig(agentId).existsSync()) {
+      throw StateError('Agent $agentId not found');
+    }
+    final cfgFile = _home.agentConfig(agentId);
+    final cfg = YamlIo.readMap(cfgFile);
+    final agentBlock = Map<String, dynamic>.from(
+      (cfg['agent'] as Map?)?.cast<String, dynamic>() ?? const {},
+    );
+    final cleanName = name?.trim();
+    if (cleanName != null) {
+      if (cleanName.isEmpty) throw ArgumentError('Agent name is required');
+      agentBlock['name'] = cleanName;
+    }
+    final cleanYuan = yuan?.trim();
+    if (cleanYuan != null && cleanYuan.isNotEmpty) {
+      agentBlock['yuan'] = cleanYuan;
+    }
+    cfg['agent'] = agentBlock;
+    YamlIo.writeWhole(cfgFile, cfg);
+    if (identity != null) {
+      File(p.join(dir.path, 'identity.md')).writeAsStringSync(identity);
+    }
+    if (ishiki != null) {
+      File(p.join(dir.path, 'ishiki.md')).writeAsStringSync(ishiki);
+    }
+    final avatarFile = File(p.join(dir.path, 'avatars', 'avatar.png'));
+    if (removeAvatar && avatarFile.existsSync()) {
+      avatarFile.deleteSync();
+    }
+    final cleanAvatarPath = avatarSourcePath?.trim();
+    if (cleanAvatarPath != null && cleanAvatarPath.isNotEmpty) {
+      final source = File(cleanAvatarPath);
+      if (!source.existsSync()) {
+        throw StateError('Avatar source not found: $cleanAvatarPath');
+      }
+      avatarFile.parent.createSync(recursive: true);
+      source.copySync(avatarFile.path);
+    }
+    _listCache = null;
+    final updated = await getAgent(agentId);
+    if (updated == null) throw StateError('Agent $agentId not found');
+    return updated;
   }
 
   Future<void> switchAgent(String agentId) async {

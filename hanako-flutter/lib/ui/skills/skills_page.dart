@@ -51,6 +51,161 @@ class _SkillsPageState extends ConsumerState<SkillsPage> {
     if (mounted) setState(() => _busy = false);
   }
 
+  Future<void> _installSkill() async {
+    final eng = ref.read(engineProvider);
+    final agentId = eng.agentManager.activeAgentId;
+    if (agentId == null) {
+      _showSnack('请先选择 Agent');
+      return;
+    }
+    final pathCtrl = TextEditingController();
+    final contentCtrl = TextEditingController();
+    final nameCtrl = TextEditingController();
+    var enable = true;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('安装 Skill'),
+          content: SizedBox(
+            width: 620,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: pathCtrl,
+                    decoration: const InputDecoration(
+                      labelText: '本地 Skill 目录或 SKILL.md 路径',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Skill 名称（粘贴内容时可选）',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: contentCtrl,
+                    minLines: 6,
+                    maxLines: 12,
+                    decoration: const InputDecoration(
+                      labelText: 'SKILL.md 内容',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    value: enable,
+                    title: const Text('安装后立即启用'),
+                    onChanged: (value) =>
+                        setDialogState(() => enable = value ?? true),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('安装'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved != true) return;
+
+    setState(() => _busy = true);
+    try {
+      final content = contentCtrl.text.trim();
+      final path = pathCtrl.text.trim();
+      final skill = content.isNotEmpty
+          ? await eng.skillManager.installFromContent(
+              agentId,
+              skillContent: content,
+              skillName: nameCtrl.text,
+              enable: enable,
+            )
+          : path.isEmpty
+          ? throw ArgumentError('需要本地路径或 SKILL.md 内容')
+          : await eng.skillManager.installFromPath(
+              agentId,
+              path,
+              enable: enable,
+            );
+      await _reload();
+      _showSnack('已安装 Skill：${skill.name}');
+    } catch (e) {
+      _showSnack('安装失败：$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _toggleSkill(SkillSpec skill, bool enabled) async {
+    final eng = ref.read(engineProvider);
+    final agentId = eng.agentManager.activeAgentId;
+    if (agentId == null) return;
+    try {
+      await eng.skillManager.setSkillEnabled(agentId, skill.name, enabled);
+      await _reload();
+      _showSnack(enabled ? 'Skill 已启用' : 'Skill 已禁用');
+    } catch (e) {
+      _showSnack('更新失败：$e');
+    }
+  }
+
+  Future<void> _deleteSkill(SkillSpec skill) async {
+    final eng = ref.read(engineProvider);
+    final agentId = eng.agentManager.activeAgentId;
+    if (agentId == null || skill.agentId != agentId) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除 Skill'),
+        content: Text('删除 ${skill.displayName}？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await eng.skillManager.deleteLearnedSkill(agentId, skill.name);
+      if (_selected?.name == skill.name &&
+          _selected?.agentId == skill.agentId) {
+        _selected = null;
+        _selectedContent = null;
+      }
+      await _reload();
+      _showSnack('Skill 已删除');
+    } catch (e) {
+      _showSnack('删除失败：$e');
+    }
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
   Future<void> _onTapSkill(SkillSpec skill) async {
     setState(() {
       _selected = skill;
@@ -84,16 +239,22 @@ class _SkillsPageState extends ConsumerState<SkillsPage> {
       }
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('打开目录失败：$e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('打开目录失败：$e')));
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final eng = ref.watch(engineProvider);
-    final all = eng.skillManager.allSkills;
+    final agentId = eng.agentManager.activeAgentId;
+    final enabled = agentId == null
+        ? const <String>{}
+        : eng.skillManager.enabledSkillNames(agentId).toSet();
+    final all = eng.skillManager.allSkills
+        .where((skill) => skill.agentId == null || skill.agentId == agentId)
+        .toList(growable: false);
     final filtered = _filter.isEmpty
         ? all
         : all.where((s) {
@@ -110,6 +271,11 @@ class _SkillsPageState extends ConsumerState<SkillsPage> {
       appBar: AppBar(
         title: const Text('Skill 管理'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.add),
+            tooltip: '安装 Skill',
+            onPressed: _busy ? null : _installSkill,
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: '重新扫描',
@@ -167,23 +333,38 @@ class _SkillsPageState extends ConsumerState<SkillsPage> {
                       : ListView(
                           children: [
                             if (builtin.isNotEmpty)
-                              _SkillSectionHeader('内置（builtin）·  ${builtin.length}'),
+                              _SkillSectionHeader(
+                                '内置（builtin）·  ${builtin.length}',
+                              ),
                             for (final s in builtin)
                               _SkillTile(
                                 spec: s,
-                                selected: _selected?.name == s.name &&
+                                enabled: enabled.contains(s.name),
+                                canDelete: false,
+                                selected:
+                                    _selected?.name == s.name &&
                                     _selected?.agentId == s.agentId,
                                 onTap: () => _onTapSkill(s),
+                                onToggle: (value) => _toggleSkill(s, value),
+                                onDelete: null,
                               ),
                             if (learned.isNotEmpty)
                               _SkillSectionHeader(
-                                  '已学习（learned）·  ${learned.length}'),
+                                '已学习（learned）·  ${learned.length}',
+                              ),
                             for (final s in learned)
                               _SkillTile(
                                 spec: s,
-                                selected: _selected?.name == s.name &&
+                                enabled: enabled.contains(s.name),
+                                canDelete: s.agentId == agentId,
+                                selected:
+                                    _selected?.name == s.name &&
                                     _selected?.agentId == s.agentId,
                                 onTap: () => _onTapSkill(s),
+                                onToggle: (value) => _toggleSkill(s, value),
+                                onDelete: s.agentId == agentId
+                                    ? () => _deleteSkill(s)
+                                    : null,
                               ),
                           ],
                         ),
@@ -224,9 +405,9 @@ class _SkillSectionHeader extends StatelessWidget {
       child: Text(
         text,
         style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: Theme.of(context).colorScheme.primary,
-              letterSpacing: 0.5,
-            ),
+          color: Theme.of(context).colorScheme.primary,
+          letterSpacing: 0.5,
+        ),
       ),
     );
   }
@@ -235,12 +416,20 @@ class _SkillSectionHeader extends StatelessWidget {
 class _SkillTile extends StatelessWidget {
   const _SkillTile({
     required this.spec,
+    required this.enabled,
+    required this.canDelete,
     required this.selected,
     required this.onTap,
+    required this.onToggle,
+    required this.onDelete,
   });
   final SkillSpec spec;
+  final bool enabled;
+  final bool canDelete;
   final bool selected;
   final VoidCallback onTap;
+  final ValueChanged<bool> onToggle;
+  final VoidCallback? onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -252,12 +441,23 @@ class _SkillTile extends StatelessWidget {
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
       ),
-      trailing: spec.agentId != null
-          ? Tooltip(
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Switch(value: enabled, onChanged: onToggle),
+          if (canDelete)
+            IconButton(
+              icon: const Icon(Icons.delete_outline, size: 18),
+              tooltip: '删除',
+              onPressed: onDelete,
+            )
+          else if (spec.agentId != null)
+            Tooltip(
               message: 'agent: ${spec.agentId}',
               child: const Icon(Icons.person_pin, size: 16),
-            )
-          : null,
+            ),
+        ],
+      ),
       onTap: onTap,
     );
   }
@@ -317,22 +517,22 @@ class _SkillDetail extends StatelessWidget {
                 Wrap(
                   spacing: 6,
                   children: [
-                    Text('allowed-tools: ',
-                        style: theme.textTheme.bodySmall),
+                    Text('allowed-tools: ', style: theme.textTheme.bodySmall),
                     for (final t in spec.allowedTools)
                       Chip(
                         label: Text(t, style: const TextStyle(fontSize: 11)),
                         visualDensity: VisualDensity.compact,
-                        materialTapTargetSize:
-                            MaterialTapTargetSize.shrinkWrap,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                       ),
                   ],
                 ),
               ],
               if (spec.license != null) ...[
                 const SizedBox(height: 4),
-                Text('license: ${spec.license}',
-                    style: theme.textTheme.bodySmall),
+                Text(
+                  'license: ${spec.license}',
+                  style: theme.textTheme.bodySmall,
+                ),
               ],
             ],
           ),
@@ -343,19 +543,19 @@ class _SkillDetail extends StatelessWidget {
           child: busy
               ? const Center(child: CircularProgressIndicator())
               : content == null
-                  ? const Center(child: Text('（内容尚未加载）'))
-                  : Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: SingleChildScrollView(
-                        child: SelectableText(
-                          content!,
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            fontFamily: 'monospace',
-                            height: 1.4,
-                          ),
-                        ),
+              ? const Center(child: Text('（内容尚未加载）'))
+              : Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      content!,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontFamily: 'monospace',
+                        height: 1.4,
                       ),
                     ),
+                  ),
+                ),
         ),
         // 底部：路径 + 复制
         Padding(
@@ -367,7 +567,9 @@ class _SkillDetail extends StatelessWidget {
               Expanded(
                 child: Text(
                   spec.filePath,
-                  style: theme.textTheme.bodySmall?.copyWith(color: Colors.grey),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: Colors.grey,
+                  ),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),

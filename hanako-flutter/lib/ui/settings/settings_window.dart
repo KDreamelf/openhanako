@@ -6,7 +6,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../app/providers.dart';
+import '../../core/browser_manager.dart';
+import '../../core/bridge_source_manager.dart';
+import '../../core/collaboration_manager.dart';
+import '../../core/heartbeat_runtime.dart';
 import '../../identity/identity.dart';
+import '../../local_tools/local_tools.dart';
 import '../onboarding/onboarding_page.dart';
 
 /// SharedPreferences key（与主窗口启动读取共用）。
@@ -31,6 +36,13 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
   Map<String, dynamic>? _userConfig;
   Map<String, String>? _paths;
   Map<String, dynamic>? _runtime;
+  HeartbeatConfig? _heartbeatConfig;
+  List<Map<String, dynamic>> _cronJobs = const [];
+  List<Map<String, dynamic>> _activities = const [];
+  List<BridgeSourceConfig> _bridgeSources = const [];
+  Map<String, BridgeSourceStatus> _bridgeStatuses = const {};
+  BrowserStatus? _browserStatus;
+  CollaborationSettings? _collaborationSettings;
   bool _hasSavedIdentity = false;
   bool _identityReady = false;
   bool _accountBusy = false;
@@ -84,6 +96,25 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       final agents = await eng.agentManager.listAgents(forceRefresh: true);
       final prefs = eng.preferences.getPreferences();
       final cfg = eng.config.read();
+      final heartbeatConfig = eng.heartbeatRuntime.readConfig();
+      final cronJobs = eng.cronStore
+          .listJobs()
+          .map((job) {
+            final runs = eng.cronStore.getRunHistory(job.id, limit: 1);
+            return {
+              ...job.toJson(),
+              if (runs.isNotEmpty) 'lastRun': runs.first.toJson(),
+            };
+          })
+          .toList(growable: false);
+      final activities = eng.activityStore
+          .list(limit: 20)
+          .map((entry) => entry.toJson())
+          .toList(growable: false);
+      final bridgeSources = eng.bridgeSourceManager.listSources();
+      final bridgeStatuses = eng.bridgeSourceManager.statuses();
+      final browserStatus = eng.browserManager.status();
+      final collaborationSettings = eng.collaborationManager.readSettings();
       final identity = repo.current;
       final hasSavedIdentity = await repo.hasSavedIdentity();
       final paths = {
@@ -109,6 +140,13 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
         _prefs = prefs;
         _authConfig = _stringKeyMap(cfg['auth']);
         _userConfig = _stringKeyMap(cfg['user']);
+        _heartbeatConfig = heartbeatConfig;
+        _cronJobs = cronJobs;
+        _activities = activities;
+        _bridgeSources = bridgeSources;
+        _bridgeStatuses = bridgeStatuses;
+        _browserStatus = browserStatus;
+        _collaborationSettings = collaborationSettings;
         _hasSavedIdentity = hasSavedIdentity;
         _identityReady = identity != null;
         _identityPublicKeyHash = identity?.publicKeyHash;
@@ -367,6 +405,406 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     }
   }
 
+  Future<void> _editAgentProfile(Map<String, dynamic> agent) async {
+    final id = agent['id'] as String;
+    final nameCtrl = TextEditingController(
+      text: _textValue(agent['name']) ?? '',
+    );
+    final identityCtrl = TextEditingController(
+      text: _textValue(agent['identity']) ?? '',
+    );
+    final ishikiCtrl = TextEditingController(
+      text: _textValue(agent['ishiki']) ?? '',
+    );
+    final avatarCtrl = TextEditingController();
+    var yuan = _textValue(agent['yuan']) ?? 'hanako';
+    var removeAvatar = false;
+    final currentAvatar = _textValue(agent['avatarPath']);
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('编辑 Agent 档案'),
+          content: SizedBox(
+            width: 640,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      _AgentAvatar(
+                        avatarPath: currentAvatar,
+                        isPrimary: agent['isPrimary'] == true,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: TextField(
+                          controller: avatarCtrl,
+                          decoration: const InputDecoration(
+                            labelText: '头像文件路径（留空不变）',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  CheckboxListTile(
+                    value: removeAvatar,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('删除当前头像'),
+                    controlAffinity: ListTileControlAffinity.leading,
+                    onChanged: currentAvatar == null
+                        ? null
+                        : (value) => setDialogState(
+                            () => removeAvatar = value ?? false,
+                          ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(labelText: '名称'),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: yuan,
+                    decoration: const InputDecoration(labelText: '源模板（yuan）'),
+                    items: const [
+                      DropdownMenuItem(value: 'hanako', child: Text('Hanako')),
+                      DropdownMenuItem(value: 'butter', child: Text('Butter')),
+                      DropdownMenuItem(value: 'ming', child: Text('Ming')),
+                      DropdownMenuItem(value: 'kong', child: Text('Kong')),
+                    ],
+                    onChanged: (value) => yuan = value ?? 'hanako',
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: identityCtrl,
+                    minLines: 3,
+                    maxLines: 6,
+                    decoration: const InputDecoration(
+                      labelText: '身份设定 identity.md',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: ishikiCtrl,
+                    minLines: 6,
+                    maxLines: 12,
+                    decoration: const InputDecoration(
+                      labelText: '人格设定 ishiki.md',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved != true) return;
+    try {
+      await ref
+          .read(engineProvider)
+          .agentManager
+          .updateAgent(
+            id,
+            name: nameCtrl.text,
+            yuan: yuan,
+            identity: identityCtrl.text,
+            ishiki: ishikiCtrl.text,
+            avatarSourcePath: avatarCtrl.text,
+            removeAvatar: removeAvatar,
+          );
+      ref.invalidate(agentListProvider);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Agent 档案已保存')));
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('保存失败：$e')));
+    }
+  }
+
+  Future<void> _saveHeartbeatConfig(HeartbeatConfig next) async {
+    final eng = ref.read(engineProvider);
+    eng.heartbeatRuntime.writeConfig(next);
+    if (next.enabled) {
+      eng.heartbeatRuntime.start();
+    } else {
+      await eng.heartbeatRuntime.stop();
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('工作巡检配置已保存')));
+    await _refresh();
+  }
+
+  Future<void> _editWorkspaceRoots() async {
+    final current = _heartbeatConfig ?? const HeartbeatConfig();
+    final ctrl = TextEditingController(text: current.workspaceRoots.join('\n'));
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('工作目录'),
+        content: SizedBox(
+          width: 560,
+          child: TextField(
+            controller: ctrl,
+            minLines: 4,
+            maxLines: 8,
+            decoration: const InputDecoration(
+              labelText: '每行一个目录',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (saved != true) return;
+    final roots = ctrl.text
+        .split(RegExp(r'[\r\n]+'))
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList(growable: false);
+    await _saveHeartbeatConfig(current.copyWith(workspaceRoots: roots));
+  }
+
+  Future<void> _setHeartbeatInterval(int minutes) async {
+    final current = _heartbeatConfig ?? const HeartbeatConfig();
+    await _saveHeartbeatConfig(current.copyWith(intervalMinutes: minutes));
+  }
+
+  Future<void> _toggleCronScheduler(bool enabled) async {
+    final eng = ref.read(engineProvider);
+    if (enabled) {
+      eng.cronScheduler.start();
+    } else {
+      await eng.cronScheduler.stop();
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(enabled ? 'Cron 调度已启动' : 'Cron 调度已停止')),
+    );
+    await _refresh();
+  }
+
+  Future<void> _editBridgeSource(BridgeSourceConfig current) async {
+    final agentIdCtrl = TextEditingController(text: current.agentId ?? '');
+    final tokenCtrl = TextEditingController(
+      text: current.credentials['token'] ?? '',
+    );
+    final appIdCtrl = TextEditingController(
+      text: current.credentials['appId'] ?? current.credentials['appID'] ?? '',
+    );
+    final appSecretCtrl = TextEditingController(
+      text: current.credentials['appSecret'] ?? '',
+    );
+    final verificationCtrl = TextEditingController(
+      text: current.credentials['verificationToken'] ?? '',
+    );
+    final encryptCtrl = TextEditingController(
+      text: current.credentials['encryptKey'] ?? '',
+    );
+    var enabled = current.enabled;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text('配置 ${current.label}'),
+          content: SizedBox(
+            width: 560,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: agentIdCtrl,
+                    decoration: const InputDecoration(
+                      labelText: '目标 Agent ID（留空使用当前活动 Agent）',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  if (current.platform == 'telegram')
+                    TextField(
+                      controller: tokenCtrl,
+                      decoration: const InputDecoration(labelText: 'Bot Token'),
+                      obscureText: true,
+                    ),
+                  if (current.platform == 'feishu') ...[
+                    TextField(
+                      controller: appIdCtrl,
+                      decoration: const InputDecoration(labelText: 'App ID'),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: appSecretCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'App Secret',
+                      ),
+                      obscureText: true,
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: verificationCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Verification Token（可选）',
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: encryptCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Encrypt Key（可选）',
+                      ),
+                      obscureText: true,
+                    ),
+                  ],
+                  if (current.platform == 'qq') ...[
+                    TextField(
+                      controller: appIdCtrl,
+                      decoration: const InputDecoration(labelText: 'App ID'),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: appSecretCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'App Secret 或 Token',
+                      ),
+                      obscureText: true,
+                    ),
+                  ],
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    value: enabled,
+                    title: const Text('启用'),
+                    onChanged: (value) =>
+                        setDialogState(() => enabled = value ?? false),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved != true) return;
+
+    final credentials = <String, String>{};
+    switch (current.platform) {
+      case 'telegram':
+        credentials['token'] = tokenCtrl.text;
+      case 'feishu':
+        credentials
+          ..['appId'] = appIdCtrl.text
+          ..['appSecret'] = appSecretCtrl.text
+          ..['verificationToken'] = verificationCtrl.text
+          ..['encryptKey'] = encryptCtrl.text;
+      case 'qq':
+        credentials
+          ..['appID'] = appIdCtrl.text
+          ..['appSecret'] = appSecretCtrl.text;
+    }
+    await ref
+        .read(engineProvider)
+        .bridgeSourceManager
+        .save(
+          BridgeSourceConfig(
+            platform: current.platform,
+            enabled: enabled,
+            agentId: agentIdCtrl.text,
+            credentials: credentials,
+          ),
+        );
+    await _refresh();
+  }
+
+  Future<void> _deleteBridgeSource(BridgeSourceConfig source) async {
+    await ref.read(engineProvider).bridgeSourceManager.delete(source.platform);
+    await _refresh();
+  }
+
+  Future<void> _toggleBrowserTool(bool enabled) async {
+    ref.read(engineProvider).browserManager.setEnabled(enabled);
+    await _refresh();
+  }
+
+  Future<void> _toggleDmAutoReply(bool enabled) async {
+    final eng = ref.read(engineProvider);
+    eng.collaborationManager.saveSettings(
+      eng.collaborationManager.readSettings().copyWith(dmAutoReply: enabled),
+    );
+    await _refresh();
+  }
+
+  Future<void> _toggleChannelAutoTriage(bool enabled) async {
+    final eng = ref.read(engineProvider);
+    eng.collaborationManager.saveSettings(
+      eng.collaborationManager.readSettings().copyWith(
+        channelAutoTriage: enabled,
+      ),
+    );
+    await _refresh();
+  }
+
+  Future<void> _toggleCronJob(String id, bool enabled) async {
+    ref.read(engineProvider).cronStore.toggleJob(id, enabled: enabled);
+    await _refresh();
+  }
+
+  Future<void> _runCronNow(String id) async {
+    try {
+      final run = await ref.read(engineProvider).cronScheduler.runNow(id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('立即执行完成：${run.status}')));
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('立即执行失败：$e')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final content = _error != null
@@ -385,6 +823,14 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
                       _buildMySection(),
                       const SizedBox(height: 24),
                       _buildAgentsSection(),
+                      const SizedBox(height: 24),
+                      _buildWorkSection(),
+                      const SizedBox(height: 24),
+                      _buildBridgeSection(),
+                      const SizedBox(height: 24),
+                      _buildBrowserSection(),
+                      const SizedBox(height: 24),
+                      _buildCollaborationSection(),
                       const SizedBox(height: 24),
                       _buildAppearanceSection(),
                       const SizedBox(height: 24),
@@ -561,15 +1007,30 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
           children: [
             for (final a in _agents!)
               ListTile(
-                leading: Icon(
-                  a['isPrimary'] == true ? Icons.star : Icons.person_outline,
+                leading: _AgentAvatar(
+                  avatarPath: _textValue(a['avatarPath']),
+                  isPrimary: a['isPrimary'] == true,
                 ),
                 title: Text(a['name'] as String),
-                subtitle: Text('${a['id']} · yuan=${a['yuan']}'),
+                subtitle: Text(
+                  [
+                    '${a['id']} · yuan=${a['yuan']}',
+                    if (_textValue(a['identity']) != null)
+                      _textValue(a['identity'])!
+                          .split('\n')
+                          .firstWhere(
+                            (line) => line.trim().isNotEmpty,
+                            orElse: () => '',
+                          )
+                          .trim(),
+                  ].where((line) => line.isNotEmpty).join('\n'),
+                ),
                 trailing: PopupMenuButton<String>(
                   onSelected: (v) async {
                     final eng = ref.read(engineProvider);
-                    if (v == 'switch') {
+                    if (v == 'edit') {
+                      await _editAgentProfile(a);
+                    } else if (v == 'switch') {
                       final id = a['id'] as String;
                       await eng.agentManager.switchAgent(id);
                       eng.config.retarget(id);
@@ -579,6 +1040,10 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(content: Text('已切换到 ${a['name']}')),
                       );
+                    } else if (v == 'primary') {
+                      eng.preferences.savePrimaryAgent(a['id'] as String);
+                      ref.invalidate(agentListProvider);
+                      await _refresh();
                     } else if (v == 'delete') {
                       await eng.agentManager.deleteAgent(a['id'] as String);
                       if (ref.read(activeAgentIdProvider) == a['id']) {
@@ -589,7 +1054,9 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
                     }
                   },
                   itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'edit', child: Text('编辑档案')),
                     PopupMenuItem(value: 'switch', child: Text('切换为活动')),
+                    PopupMenuItem(value: 'primary', child: Text('设为主 Agent')),
                     PopupMenuItem(value: 'delete', child: Text('删除')),
                   ],
                 ),
@@ -600,9 +1067,354 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
               title: const Text('新建 Agent'),
               onTap: _createAgent,
             ),
+            const Divider(height: 0),
+            _buildToolCapabilitiesTile(),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildToolCapabilitiesTile() {
+    final names = LocalToolRegistry.buildTools()
+        .map((tool) => tool.name)
+        .toList(growable: false);
+    return ExpansionTile(
+      leading: const Icon(Icons.extension_outlined),
+      title: const Text('工具能力'),
+      subtitle: Text('${names.length} 个已注册工具'),
+      childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final name in names)
+                Chip(
+                  label: Text(name),
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildBridgeSection() {
+    return _Section(
+      title: '消息来源',
+      subtitle: 'Telegram、飞书/Lark、QQ 外部入口。',
+      child: Card(
+        child: Column(
+          children: [
+            for (final source in _bridgeSources)
+              ListTile(
+                leading: Icon(_bridgeIcon(source.platform)),
+                title: Text(source.label),
+                subtitle: Text(_bridgeSubtitle(source)),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Switch(
+                      value: source.enabled,
+                      onChanged: (value) async {
+                        await ref
+                            .read(engineProvider)
+                            .bridgeSourceManager
+                            .setEnabled(source.platform, value);
+                        await _refresh();
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.edit_outlined, size: 18),
+                      tooltip: '编辑',
+                      onPressed: () => _editBridgeSource(source),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline, size: 18),
+                      tooltip: '删除配置',
+                      onPressed: source.configured || source.enabled
+                          ? () => _deleteBridgeSource(source)
+                          : null,
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _bridgeSubtitle(BridgeSourceConfig source) {
+    final status = _bridgeStatuses[source.platform];
+    final parts = <String>[
+      source.configured ? '已配置' : '未配置',
+      source.enabled ? '已启用' : '已禁用',
+      '状态：${_bridgeStateLabel(status?.state ?? "disabled")}',
+      if (source.agentId != null && source.agentId!.isNotEmpty)
+        'agent=${source.agentId}',
+      if (status?.error != null) status!.error!,
+    ];
+    return parts.join(' · ');
+  }
+
+  String _bridgeStateLabel(String state) => switch (state) {
+    'connected' => '已连接',
+    'error' => '错误',
+    'disabled' => '已停止',
+    _ => '未连接',
+  };
+
+  IconData _bridgeIcon(String platform) => switch (platform) {
+    'telegram' => Icons.send_outlined,
+    'feishu' || 'lark' => Icons.business_center_outlined,
+    'qq' => Icons.chat_bubble_outline,
+    _ => Icons.forum_outlined,
+  };
+
+  Widget _buildBrowserSection() {
+    final status = _browserStatus;
+    final enabled = status?.enabled ?? true;
+    final running = status?.running ?? false;
+    final title = status?.title;
+    final url = status?.url;
+    return _Section(
+      title: 'Browser',
+      subtitle: '网页工具状态与权限开关。',
+      child: Card(
+        child: Column(
+          children: [
+            SwitchListTile(
+              secondary: const Icon(Icons.public_outlined),
+              title: const Text('允许 Agent 使用 Browser 工具'),
+              subtitle: Text(running ? '运行中' : '未运行'),
+              value: enabled,
+              onChanged: _toggleBrowserTool,
+            ),
+            const Divider(height: 0),
+            ListTile(
+              leading: const Icon(Icons.travel_explore_outlined),
+              title: Text(title == null || title.isEmpty ? '当前没有页面' : title),
+              subtitle: Text(url == null || url.isEmpty ? '未打开 URL' : url),
+              trailing: IconButton(
+                icon: const Icon(Icons.refresh, size: 18),
+                tooltip: '刷新状态',
+                onPressed: _refresh,
+              ),
+            ),
+            if (status?.lastError != null)
+              ListTile(
+                leading: Icon(
+                  Icons.error_outline,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+                title: const Text('最近错误'),
+                subtitle: Text(status!.lastError!),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCollaborationSection() {
+    final settings = _collaborationSettings ?? const CollaborationSettings();
+    return _Section(
+      title: '多 Agent 协作',
+      subtitle: 'Delegate、DM 自动回复和频道 triage。',
+      child: Card(
+        child: Column(
+          children: [
+            SwitchListTile(
+              secondary: const Icon(Icons.mark_chat_unread_outlined),
+              title: const Text('DM 自动回复'),
+              subtitle: const Text('关闭后只保留显式 message_agent / dm 工具调用'),
+              value: settings.dmAutoReply,
+              onChanged: _toggleDmAutoReply,
+            ),
+            const Divider(height: 0),
+            SwitchListTile(
+              secondary: const Icon(Icons.hub_outlined),
+              title: const Text('Channel 自动 triage'),
+              subtitle: Text('最大协作深度 ${settings.maxDepth}'),
+              value: settings.channelAutoTriage,
+              onChanged: _toggleChannelAutoTriage,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWorkSection() {
+    final heartbeat = _heartbeatConfig ?? const HeartbeatConfig();
+    final cronRunning = ref.read(engineProvider).cronScheduler.isRunning;
+    final rootsLabel = heartbeat.workspaceRoots.isEmpty
+        ? '未配置'
+        : heartbeat.workspaceRoots.join('\n');
+    return _Section(
+      title: '工作',
+      subtitle: '工作目录、巡检、Cron 和后台活动。',
+      child: Card(
+        child: Column(
+          children: [
+            SwitchListTile(
+              secondary: const Icon(Icons.monitor_heart_outlined),
+              title: const Text('Heartbeat 巡检'),
+              subtitle: Text('每 ${heartbeat.intervalMinutes} 分钟扫描 jian.md'),
+              value: heartbeat.enabled,
+              onChanged: (value) =>
+                  _saveHeartbeatConfig(heartbeat.copyWith(enabled: value)),
+            ),
+            const Divider(height: 0),
+            ListTile(
+              leading: const Icon(Icons.folder_copy_outlined),
+              title: const Text('工作目录'),
+              subtitle: SelectableText(rootsLabel),
+              trailing: Wrap(
+                spacing: 8,
+                children: [
+                  if (heartbeat.workspaceRoots.isNotEmpty)
+                    IconButton(
+                      icon: const Icon(Icons.folder_open),
+                      tooltip: '打开第一个目录',
+                      onPressed: () =>
+                          _openPath(heartbeat.workspaceRoots.first),
+                    ),
+                  IconButton(
+                    icon: const Icon(Icons.edit),
+                    tooltip: '编辑工作目录',
+                    onPressed: _editWorkspaceRoots,
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 0),
+            ListTile(
+              leading: const Icon(Icons.timer_outlined),
+              title: const Text('巡检间隔'),
+              subtitle: const Text('修改后立即保存'),
+              trailing: SegmentedButton<int>(
+                segments: const [
+                  ButtonSegment(value: 5, label: Text('5 分')),
+                  ButtonSegment(value: 17, label: Text('17 分')),
+                  ButtonSegment(value: 30, label: Text('30 分')),
+                ],
+                selected: {5, 17, 30}.contains(heartbeat.intervalMinutes)
+                    ? {heartbeat.intervalMinutes}
+                    : <int>{},
+                emptySelectionAllowed: true,
+                onSelectionChanged: (values) {
+                  if (values.isNotEmpty) _setHeartbeatInterval(values.first);
+                },
+              ),
+            ),
+            const Divider(height: 0),
+            SwitchListTile(
+              secondary: const Icon(Icons.schedule_outlined),
+              title: const Text('Cron 调度'),
+              subtitle: Text(
+                _cronJobs.isEmpty ? '暂无定时任务' : '${_cronJobs.length} 个任务',
+              ),
+              value: cronRunning,
+              onChanged: _toggleCronScheduler,
+            ),
+            if (_cronJobs.isEmpty)
+              const ListTile(
+                leading: Icon(Icons.info_outline),
+                title: Text('Cron 任务为空'),
+                subtitle: Text('Agent 可通过 cron 工具创建定时任务。'),
+              )
+            else
+              for (final job in _cronJobs) _buildCronJobTile(job),
+            const Divider(height: 0),
+            ListTile(
+              leading: const Icon(Icons.history_outlined),
+              title: const Text('最近活动'),
+              subtitle: Text(
+                _activities.isEmpty ? '暂无后台活动' : '${_activities.length} 条记录',
+              ),
+            ),
+            if (_activities.isEmpty)
+              const ListTile(
+                leading: Icon(Icons.inbox_outlined),
+                title: Text('暂无活动记录'),
+                subtitle: Text('Heartbeat 或 Cron 执行后会出现在这里。'),
+              )
+            else
+              for (final activity in _activities.take(8))
+                _buildActivityTile(activity),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCronJobTile(Map<String, dynamic> job) {
+    final id = _textValue(job['id']) ?? '';
+    final label = _textValue(job['label']) ?? id;
+    final type = _textValue(job['type']) ?? '?';
+    final enabled = job['enabled'] == true;
+    final nextRun = _textValue(job['nextRunAt']) ?? '无';
+    final lastRun = job['lastRun'] is Map
+        ? job['lastRun'] as Map<String, dynamic>
+        : null;
+    final lastStatus = _textValue(lastRun?['status']);
+    final lastError = _textValue(lastRun?['error']);
+    return ListTile(
+      leading: Icon(enabled ? Icons.play_circle_outline : Icons.pause_circle),
+      title: Text(label),
+      subtitle: Text(
+        [
+          '$id · $type · 下次 $nextRun',
+          if (lastStatus != null) '最近：$lastStatus',
+          if (lastError != null) '错误：$lastError',
+        ].join('\n'),
+      ),
+      isThreeLine: lastStatus != null || lastError != null,
+      trailing: Wrap(
+        spacing: 4,
+        children: [
+          IconButton(
+            icon: Icon(enabled ? Icons.toggle_on : Icons.toggle_off),
+            tooltip: enabled ? '禁用' : '启用',
+            onPressed: id.isEmpty ? null : () => _toggleCronJob(id, !enabled),
+          ),
+          IconButton(
+            icon: const Icon(Icons.flash_on_outlined),
+            tooltip: '立即执行',
+            onPressed: id.isEmpty ? null : () => _runCronNow(id),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActivityTile(Map<String, dynamic> activity) {
+    final status = _textValue(activity['status']) ?? '?';
+    final type = _textValue(activity['type']) ?? 'activity';
+    final summary = _textValue(activity['summary']) ?? type;
+    final target = _textValue(activity['targetPath']);
+    final error = _textValue(activity['error']);
+    final color = switch (status) {
+      'success' || 'done' => Colors.green,
+      'error' => Theme.of(context).colorScheme.error,
+      'skipped' => Theme.of(context).colorScheme.outline,
+      _ => Theme.of(context).colorScheme.primary,
+    };
+    return ListTile(
+      dense: true,
+      leading: Icon(Icons.circle, color: color, size: 12),
+      title: Text(summary),
+      subtitle: Text(
+        ['$type · $status', ?target, if (error != null) '错误：$error'].join('\n'),
+      ),
+      isThreeLine: target != null || error != null,
     );
   }
 
@@ -1103,6 +1915,27 @@ class _StoryDialog extends StatelessWidget {
           child: const Text('关闭'),
         ),
       ],
+    );
+  }
+}
+
+class _AgentAvatar extends StatelessWidget {
+  const _AgentAvatar({required this.avatarPath, required this.isPrimary});
+
+  final String? avatarPath;
+  final bool isPrimary;
+
+  @override
+  Widget build(BuildContext context) {
+    final path = avatarPath;
+    final file = path == null ? null : File(path);
+    final image = file != null && file.existsSync() ? FileImage(file) : null;
+    return CircleAvatar(
+      radius: 20,
+      backgroundImage: image,
+      child: image == null
+          ? Icon(isPrimary ? Icons.star : Icons.person_outline, size: 20)
+          : null,
     );
   }
 }

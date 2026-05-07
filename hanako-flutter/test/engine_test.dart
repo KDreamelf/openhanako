@@ -1,9 +1,11 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hanako/core/engine.dart';
 import 'package:hanako/identity/identity.dart';
+import 'package:hanako/llm/provider.dart';
 import 'package:hanako/shared/hana_home.dart';
 
 void main() {
@@ -59,6 +61,54 @@ void main() {
       expect(engine.isInitialized, isTrue);
       expect(repo.current, isNull);
     });
+
+    test('故事生成走 root 公开故事接口且不要求当前身份', () async {
+      final backend = _PublicStoryBackendClient(
+        models: const ['public-story-model'],
+        responses: const ['公开故事正文'],
+      );
+      final engine = await HanaEngine.initialize(
+        home: home,
+        backendClient: backend,
+      );
+      addTearDown(engine.dispose);
+
+      final result = await engine.identityRepository.composer.compose(
+        hanakoWordlist.take(12).toList(growable: false),
+      );
+
+      expect(result.fallback, isFalse);
+      expect(result.story, '公开故事正文');
+      expect(backend.publicModelListCalls, 1);
+      expect(backend.publicChatCalls, 1);
+      expect(backend.requestedModels, ['public-story-model']);
+      expect(backend.handshakeCalls, 0);
+      expect(backend.privateChatCalls, 0);
+    });
+
+    test('故事恢复解析同样走 root 公开故事接口', () async {
+      final matrix = List.generate(12, (index) => [index, index]);
+      final backend = _PublicStoryBackendClient(
+        models: const ['public-story-model'],
+        responses: [
+          jsonEncode({'columns': matrix}),
+        ],
+      );
+      final engine = await HanaEngine.initialize(
+        home: home,
+        backendClient: backend,
+      );
+      addTearDown(engine.dispose);
+
+      final parsed = await engine.identityRepository.parser.parse('一段模糊故事');
+
+      expect(parsed.isWellFormed, isTrue);
+      expect(parsed.columns, matrix);
+      expect(backend.publicModelListCalls, 1);
+      expect(backend.publicChatCalls, 1);
+      expect(backend.handshakeCalls, 0);
+      expect(backend.privateChatCalls, 0);
+    });
   });
 }
 
@@ -110,4 +160,58 @@ class _FailingReadKeystore extends SecureKeystore {
 
   @override
   Future<void> writeVault(IdentityVault vault, {String? pin}) async {}
+}
+
+class _PublicStoryBackendClient extends HanakoBackendClient {
+  _PublicStoryBackendClient({required this.models, required this.responses});
+
+  final List<String> models;
+  final List<String> responses;
+  final requestedModels = <String>[];
+  int publicModelListCalls = 0;
+  int publicChatCalls = 0;
+  int handshakeCalls = 0;
+  int privateChatCalls = 0;
+
+  @override
+  Future<GatewayModelList> listPublicStoryModels() async {
+    publicModelListCalls++;
+    return GatewayModelList(models: models);
+  }
+
+  @override
+  Future<Map<String, dynamic>> publicStoryChat({
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    Map<String, dynamic>? extra,
+  }) async {
+    requestedModels.add(model);
+    final response = responses[publicChatCalls];
+    publicChatCalls++;
+    return {
+      'choices': [
+        {
+          'message': {'content': response},
+        },
+      ],
+    };
+  }
+
+  @override
+  Future<HanakoChannel> handshake({required HanakoKeyPair keyPair}) async {
+    handshakeCalls++;
+    throw StateError('故事流程不应建立私有通道');
+  }
+
+  @override
+  Future<Map<String, dynamic>> chat({
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    List<Tool>? tools,
+    Object? toolChoice,
+    Map<String, dynamic>? extra,
+  }) async {
+    privateChatCalls++;
+    throw StateError('故事流程不应使用私有聊天接口');
+  }
 }
