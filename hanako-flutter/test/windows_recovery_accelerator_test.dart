@@ -30,5 +30,6 @@ void main() {
     expect(outcome.ids, ids);
     expect(outcome.publicKeyHex, pair.publicKeyHex);
     expect(outcome.hammingDistance, 0);
+    expect(outcome.backend, startsWith('cuda:'));
   });
 }

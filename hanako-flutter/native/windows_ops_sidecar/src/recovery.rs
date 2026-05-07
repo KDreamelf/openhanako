@@ -1,3 +1,4 @@
+use crate::cuda_driver::CudaBackend;
 use anyhow::{Context, Result, bail};
 use k256::SecretKey;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
@@ -15,6 +16,7 @@ use std::time::{Duration, Instant};
 const MNEMONIC_LEN: usize = 12;
 const ENTROPY_BYTES: usize = 16;
 const PBKDF2_ROUNDS: u32 = 2048;
+const CUDA_BATCH_SIZE: usize = 1024;
 
 #[derive(Debug, Deserialize)]
 struct RecoverySearchRequest {
@@ -38,6 +40,7 @@ struct FoundSeed {
 
 #[derive(Debug)]
 struct SearchResult {
+    backend: String,
     found: Option<FoundSeed>,
     attempted: u64,
     elapsed_ms: u128,
@@ -46,12 +49,16 @@ struct SearchResult {
 }
 
 pub fn status_request(_params: &Value) -> Result<Value> {
+    let cuda = CudaBackend::status();
     Ok(json!({
         "available": true,
-        "backend": "rust_cpu",
+        "backend": if cuda.available { "cuda" } else { "rust_cpu" },
         "gpu": {
-            "available": false,
-            "reason": "CUDA/OpenCL recovery kernel is not bundled in this build"
+            "available": cuda.available,
+            "reason": cuda.reason,
+            "device": cuda.device_name,
+            "compute_capability": cuda.compute_capability,
+            "driver_version": cuda.driver_version
         }
     }))
 }
@@ -61,19 +68,21 @@ pub fn search_request(params: &Value) -> Result<Value> {
         .context("recovery.search 请求参数应为 JSON object")?;
     validate_request(&request)?;
 
-    let result = if let Some(worker_count) = request.worker_count {
+    let result = if let Ok(result) = search_cuda(&request) {
+        result
+    } else if let Some(worker_count) = request.worker_count {
         let threads = worker_count.max(1);
         ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .context("创建恢复搜索线程池失败")?
-            .install(|| search(&request))
+            .install(|| search_cpu(&request))
     } else {
-        search(&request)
+        search_cpu(&request)
     };
 
     Ok(json!({
-        "backend": "rust_cpu",
+        "backend": result.backend,
         "found": result.found.is_some(),
         "ids": result.found.as_ref().map(|hit| &hit.ids),
         "public_key_hex": result.found.as_ref().map(|hit| &hit.public_key_hex),
@@ -128,7 +137,147 @@ fn validate_request(request: &RecoverySearchRequest) -> Result<()> {
     Ok(())
 }
 
-fn search(request: &RecoverySearchRequest) -> SearchResult {
+fn search_cuda(request: &RecoverySearchRequest) -> Result<SearchResult> {
+    let backend = CudaBackend::new()?;
+    let started = Instant::now();
+    let deadline = Duration::from_millis(request.deadline_ms);
+    let k = request.matrix[0].len();
+    let base_ids = request
+        .matrix
+        .iter()
+        .map(|column| column[0])
+        .collect::<Vec<_>>();
+    let target_hashes = request
+        .target_hashes
+        .iter()
+        .map(|hash| hash.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+
+    let mut attempted = 0u64;
+    let mut timed_out = false;
+    let mut found = None;
+    let mut last_distance = 0;
+    let mut batch_ids = Vec::<Vec<u16>>::with_capacity(CUDA_BATCH_SIZE);
+    let mut batch_mnemonics = Vec::<Vec<u8>>::with_capacity(CUDA_BATCH_SIZE);
+
+    for d in 0..=request.d_max_hard {
+        last_distance = d;
+        if started.elapsed() >= deadline {
+            timed_out = true;
+            break;
+        }
+
+        let c_idx_max = binom(MNEMONIC_LEN, d);
+        if c_idx_max == 0 {
+            continue;
+        }
+        let subst_max = pow(k.saturating_sub(1), d);
+        if subst_max == 0 {
+            continue;
+        }
+
+        for c_idx in 0..c_idx_max {
+            let cols = combo_at(MNEMONIC_LEN, d, c_idx);
+            let mut ids = base_ids.clone();
+            for s_idx in 0..subst_max {
+                if s_idx % 256 == 0 && started.elapsed() >= deadline {
+                    timed_out = true;
+                    break;
+                }
+
+                ids.copy_from_slice(&base_ids);
+                let mut s = s_idx;
+                let rank_base = (k - 1) as u64;
+                for &column in &cols {
+                    let rank = ((s % rank_base) + 1) as usize;
+                    ids[column] = request.matrix[column][rank];
+                    s /= rank_base;
+                }
+                attempted += 1;
+
+                if ids_to_entropy(&ids).is_none() {
+                    continue;
+                }
+                if let Some(bytes) = mnemonic_bytes(&ids, &request.wordlist) {
+                    batch_ids.push(ids.clone());
+                    batch_mnemonics.push(bytes);
+                }
+                if batch_ids.len() >= CUDA_BATCH_SIZE {
+                    found = flush_cuda_batch(
+                        &backend,
+                        &target_hashes,
+                        d,
+                        &mut batch_ids,
+                        &mut batch_mnemonics,
+                    )?;
+                    if found.is_some() {
+                        break;
+                    }
+                }
+            }
+            if timed_out || found.is_some() {
+                break;
+            }
+        }
+
+        if found.is_none() && !batch_ids.is_empty() {
+            found = flush_cuda_batch(
+                &backend,
+                &target_hashes,
+                d,
+                &mut batch_ids,
+                &mut batch_mnemonics,
+            )?;
+        }
+        if timed_out || found.is_some() {
+            break;
+        }
+    }
+
+    Ok(SearchResult {
+        backend: format!(
+            "cuda:{}:sm_{}",
+            backend.device_name(),
+            backend.compute_capability().replace('.', "")
+        ),
+        found,
+        attempted,
+        elapsed_ms: started.elapsed().as_millis(),
+        hamming_distance: last_distance,
+        timed_out,
+    })
+}
+
+fn flush_cuda_batch(
+    backend: &CudaBackend,
+    target_hashes: &HashSet<String>,
+    hamming_distance: usize,
+    batch_ids: &mut Vec<Vec<u16>>,
+    batch_mnemonics: &mut Vec<Vec<u8>>,
+) -> Result<Option<FoundSeed>> {
+    let seeds = backend.pbkdf2_batch(batch_mnemonics)?;
+    for (ids, seed) in batch_ids.iter().zip(seeds.iter()) {
+        let Some((public_key_hex, public_key_hash)) = derive_public_key_from_seed(seed) else {
+            continue;
+        };
+        if target_hashes.contains(&public_key_hash) {
+            let hit = FoundSeed {
+                ids: ids.clone(),
+                public_key_hex,
+                public_key_hash,
+                hamming_distance,
+            };
+            batch_ids.clear();
+            batch_mnemonics.clear();
+            return Ok(Some(hit));
+        }
+    }
+    batch_ids.clear();
+    batch_mnemonics.clear();
+    Ok(None)
+}
+
+fn search_cpu(request: &RecoverySearchRequest) -> SearchResult {
     let started = Instant::now();
     let deadline = Duration::from_millis(request.deadline_ms);
     let k = request.matrix[0].len();
@@ -220,6 +369,7 @@ fn search(request: &RecoverySearchRequest) -> SearchResult {
     }
 
     SearchResult {
+        backend: "rust_cpu".to_owned(),
         found: found.lock().ok().and_then(|g| g.clone()),
         attempted: attempted.load(Ordering::Relaxed),
         elapsed_ms: started.elapsed().as_millis(),
@@ -255,13 +405,27 @@ fn derive_public_key(ids: &[u16], wordlist: &[String]) -> Option<(String, String
         .join(" ");
     let mut seed = [0u8; 64];
     pbkdf2_hmac::<Sha512>(mnemonic.as_bytes(), b"mnemonic", PBKDF2_ROUNDS, &mut seed);
+    derive_public_key_from_seed(&seed)
+}
 
+fn derive_public_key_from_seed(seed: &[u8; 64]) -> Option<(String, String)> {
     let secret = SecretKey::from_slice(&seed[..32]).ok()?;
     let public_key = secret.public_key();
     let encoded = public_key.to_encoded_point(false);
     let public_key_bytes = encoded.as_bytes();
     let public_key_hash = hex::encode(Sha256::digest(public_key_bytes));
     Some((hex::encode(public_key_bytes), public_key_hash))
+}
+
+fn mnemonic_bytes(ids: &[u16], wordlist: &[String]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(128);
+    for (index, id) in ids.iter().enumerate() {
+        if index > 0 {
+            out.push(b' ');
+        }
+        out.extend_from_slice(wordlist.get(usize::from(*id))?.as_bytes());
+    }
+    Some(out)
 }
 
 fn ids_to_entropy(ids: &[u16]) -> Option<[u8; ENTROPY_BYTES]> {
@@ -356,7 +520,7 @@ mod tests {
             worker_count: Some(1),
         };
 
-        let result = search(&request);
+        let result = search_cpu(&request);
 
         let hit = result.found.expect("rank-0 matrix should be found");
         assert_eq!(hit.ids, ids);
@@ -390,7 +554,7 @@ mod tests {
             worker_count: Some(2),
         };
 
-        let result = search(&request);
+        let result = search_cpu(&request);
 
         let hit = result.found.expect("D=2 matrix should be found");
         assert_eq!(hit.ids, ids);
