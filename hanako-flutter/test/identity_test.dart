@@ -7,6 +7,7 @@
 //   4. SecureKeystore 写入 / 读取 / PIN 错抛 InvalidPinException；
 //   5. Recovery 在已知公钥下能从打乱顺序的 ID 恢复。
 
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -497,6 +498,49 @@ void main() {
       expect(outcome.success, isTrue);
       expect(outcome.identity!.publicKeyHash, originalHash);
       expect(repo.current!.publicKeyHash, originalHash);
+    });
+
+    test('loginWithStory → 确定性恢复失败后回退 LLM 语义解析', () async {
+      var llmCalls = 0;
+      var targetIds = <int>[];
+      final repo2 = IdentityRepository(
+        keystore: FileSecureKeystore(hanaHome: tmp),
+        composer: repo.composer,
+        parser: StoryParser(
+          caller:
+              ({
+                required String systemPrompt,
+                required String userPrompt,
+                int? maxTokens,
+              }) async {
+                llmCalls++;
+                return jsonEncode({
+                  'columns': [
+                    for (final id in targetIds) [id, id],
+                  ],
+                });
+              },
+        ),
+      );
+
+      final reg = await repo2.registerNew(pin: '1234');
+      targetIds = reg.words.map((word) => idByWord(word)!).toList();
+      final recalled = [
+        reg.words[1],
+        reg.words[0],
+        ...reg.words.skip(2),
+      ].join('，');
+
+      final outcome = await repo2.verifyCurrentStory(
+        storyOrWords: recalled,
+        pin: '1234',
+        softDeadline: const Duration(seconds: 5),
+        hardDeadline: const Duration(seconds: 5),
+      );
+
+      expect(llmCalls, 1);
+      expect(outcome.success, isTrue);
+      expect(outcome.identity!.publicKeyHash, reg.identity.publicKeyHash);
     });
 
     test('LLM 失败 → fallback=true，账号仍然生成', () async {

@@ -37,6 +37,7 @@ class StoryParseResult {
     required this.columns,
     required this.rawResponse,
     required this.candidatesPerColumn,
+    required this.usedLlm,
   });
 
   /// 12 × K 矩阵。每行（外层）是按用户故事顺序的一个意象，每列内是该意象
@@ -48,6 +49,9 @@ class StoryParseResult {
 
   /// 本次矩阵每列候选数。
   final int candidatesPerColumn;
+
+  /// 本次结果是否来自 LLM 语义匹配。
+  final bool usedLlm;
 
   /// 是否符合协议（12 列 × K 候选 + 全部 ID 在字典范围内）。
   bool get isWellFormed {
@@ -78,16 +82,17 @@ class StoryParser {
   /// 恢复期入口：用户输入 → 12×K 矩阵。
   ///
   /// [storyOrWords] 可以是模糊故事，也可以是用空格 / 逗号分隔的词组。
-  Future<StoryParseResult> parse(String storyOrWords) async {
-    final exactWords =
-        _tryParseExactWords(storyOrWords) ??
-        _tryParseEmbeddedExactWords(storyOrWords);
-    if (exactWords != null) {
-      return StoryParseResult(
-        columns: exactWords,
-        rawResponse: jsonEncode({'columns': exactWords}),
-        candidatesPerColumn: candidatesPerColumn,
-      );
+  Future<StoryParseResult> parse(
+    String storyOrWords, {
+    bool forceLlm = false,
+  }) async {
+    if (!forceLlm) {
+      final exactWords =
+          _tryParseExactWords(storyOrWords) ??
+          _tryParseEmbeddedExactWords(storyOrWords);
+      if (exactWords != null) {
+        return _exactResult(exactWords);
+      }
     }
 
     final raw = await caller(
@@ -100,6 +105,16 @@ class StoryParser {
       columns: cols,
       rawResponse: raw,
       candidatesPerColumn: candidatesPerColumn,
+      usedLlm: true,
+    );
+  }
+
+  StoryParseResult _exactResult(List<List<int>> exactWords) {
+    return StoryParseResult(
+      columns: exactWords,
+      rawResponse: jsonEncode({'columns': exactWords}),
+      candidatesPerColumn: candidatesPerColumn,
+      usedLlm: false,
     );
   }
 

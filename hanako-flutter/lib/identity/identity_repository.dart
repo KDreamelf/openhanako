@@ -185,6 +185,47 @@ class IdentityRepository {
     onProgress,
   }) async {
     final parsed = await parser.parse(storyOrWords);
+    final firstOutcome = await _recoverParsedStory(
+      parsed: parsed,
+      pin: pin,
+      targetPublicKeyHashes: targetPublicKeyHashes,
+      checker: checker,
+      softDeadline: softDeadline,
+      hardDeadline: hardDeadline,
+      onProgress: onProgress,
+    );
+    if (firstOutcome.success || parsed.usedLlm) {
+      return firstOutcome;
+    }
+
+    // 确定性解析只说明故事里能扫出 12 个字典词，不代表用户复述完全正确。
+    // 如果这条快速路径恢复失败，继续走 LLM 语义匹配处理同义词、错记和顺序小偏差。
+    final semanticParsed = await parser.parse(storyOrWords, forceLlm: true);
+    return _recoverParsedStory(
+      parsed: semanticParsed,
+      pin: pin,
+      targetPublicKeyHashes: targetPublicKeyHashes,
+      checker: checker,
+      softDeadline: softDeadline,
+      hardDeadline: hardDeadline,
+      onProgress: onProgress,
+    );
+  }
+
+  Future<LoginOutcome> _recoverParsedStory({
+    required StoryParseResult parsed,
+    required String? pin,
+    required Set<String> targetPublicKeyHashes,
+    required PublicKeyChecker? checker,
+    required Duration softDeadline,
+    required Duration hardDeadline,
+    required void Function(
+      int attempted,
+      int elapsedMs,
+      int currentHammingDistance,
+    )?
+    onProgress,
+  }) async {
     if (!parsed.isWellFormed) {
       return LoginOutcome.malformedMatrix(parsed.rawResponse);
     }
