@@ -434,6 +434,43 @@ class ChatNotifier extends StateNotifier<ChatState> {
       updateBlocks();
     }
 
+    void upsertToolResult(
+      String id,
+      String name,
+      String content, {
+      required bool isError,
+      Map<String, dynamic>? details,
+    }) {
+      hadProgress = true;
+      final index = toolCallIndices[id];
+      if (index == null || index >= currentBlocks.length) {
+        toolCallIndices[id] = currentBlocks.length;
+        currentBlocks.add(
+          RuntimeDisplayToolCallBlock(
+            id: id,
+            name: name.trim().isEmpty ? 'unknown_tool' : name,
+            argsJson: '{}',
+            resultContent: content,
+            resultIsError: isError,
+            resultDetails: details,
+          ),
+        );
+      } else {
+        final old = currentBlocks[index];
+        if (old is RuntimeDisplayToolCallBlock) {
+          currentBlocks[index] = RuntimeDisplayToolCallBlock(
+            id: id,
+            name: name.trim().isNotEmpty ? name : old.name,
+            argsJson: old.argsJson,
+            resultContent: content,
+            resultIsError: isError,
+            resultDetails: details,
+          );
+        }
+      }
+      updateBlocks();
+    }
+
     try {
       await for (final ev in events) {
         switch (ev) {
@@ -447,6 +484,20 @@ class ChatNotifier extends StateNotifier<ChatState> {
             upsertToolCall(id, '', argsDelta: argsJson);
           case ToolCallEnd():
             break;
+          case ToolCallResult(
+            :final id,
+            :final name,
+            :final content,
+            :final isError,
+            :final details,
+          ):
+            upsertToolResult(
+              id,
+              name,
+              content,
+              isError: isError,
+              details: details,
+            );
           case MessageDone():
             if (generation != _sendGeneration) {
               return const _StreamConsumeResult.success();

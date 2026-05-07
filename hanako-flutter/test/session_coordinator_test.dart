@@ -196,6 +196,11 @@ void main() {
     final events = await _drain(first.prompt('列一下目录'));
 
     expect(events.whereType<MessageDone>(), hasLength(1));
+    final toolResult = events.whereType<ToolCallResult>().single;
+    expect(toolResult.id, 'call_1');
+    expect(toolResult.name, 'ls');
+    expect(toolResult.content, contains('"ok": true'));
+    expect(toolResult.isError, false);
     expect(backend.requests, hasLength(2));
     expect(backend.requests[1].map((msg) => msg['role']), [
       'system',

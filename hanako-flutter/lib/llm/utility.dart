@@ -29,42 +29,42 @@ Future<String> callProviderText({
   String? errorMsg;
   final completer = Completer<void>();
   final sub = provider
-      .chat(
-        messages: messages,
-        model: model,
-        cancelToken: cancelToken,
-      )
+      .chat(messages: messages, model: model, cancelToken: cancelToken)
       .listen(
-    (ev) {
-      switch (ev) {
-        case TextDelta(:final text):
-          buf.write(text);
-        case LlmError(:final message):
-          errorMsg = message;
+        (ev) {
+          switch (ev) {
+            case TextDelta(:final text):
+              buf.write(text);
+            case LlmError(:final message):
+              errorMsg = message;
+              if (!completer.isCompleted) completer.complete();
+            case MessageDone():
+              if (!completer.isCompleted) completer.complete();
+            case ThinkingDelta() ||
+                ToolCallStart() ||
+                ToolCallArgsDelta() ||
+                ToolCallEnd() ||
+                ToolCallResult():
+              // utility 调用忽略
+              break;
+          }
+        },
+        onError: (Object e) {
+          errorMsg = '$e';
           if (!completer.isCompleted) completer.complete();
-        case MessageDone():
+        },
+        onDone: () {
           if (!completer.isCompleted) completer.complete();
-        case ThinkingDelta() ||
-              ToolCallStart() ||
-              ToolCallArgsDelta() ||
-              ToolCallEnd():
-          // utility 调用忽略
-          break;
-      }
-    },
-    onError: (Object e) {
-      errorMsg = '$e';
-      if (!completer.isCompleted) completer.complete();
-    },
-    onDone: () {
-      if (!completer.isCompleted) completer.complete();
-    },
-  );
+        },
+      );
 
   try {
-    await completer.future.timeout(timeout, onTimeout: () {
-      errorMsg = 'timeout after ${timeout.inSeconds}s';
-    });
+    await completer.future.timeout(
+      timeout,
+      onTimeout: () {
+        errorMsg = 'timeout after ${timeout.inSeconds}s';
+      },
+    );
   } finally {
     await sub.cancel();
   }

@@ -85,4 +85,20 @@ void main() {
     expect(body['stderr'], contains('Start-Process'));
     expect(body['timed_out'], false);
   });
+
+  test('Windows 命令输出按系统代码页兜底解码', () async {
+    if (!Platform.isWindows) return;
+    const gbkWechat = [0xCE, 0xA2, 0xD0, 0xC5];
+    if (systemEncoding.decode(gbkWechat) != '微信') return;
+
+    final raw = await LocalToolRegistry.execute(LocalToolNames.bash, {
+      'command':
+          'powershell -NoProfile -Command "[Console]::OpenStandardOutput().Write([byte[]](0xCE,0xA2,0xD0,0xC5), 0, 4)"',
+      'timeout_seconds': 5,
+    });
+    final body = jsonDecode(raw) as Map<String, dynamic>;
+
+    expect(body['ok'], true);
+    expect(body['stdout'], '微信');
+  });
 }

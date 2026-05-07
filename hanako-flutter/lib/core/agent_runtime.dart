@@ -105,6 +105,8 @@ class AgentRuntimeLoop {
                 _upsertToolCallBlock(blocks, call);
               }
               yield event;
+            case ToolCallResult():
+              break;
             case MessageDone():
               break;
             case LlmError():
@@ -164,6 +166,13 @@ class AgentRuntimeLoop {
         );
         _context.add(resultMessage);
         await onNewMessages([resultMessage]);
+        yield ToolCallResult(
+          id: call.id,
+          name: call.name,
+          content: result.content,
+          isError: result.isError,
+          details: result.details,
+        );
       }
     }
   }

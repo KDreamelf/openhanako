@@ -84,6 +84,21 @@ class ToolCallEnd extends LlmEvent {
   const ToolCallEnd(this.id);
 }
 
+class ToolCallResult extends LlmEvent {
+  final String id;
+  final String name;
+  final String content;
+  final bool isError;
+  final Map<String, dynamic>? details;
+  const ToolCallResult({
+    required this.id,
+    required this.name,
+    required this.content,
+    this.isError = false,
+    this.details,
+  });
+}
+
 class MessageDone extends LlmEvent {
   final String? finishReason;
   const MessageDone({this.finishReason});

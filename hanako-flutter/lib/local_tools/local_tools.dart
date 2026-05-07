@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
@@ -363,15 +364,22 @@ class LocalToolRegistry {
       workingDirectory: _defaultCwd(cwd),
       runInShell: false,
     );
-    const outputDecoder = Utf8Decoder(allowMalformed: true);
     final stdoutFuture = proc.stdout
-        .transform(outputDecoder)
-        .join()
-        .then(_truncateOutput);
+        .fold<BytesBuilder>(BytesBuilder(copy: false), (all, chunk) {
+          all.add(chunk);
+          return all;
+        })
+        .then(
+          (bytes) => _truncateOutput(_decodeProcessOutput(bytes.takeBytes())),
+        );
     final stderrFuture = proc.stderr
-        .transform(outputDecoder)
-        .join()
-        .then(_truncateOutput);
+        .fold<BytesBuilder>(BytesBuilder(copy: false), (all, chunk) {
+          all.add(chunk);
+          return all;
+        })
+        .then(
+          (bytes) => _truncateOutput(_decodeProcessOutput(bytes.takeBytes())),
+        );
     final exitCode = await proc.exitCode.timeout(
       Duration(seconds: timeoutSeconds),
       onTimeout: () {
@@ -386,6 +394,19 @@ class LocalToolRegistry {
       'stderr': await stderrFuture,
       'timed_out': exitCode == -1,
     };
+  }
+
+  static String _decodeProcessOutput(List<int> bytes) {
+    if (bytes.isEmpty) return '';
+    try {
+      return utf8.decode(bytes);
+    } catch (_) {
+      try {
+        return systemEncoding.decode(bytes);
+      } catch (_) {
+        return utf8.decode(bytes, allowMalformed: true);
+      }
+    }
   }
 
   static _ShellInvocation _resolveShellInvocation(String command) {
