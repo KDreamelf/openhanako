@@ -139,6 +139,30 @@ class IdentityRepository {
     );
   }
 
+  /// 在已登录/已解锁状态下自检一段故事是否能恢复当前身份。
+  ///
+  /// 这不是词表快捷校验；它复用 [loginWithStory] 的完整解析与矩阵恢复流程。
+  /// 目标集合限定为当前身份，避免同一账号存在历史公钥时验证到别的旧身份。
+  Future<LoginOutcome> verifyCurrentStory({
+    required String storyOrWords,
+    String? pin,
+    Duration softDeadline = const Duration(seconds: 30),
+    Duration hardDeadline = const Duration(seconds: 30),
+    void Function(int attempted, int elapsedMs, int currentHammingDistance)?
+    onProgress,
+  }) async {
+    final identity = _current ?? await unlock(pin: pin);
+    return loginWithStory(
+      storyOrWords: storyOrWords,
+      pin: pin,
+      targetPublicKeyHashes: {identity.publicKeyHash},
+      checker: (pub) async => pub == identity.publicKeyHex,
+      softDeadline: softDeadline,
+      hardDeadline: hardDeadline,
+      onProgress: onProgress,
+    );
+  }
+
   /// 用故事恢复长期身份私钥（换设备 / 重装时走这条）。
   ///
   /// [storyOrWords] 可以是模糊故事，也可以直接是逗号 / 空格分隔的词组。

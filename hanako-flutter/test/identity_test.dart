@@ -482,6 +482,23 @@ void main() {
       expect(regenerated.fallback, isFalse);
     });
 
+    test('verifyCurrentStory → 不退出登录也走恢复链路验证当前身份', () async {
+      final reg = await repo.registerNew(pin: '1234');
+      final originalHash = reg.identity.publicKeyHash;
+      await repo.lock();
+
+      final outcome = await repo.verifyCurrentStory(
+        storyOrWords: reg.words.join(' '),
+        pin: '1234',
+        softDeadline: const Duration(seconds: 5),
+        hardDeadline: const Duration(seconds: 5),
+      );
+
+      expect(outcome.success, isTrue);
+      expect(outcome.identity!.publicKeyHash, originalHash);
+      expect(repo.current!.publicKeyHash, originalHash);
+    });
+
     test('LLM 失败 → fallback=true，账号仍然生成', () async {
       final repo2 = IdentityRepository(
         keystore: FileSecureKeystore(hanaHome: tmp),

@@ -294,6 +294,67 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     }
   }
 
+  Future<void> _verifyStoryRecovery() async {
+    if (_accountBusy) return;
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _StoryVerificationDialog(onVerify: _runStoryRecovery),
+    );
+    await _refresh();
+  }
+
+  Future<_StoryVerificationResult> _runStoryRecovery(
+    String story,
+    void Function(int attempted, int elapsedMs, int currentHammingDistance)
+    onProgress,
+  ) async {
+    final eng = ref.read(engineProvider);
+    final repo = ref.read(identityRepositoryProvider);
+    final username =
+        _textValue((_authConfig ?? const <String, dynamic>{})['username']) ??
+        _textValue((_userConfig ?? const <String, dynamic>{})['name']);
+    final outcome = await repo.verifyCurrentStory(
+      storyOrWords: story,
+      softDeadline: const Duration(seconds: 30),
+      hardDeadline: const Duration(seconds: 30),
+      onProgress: onProgress,
+    );
+    ref.read(identityRevisionProvider.notifier).state++;
+    if (!outcome.success) {
+      return _StoryVerificationResult(
+        success: false,
+        message: outcome.malformed
+            ? '无法解析这段故事；可以直接粘贴 12 个名词再试。'
+            : outcome.timedOut
+            ? '恢复超时；这段故事暂时无法稳定复原当前身份。'
+            : '未能恢复当前身份；请检查故事锚点和顺序。',
+        attempted: outcome.attempted,
+        elapsedMs: outcome.elapsedMs,
+      );
+    }
+
+    final identity = outcome.identity!;
+    if (username != null && username.trim().isNotEmpty) {
+      final auth = await eng.backendClient.login(
+        keyPair: identity.keyPair,
+        username: username.trim(),
+      );
+      if (auth.pubkeyHash != identity.publicKeyHash) {
+        throw StateError('云端返回的身份指纹与本地恢复结果不一致');
+      }
+    }
+
+    return _StoryVerificationResult(
+      success: true,
+      message: username == null || username.trim().isEmpty
+          ? '验证通过：这段故事可以复原当前本机身份。'
+          : '验证通过：这段故事可以复原当前身份，并通过云端身份确认。',
+      attempted: outcome.attempted,
+      elapsedMs: outcome.elapsedMs,
+      publicKeyHash: identity.publicKeyHash,
+    );
+  }
+
   Future<void> _deleteLocalIdentity() async {
     if (_accountBusy) return;
     final confirmed = await showDialog<bool>(
@@ -948,6 +1009,12 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
                             size: 18,
                           ),
                           label: const Text('重新生成故事'),
+                        ),
+                      if (_identityReady)
+                        OutlinedButton.icon(
+                          onPressed: _accountBusy ? null : _verifyStoryRecovery,
+                          icon: const Icon(Icons.fact_check_outlined, size: 18),
+                          label: const Text('尝试验证'),
                         ),
                       if (_identityReady)
                         OutlinedButton.icon(
@@ -1762,6 +1829,259 @@ class _Shortcut {
   const _Shortcut(this.key, this.label);
   final String key;
   final String label;
+}
+
+class _StoryVerificationResult {
+  const _StoryVerificationResult({
+    required this.success,
+    required this.message,
+    required this.attempted,
+    required this.elapsedMs,
+    this.publicKeyHash,
+  });
+
+  final bool success;
+  final String message;
+  final int attempted;
+  final int elapsedMs;
+  final String? publicKeyHash;
+}
+
+class _StoryVerificationDialog extends StatefulWidget {
+  const _StoryVerificationDialog({required this.onVerify});
+
+  final Future<_StoryVerificationResult> Function(
+    String story,
+    void Function(int attempted, int elapsedMs, int currentHammingDistance)
+    onProgress,
+  )
+  onVerify;
+
+  @override
+  State<_StoryVerificationDialog> createState() =>
+      _StoryVerificationDialogState();
+}
+
+class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
+  final _controller = TextEditingController();
+  bool _busy = false;
+  _StoryVerificationResult? _result;
+  String? _error;
+  int? _attempted;
+  int? _elapsedMs;
+  int? _distance;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _verify() async {
+    final story = _controller.text.trim();
+    if (_busy || story.isEmpty) return;
+    setState(() {
+      _busy = true;
+      _result = null;
+      _error = null;
+      _attempted = null;
+      _elapsedMs = null;
+      _distance = null;
+    });
+    try {
+      final result = await widget.onVerify(story, (
+        attempted,
+        elapsedMs,
+        currentHammingDistance,
+      ) {
+        if (!mounted) return;
+        setState(() {
+          _attempted = attempted;
+          _elapsedMs = elapsedMs;
+          _distance = currentHammingDistance;
+        });
+      });
+      if (!mounted) return;
+      setState(() {
+        _result = result;
+        _attempted = result.attempted;
+        _elapsedMs = result.elapsedMs;
+        _busy = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$e';
+        _busy = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final c = theme.colorScheme;
+    final result = _result;
+    final canVerify = !_busy && _controller.text.trim().isNotEmpty;
+    return AlertDialog(
+      title: const Text('尝试验证故事'),
+      content: SizedBox(
+        width: 560,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: _controller,
+                minLines: 5,
+                maxLines: 9,
+                enabled: !_busy,
+                onChanged: (_) => setState(() {}),
+                decoration: const InputDecoration(
+                  labelText: '记忆故事或 12 个名词',
+                  alignLabelWithHint: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              if (_busy) ...[
+                const SizedBox(height: 16),
+                const LinearProgressIndicator(),
+                const SizedBox(height: 10),
+                Text(
+                  _progressText(),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: c.onSurfaceVariant,
+                  ),
+                ),
+              ],
+              if (result != null) ...[
+                const SizedBox(height: 16),
+                _VerificationStatusBox(
+                  success: result.success,
+                  message: result.message,
+                  attempted: result.attempted,
+                  elapsedMs: result.elapsedMs,
+                  publicKeyHash: result.publicKeyHash,
+                ),
+              ],
+              if (_error != null) ...[
+                const SizedBox(height: 16),
+                _VerificationStatusBox(
+                  success: false,
+                  message: '验证失败：$_error',
+                  attempted: _attempted ?? 0,
+                  elapsedMs: _elapsedMs ?? 0,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+        FilledButton.icon(
+          onPressed: canVerify ? _verify : null,
+          icon: _busy
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.fact_check_outlined, size: 18),
+          label: const Text('开始验证'),
+        ),
+      ],
+    );
+  }
+
+  String _progressText() {
+    final parts = <String>['正在恢复'];
+    final attempted = _attempted;
+    final elapsedMs = _elapsedMs;
+    final distance = _distance;
+    if (attempted != null) parts.add('已尝试 $attempted 次');
+    if (distance != null) parts.add('距离 $distance');
+    if (elapsedMs != null) {
+      parts.add('耗时 ${(elapsedMs / 1000).toStringAsFixed(1)} 秒');
+    }
+    return parts.join(' · ');
+  }
+}
+
+class _VerificationStatusBox extends StatelessWidget {
+  const _VerificationStatusBox({
+    required this.success,
+    required this.message,
+    required this.attempted,
+    required this.elapsedMs,
+    this.publicKeyHash,
+  });
+
+  final bool success;
+  final String message;
+  final int attempted;
+  final int elapsedMs;
+  final String? publicKeyHash;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final c = theme.colorScheme;
+    final color = success ? c.primary : c.error;
+    final hash = publicKeyHash;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        border: Border.all(color: color.withValues(alpha: 0.32)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                success ? Icons.verified_outlined : Icons.error_outline,
+                color: color,
+                size: 20,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  message,
+                  style: theme.textTheme.bodyMedium?.copyWith(color: color),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '尝试 $attempted 次 · ${(elapsedMs / 1000).toStringAsFixed(1)} 秒',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: c.onSurfaceVariant,
+            ),
+          ),
+          if (hash != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              '指纹：${_shortHash(hash)}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: c.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 class _MnemonicDialog extends StatelessWidget {
