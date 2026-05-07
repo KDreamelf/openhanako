@@ -417,8 +417,7 @@ int _softHammingLimit(int candidatesPerColumn) {
 
 int _hardHammingLimit(int candidatesPerColumn) {
   if (candidatesPerColumn <= 1) return 0;
-  if (candidatesPerColumn == 2) return 12;
-  return 4;
+  return kMnemonicLength;
 }
 
 MnemonicSeed? _mnemonicFromVault(IdentityVault vault) {

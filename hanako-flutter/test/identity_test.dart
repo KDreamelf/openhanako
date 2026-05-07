@@ -235,6 +235,8 @@ void main() {
       expect(prompt, contains('凳子/板凳'));
       expect(prompt, contains('石台'));
       expect(prompt, contains('冷风'));
+      expect(prompt, contains('立夏的凉粉摊'));
+      expect(prompt, contains('涟漪/阳光/人群'));
       expect(prompt, contains('5 个候选'));
     });
 
@@ -546,6 +548,44 @@ void main() {
       expect(outcome.success, isTrue);
       expect(outcome.identity!.publicKeyHash, reg.identity.publicKeyHash);
       expect(outcome.attempted, 7);
+      expect(accelerator.lastDMaxHard, 0);
+    });
+
+    test('loginWithStory → top-5 语义矩阵由时间预算控制搜索深度', () async {
+      var targetIds = <int>[];
+      final accelerator = _FakeRecoveryAccelerator(() => targetIds);
+      final repo2 = IdentityRepository(
+        keystore: FileSecureKeystore(hanaHome: tmp),
+        composer: repo.composer,
+        parser: StoryParser(
+          caller:
+              ({
+                required String systemPrompt,
+                required String userPrompt,
+                int? maxTokens,
+              }) async {
+                return jsonEncode({
+                  'columns': [for (final id in targetIds) List.filled(5, id)],
+                });
+              },
+        ),
+        recoveryAccelerator: accelerator,
+      );
+
+      final reg = await repo2.registerNew(pin: '1234');
+      targetIds = reg.words.map((word) => idByWord(word)!).toList();
+
+      final outcome = await repo2.verifyCurrentStory(
+        storyOrWords: '模糊复述故事',
+        pin: '1234',
+        softDeadline: const Duration(seconds: 5),
+        hardDeadline: const Duration(seconds: 5),
+      );
+
+      expect(outcome.success, isTrue);
+      expect(outcome.usedLlm, isTrue);
+      expect(outcome.candidatesPerColumn, 5);
+      expect(accelerator.lastDMaxHard, 12);
     });
 
     test('loginWithStory → 确定性恢复失败后回退 LLM 语义解析', () async {
@@ -622,6 +662,7 @@ class _FakeRecoveryAccelerator implements RecoveryAccelerator {
 
   final List<int> Function() _ids;
   int calls = 0;
+  int? lastDMaxHard;
 
   @override
   Future<AcceleratedRecoveryOutcome> tryRecover({
@@ -632,6 +673,7 @@ class _FakeRecoveryAccelerator implements RecoveryAccelerator {
     int? workerCount,
   }) async {
     calls++;
+    lastDMaxHard = dMaxHard;
     final ids = _ids();
     final seed = tryMnemonicFromIds(ids)!;
     final pair = HanakoKeyPair.fromPrivateKeyBytes(seed.privateKeyBytes);

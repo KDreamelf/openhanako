@@ -2093,6 +2093,7 @@ class _CandidateMatrixTable extends StatelessWidget {
       k,
       result.hammingDistance,
     );
+    final fullSpace = _boundedSearchSpace(matrix.length, k, matrix.length);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(12),
@@ -2115,6 +2116,7 @@ class _CandidateMatrixTable extends StatelessWidget {
             [
               '${matrix.length} × $k',
               'D≤${result.hammingDistance} 理论 $theoretical',
+              '全矩阵 $fullSpace',
               '实际 ${result.attempted}',
             ].join(' · '),
             style: theme.textTheme.bodySmall?.copyWith(
