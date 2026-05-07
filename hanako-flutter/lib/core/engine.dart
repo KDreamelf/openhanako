@@ -281,14 +281,76 @@ Future<String> _callGatewayForStory({
     throw StateError('未找到可用于故事生成/恢复的公开模型');
   }
 
-  final response = await gateway.publicStoryChat(
+  final messages = <Map<String, dynamic>>[
+    {'role': 'system', 'content': systemPrompt},
+    {'role': 'user', 'content': userPrompt},
+  ];
+  final response = await _callPublicStoryChatWithRetry(
+    gateway: gateway,
     model: model,
-    messages: [
-      {'role': 'system', 'content': systemPrompt},
-      {'role': 'user', 'content': userPrompt},
-    ],
+    messages: messages,
+    systemPrompt: systemPrompt,
+    userPrompt: userPrompt,
   );
   return _extractAssistantText(response);
+}
+
+const int _publicStoryRateLimitMaxAttempts = 6;
+const Duration _publicStoryRateLimitInitialBackoff = Duration(
+  milliseconds: 350,
+);
+const Duration _publicStoryRateLimitMaxBackoff = Duration(seconds: 4);
+
+Future<Map<String, dynamic>> _callPublicStoryChatWithRetry({
+  required HanakoBackendClient gateway,
+  required String model,
+  required List<Map<String, dynamic>> messages,
+  required String systemPrompt,
+  required String userPrompt,
+}) async {
+  for (var attempt = 1; ; attempt++) {
+    try {
+      return await gateway.publicStoryChat(model: model, messages: messages);
+    } on HanakoBackendException catch (error) {
+      if (!_isPublicStoryRateLimit(error) ||
+          attempt >= _publicStoryRateLimitMaxAttempts) {
+        rethrow;
+      }
+      await Future<void>.delayed(
+        _publicStoryRateLimitBackoff(
+          attempt: attempt,
+          systemPrompt: systemPrompt,
+          userPrompt: userPrompt,
+        ),
+      );
+    }
+  }
+}
+
+bool _isPublicStoryRateLimit(HanakoBackendException error) {
+  if (error.statusCode == 429) return true;
+  final text = '${error.message}\n${error.details ?? ''}'.toLowerCase();
+  return text.contains('请求过于频繁') ||
+      text.contains('too many requests') ||
+      text.contains('rate limit') ||
+      text.contains('rate_limit');
+}
+
+Duration _publicStoryRateLimitBackoff({
+  required int attempt,
+  required String systemPrompt,
+  required String userPrompt,
+}) {
+  final multiplier = 1 << (attempt - 1);
+  final exponentialMs =
+      _publicStoryRateLimitInitialBackoff.inMilliseconds * multiplier;
+  final cappedMs = exponentialMs.clamp(
+    _publicStoryRateLimitInitialBackoff.inMilliseconds,
+    _publicStoryRateLimitMaxBackoff.inMilliseconds,
+  );
+  final jitterSeed = Object.hash(systemPrompt, userPrompt, attempt).abs();
+  final jitterMs = jitterSeed % 180;
+  return Duration(milliseconds: cappedMs + jitterMs);
 }
 
 String? _selectStoryModel(List<String> models) {

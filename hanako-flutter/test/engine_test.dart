@@ -91,6 +91,30 @@ void main() {
       expect(backend.privateChatCalls, 0);
     });
 
+    test('公开故事模型请求过于频繁时会指数退避重试', () async {
+      final backend = _PublicStoryBackendClient(
+        models: const ['public-story-model'],
+        responses: const ['公开故事正文'],
+        publicStoryRateLimitFailures: 1,
+      );
+      final engine = await HanaEngine.initialize(
+        home: home,
+        backendClient: backend,
+      );
+      addTearDown(engine.dispose);
+
+      final result = await engine.identityRepository.composer.compose(
+        hanakoWordlist.take(12).toList(growable: false),
+      );
+
+      expect(result.fallback, isFalse);
+      expect(result.story, '公开故事正文');
+      expect(backend.publicModelListCalls, 1);
+      expect(backend.publicChatCalls, 2);
+      expect(backend.handshakeCalls, 0);
+      expect(backend.privateChatCalls, 0);
+    });
+
     test('故事恢复解析同样走 root 公开故事接口', () async {
       final matrix = List.generate(
         12,
@@ -99,7 +123,10 @@ void main() {
       final backend = _PublicStoryBackendClient(
         models: const ['public-story-model'],
         responses: [
-          jsonEncode({'columns': matrix}),
+          jsonEncode({
+            'anchors': [for (var index = 0; index < 12; index++) '锚$index'],
+          }),
+          for (final row in matrix) jsonEncode({'candidates': row}),
         ],
       );
       final engine = await HanaEngine.initialize(
@@ -112,8 +139,8 @@ void main() {
 
       expect(parsed.isWellFormed, isTrue);
       expect(parsed.columns, matrix);
-      expect(backend.publicModelListCalls, 1);
-      expect(backend.publicChatCalls, 1);
+      expect(backend.publicModelListCalls, 13);
+      expect(backend.publicChatCalls, 13);
       expect(backend.handshakeCalls, 0);
       expect(backend.privateChatCalls, 0);
     });
@@ -171,10 +198,15 @@ class _FailingReadKeystore extends SecureKeystore {
 }
 
 class _PublicStoryBackendClient extends HanakoBackendClient {
-  _PublicStoryBackendClient({required this.models, required this.responses});
+  _PublicStoryBackendClient({
+    required this.models,
+    required this.responses,
+    this.publicStoryRateLimitFailures = 0,
+  });
 
   final List<String> models;
   final List<String> responses;
+  final int publicStoryRateLimitFailures;
   final requestedModels = <String>[];
   final extras = <Map<String, dynamic>?>[];
   int publicModelListCalls = 0;
@@ -196,8 +228,16 @@ class _PublicStoryBackendClient extends HanakoBackendClient {
   }) async {
     requestedModels.add(model);
     extras.add(extra);
-    final response = responses[publicChatCalls];
     publicChatCalls++;
+    if (publicChatCalls <= publicStoryRateLimitFailures) {
+      throw HanakoBackendException(
+        message: '调用公开故事模型失败：请求过于频繁',
+        details: '上游模型 API 返回 429 Too Many Requests',
+        statusCode: 429,
+      );
+    }
+    final response =
+        responses[publicChatCalls - publicStoryRateLimitFailures - 1];
     return {
       'choices': [
         {
