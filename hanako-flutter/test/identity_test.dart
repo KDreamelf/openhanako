@@ -517,6 +517,9 @@ void main() {
       expect(repo.current!.publicKeyHash, originalHash);
       expect(outcome.usedLlm, isFalse);
       expect(outcome.hammingDistance, 0);
+      expect(outcome.candidatesPerColumn, 1);
+      expect(outcome.parsedColumns, hasLength(12));
+      expect(outcome.parsedColumns.first, [idByWord(reg.words.first)]);
     });
 
     test('loginWithStory → 优先使用恢复加速后端', () async {
@@ -588,6 +591,8 @@ void main() {
       expect(outcome.identity!.publicKeyHash, reg.identity.publicKeyHash);
       expect(outcome.usedLlm, isTrue);
       expect(outcome.hammingDistance, 0);
+      expect(outcome.candidatesPerColumn, 5);
+      expect(outcome.parsedColumns.first, List.filled(5, targetIds.first));
     });
 
     test('LLM 失败 → fallback=true，账号仍然生成', () async {

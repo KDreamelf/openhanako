@@ -233,6 +233,8 @@ class IdentityRepository {
       return LoginOutcome.malformedMatrix(
         parsed.rawResponse,
         usedLlm: parsed.usedLlm,
+        parsedColumns: parsed.columns,
+        candidatesPerColumn: parsed.candidatesPerColumn,
       );
     }
 
@@ -254,6 +256,9 @@ class IdentityRepository {
           elapsedMs: accelerated.elapsedMs,
           hammingDistance: accelerated.hammingDistance,
           usedLlm: parsed.usedLlm,
+          parsedColumns: parsed.columns,
+          candidatesPerColumn: parsed.candidatesPerColumn,
+          rawResponse: parsed.rawResponse,
         );
       }
       final identity = await _persistRecoveredSeed(accelerated.seed!, pin: pin);
@@ -263,6 +268,9 @@ class IdentityRepository {
         elapsedMs: accelerated.elapsedMs,
         hammingDistance: accelerated.hammingDistance,
         usedLlm: parsed.usedLlm,
+        parsedColumns: parsed.columns,
+        candidatesPerColumn: parsed.candidatesPerColumn,
+        rawResponse: parsed.rawResponse,
       );
     }
 
@@ -286,6 +294,9 @@ class IdentityRepository {
         elapsedMs: outcome.elapsedMs,
         hammingDistance: outcome.hammingDistance,
         usedLlm: parsed.usedLlm,
+        parsedColumns: parsed.columns,
+        candidatesPerColumn: parsed.candidatesPerColumn,
+        rawResponse: parsed.rawResponse,
       );
     }
     final identity = await _persistRecoveredSeed(outcome.seed!, pin: pin);
@@ -295,6 +306,9 @@ class IdentityRepository {
       elapsedMs: outcome.elapsedMs,
       hammingDistance: outcome.hammingDistance,
       usedLlm: parsed.usedLlm,
+      parsedColumns: parsed.columns,
+      candidatesPerColumn: parsed.candidatesPerColumn,
+      rawResponse: parsed.rawResponse,
     );
   }
 
@@ -452,6 +466,8 @@ class LoginOutcome {
     this.elapsedMs = 0,
     this.hammingDistance = 0,
     this.usedLlm = false,
+    this.parsedColumns = const [],
+    this.candidatesPerColumn = 0,
     this.rawResponse,
   });
 
@@ -461,21 +477,31 @@ class LoginOutcome {
     required int elapsedMs,
     required int hammingDistance,
     required bool usedLlm,
+    List<List<int>> parsedColumns = const [],
+    int candidatesPerColumn = 0,
+    String? rawResponse,
   }) => LoginOutcome._(
     identity: identity,
     attempted: attempted,
     elapsedMs: elapsedMs,
     hammingDistance: hammingDistance,
     usedLlm: usedLlm,
+    parsedColumns: _copyMatrix(parsedColumns),
+    candidatesPerColumn: candidatesPerColumn,
+    rawResponse: rawResponse,
   );
 
   factory LoginOutcome.malformedMatrix(
     String rawResponse, {
     bool usedLlm = false,
+    List<List<int>> parsedColumns = const [],
+    int candidatesPerColumn = 0,
   }) => LoginOutcome._(
     malformed: true,
     rawResponse: rawResponse,
     usedLlm: usedLlm,
+    parsedColumns: _copyMatrix(parsedColumns),
+    candidatesPerColumn: candidatesPerColumn,
   );
 
   factory LoginOutcome.failed({
@@ -484,6 +510,9 @@ class LoginOutcome {
     required int elapsedMs,
     required int hammingDistance,
     required bool usedLlm,
+    List<List<int>> parsedColumns = const [],
+    int candidatesPerColumn = 0,
+    String? rawResponse,
   }) => LoginOutcome._(
     failed: true,
     attempted: attempted,
@@ -491,6 +520,9 @@ class LoginOutcome {
     elapsedMs: elapsedMs,
     hammingDistance: hammingDistance,
     usedLlm: usedLlm,
+    parsedColumns: _copyMatrix(parsedColumns),
+    candidatesPerColumn: candidatesPerColumn,
+    rawResponse: rawResponse,
   );
 
   final HanakoIdentity? identity;
@@ -503,11 +535,19 @@ class LoginOutcome {
   final int elapsedMs;
   final int hammingDistance;
   final bool usedLlm;
+  final List<List<int>> parsedColumns;
+  final int candidatesPerColumn;
 
   /// LLM 原始响应（malformed 时保留供调试）。
   final String? rawResponse;
 
   bool get success => identity != null;
+}
+
+List<List<int>> _copyMatrix(List<List<int>> matrix) {
+  return List<List<int>>.unmodifiable([
+    for (final row in matrix) List<int>.unmodifiable(row),
+  ]);
 }
 
 // ---- 默认离线 hash 集合：从本地 keystore 取已存身份的公钥哈希 -------------

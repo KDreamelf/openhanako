@@ -333,6 +333,8 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
         hammingDistance: outcome.hammingDistance,
         usedLlm: outcome.usedLlm,
         score: _memoryAccuracyScore(outcome),
+        candidateMatrix: outcome.parsedColumns,
+        candidatesPerColumn: outcome.candidatesPerColumn,
       );
     }
 
@@ -358,6 +360,8 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       usedLlm: outcome.usedLlm,
       score: _memoryAccuracyScore(outcome),
       publicKeyHash: identity.publicKeyHash,
+      candidateMatrix: outcome.parsedColumns,
+      candidatesPerColumn: outcome.candidatesPerColumn,
     );
   }
 
@@ -1878,6 +1882,8 @@ class _StoryVerificationResult {
     required this.hammingDistance,
     required this.usedLlm,
     required this.score,
+    required this.candidateMatrix,
+    required this.candidatesPerColumn,
     this.publicKeyHash,
   });
 
@@ -1888,6 +1894,8 @@ class _StoryVerificationResult {
   final int hammingDistance;
   final bool usedLlm;
   final int score;
+  final List<List<int>> candidateMatrix;
+  final int candidatesPerColumn;
   final String? publicKeyHash;
 }
 
@@ -1971,7 +1979,7 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
     return AlertDialog(
       title: const Text('尝试验证故事'),
       content: SizedBox(
-        width: 560,
+        width: 760,
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -2012,6 +2020,10 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
                   score: result.score,
                   publicKeyHash: result.publicKeyHash,
                 ),
+                if (result.candidateMatrix.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  _CandidateMatrixTable(result: result),
+                ],
               ],
               if (_error != null) ...[
                 const SizedBox(height: 16),
@@ -2060,6 +2072,120 @@ class _StoryVerificationDialogState extends State<_StoryVerificationDialog> {
       parts.add('耗时 ${(elapsedMs / 1000).toStringAsFixed(1)} 秒');
     }
     return parts.join(' · ');
+  }
+}
+
+class _CandidateMatrixTable extends StatelessWidget {
+  const _CandidateMatrixTable({required this.result});
+
+  final _StoryVerificationResult result;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final c = theme.colorScheme;
+    final matrix = result.candidateMatrix;
+    final k = result.candidatesPerColumn > 0
+        ? result.candidatesPerColumn
+        : (matrix.isEmpty ? 0 : matrix.first.length);
+    final theoretical = _boundedSearchSpace(
+      matrix.length,
+      k,
+      result.hammingDistance,
+    );
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        border: Border.all(color: c.outlineVariant),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            result.usedLlm ? 'LLM 语义候选矩阵' : '确定性候选矩阵',
+            style: theme.textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            [
+              '${matrix.length} × $k',
+              'D≤${result.hammingDistance} 理论 $theoretical',
+              '实际 ${result.attempted}',
+            ].join(' · '),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: c.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 10),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Table(
+              defaultColumnWidth: const IntrinsicColumnWidth(),
+              border: TableBorder.all(color: c.outlineVariant),
+              children: [
+                TableRow(
+                  decoration: BoxDecoration(color: c.surfaceContainerHighest),
+                  children: [
+                    _MatrixCell(
+                      text: '#',
+                      style: theme.textTheme.labelSmall,
+                      isHeader: true,
+                    ),
+                    for (var rank = 0; rank < k; rank++)
+                      _MatrixCell(
+                        text: '候选 ${rank + 1}',
+                        style: theme.textTheme.labelSmall,
+                        isHeader: true,
+                      ),
+                  ],
+                ),
+                for (var row = 0; row < matrix.length; row++)
+                  TableRow(
+                    children: [
+                      _MatrixCell(
+                        text: '${row + 1}',
+                        style: theme.textTheme.bodySmall,
+                      ),
+                      for (var rank = 0; rank < k; rank++)
+                        _MatrixCell(
+                          text: _candidateLabel(matrix[row], rank),
+                          style: theme.textTheme.bodySmall,
+                        ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MatrixCell extends StatelessWidget {
+  const _MatrixCell({required this.text, this.style, this.isHeader = false});
+
+  final String text;
+  final TextStyle? style;
+  final bool isHeader;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: SelectableText(
+        text,
+        style: style?.copyWith(
+          fontWeight: isHeader ? FontWeight.w700 : style?.fontWeight,
+          fontFamily: isHeader ? null : 'monospace',
+        ),
+      ),
+    );
   }
 }
 
@@ -2357,6 +2483,42 @@ class _AgentAvatar extends StatelessWidget {
           : null,
     );
   }
+}
+
+String _candidateLabel(List<int> row, int rank) {
+  if (rank >= row.length) return '-';
+  final id = row[rank];
+  final word = wordById(id) ?? '?';
+  return '$id $word';
+}
+
+int _boundedSearchSpace(int rows, int k, int maxDistance) {
+  if (rows <= 0 || k <= 0) return 0;
+  final limit = maxDistance.clamp(0, rows).toInt();
+  var total = 0;
+  for (var d = 0; d <= limit; d++) {
+    total += _binom(rows, d) * _pow(k - 1, d);
+  }
+  return total;
+}
+
+int _binom(int n, int k) {
+  if (k < 0 || k > n) return 0;
+  if (k == 0 || k == n) return 1;
+  var result = 1;
+  final kk = k > n - k ? n - k : k;
+  for (var i = 0; i < kk; i++) {
+    result = result * (n - i) ~/ (i + 1);
+  }
+  return result;
+}
+
+int _pow(int base, int exp) {
+  var result = 1;
+  for (var i = 0; i < exp; i++) {
+    result *= base;
+  }
+  return result;
 }
 
 Map<String, dynamic> _stringKeyMap(Object? value) {
