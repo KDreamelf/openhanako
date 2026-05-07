@@ -105,6 +105,26 @@ class StoryParser {
       maxTokens: 1500,
     );
     final cols = _extractMatrix(raw);
+    if (cols.isNotEmpty && cols.length != kStoryParserColumns) {
+      final retryRaw = await caller(
+        systemPrompt: _buildSystemPrompt(),
+        userPrompt: _buildRetryUserPrompt(
+          storyOrWords: storyOrWords,
+          columns: cols,
+          rawResponse: raw,
+        ),
+        maxTokens: 1500,
+      );
+      final retryCols = _extractMatrix(retryRaw);
+      if (retryCols.length == kStoryParserColumns) {
+        return StoryParseResult(
+          columns: retryCols,
+          rawResponse: retryRaw,
+          candidatesPerColumn: candidatesPerColumn,
+          usedLlm: true,
+        );
+      }
+    }
     return StoryParseResult(
       columns: cols,
       rawResponse: raw,
@@ -159,6 +179,40 @@ class StoryParser {
 {"columns":[${exampleRows.join(',')}]}
 
 字典：$dictJson
+''';
+  }
+
+  String _buildRetryUserPrompt({
+    required String storyOrWords,
+    required List<List<int>> columns,
+    required String rawResponse,
+  }) {
+    final matrixLines = <String>[];
+    for (var row = 0; row < columns.length; row++) {
+      final entries = columns[row]
+          .map((id) => '$id:${wordById(id) ?? '?'}')
+          .join(', ');
+      matrixLines.add('${row + 1}. [$entries]');
+    }
+    return '''
+你上一次输出的候选矩阵不符合协议，本次不能继续恢复。
+
+错误信息：
+- columns 必须恰好 $kStoryParserColumns 行，但你输出了 ${columns.length} 行。
+- 每行必须恰好 $candidatesPerColumn 个整数 ID。
+
+原始故事：
+$storyOrWords
+
+上一次原始响应：
+$rawResponse
+
+上一次解析出的矩阵（ID:词）：
+${matrixLines.join('\n')}
+
+请基于原始故事和上一次错误输出，重新完成同一个语义匹配任务。
+注意：这不是让程序替你裁剪矩阵，而是要求你自己重新判断 12 个记忆锚点。
+只输出恰好 $kStoryParserColumns × $candidatesPerColumn 的严格 JSON。
 ''';
   }
 

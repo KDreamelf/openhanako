@@ -221,6 +221,44 @@ void main() {
       expect(parsed.columns.first, [1, 2, 3, 4, 5]);
     });
 
+    test('StoryParser 会把矩阵行数错误反馈给 LLM 重试', () async {
+      var calls = 0;
+      final parser = StoryParser(
+        caller:
+            ({
+              required String systemPrompt,
+              required String userPrompt,
+              int? maxTokens,
+            }) async {
+              calls++;
+              if (calls == 1) {
+                return jsonEncode({
+                  'columns': [
+                    for (var row = 0; row < 14; row++)
+                      [row, row + 1, row + 2, row + 3, row + 4],
+                  ],
+                });
+              }
+              expect(systemPrompt, contains('语义匹配器'));
+              expect(userPrompt, contains('不符合协议'));
+              expect(userPrompt, contains('你输出了 14 行'));
+              expect(userPrompt, contains('不是让程序替你裁剪矩阵'));
+              return jsonEncode({
+                'columns': [
+                  for (var row = 0; row < 12; row++) List.filled(5, row),
+                ],
+              });
+            },
+      );
+
+      final parsed = await parser.parse('多出背景词的复述故事');
+
+      expect(calls, 2);
+      expect(parsed.isWellFormed, isTrue);
+      expect(parsed.columns, hasLength(12));
+      expect(parsed.columns.first, List.filled(5, 0));
+    });
+
     test('StoryParser prompt 要求为错记近义词保留 top-5 候选', () {
       final parser = StoryParser(
         caller:
