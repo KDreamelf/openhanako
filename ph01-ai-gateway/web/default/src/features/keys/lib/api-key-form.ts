@@ -7,17 +7,35 @@ import { type ApiKeyFormData, type ApiKey } from '../types'
 // Form Schema
 // ============================================================================
 
-export const apiKeyFormSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  remain_quota_dollars: z.number().min(0).optional(),
-  expired_time: z.date().optional(),
-  unlimited_quota: z.boolean(),
-  model_limits: z.array(z.string()),
-  allow_ips: z.string().optional(),
-  group: z.string().optional(),
-  cross_group_retry: z.boolean().optional(),
-  tokenCount: z.number().min(1).optional(),
-})
+export const apiKeyFormSchema = z
+  .object({
+    name: z.string().min(1, 'Name is required'),
+    remain_quota_dollars: z.number().optional(),
+    expired_time: z.date().optional(),
+    unlimited_quota: z.boolean(),
+    model_limits: z.array(z.string()),
+    allow_ips: z.string().optional(),
+    group: z.string().optional(),
+    cross_group_retry: z.boolean().optional(),
+    tokenCount: z.number().min(1).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.unlimited_quota) {
+      return
+    }
+
+    if (
+      data.remain_quota_dollars === undefined ||
+      !Number.isFinite(data.remain_quota_dollars) ||
+      data.remain_quota_dollars < 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['remain_quota_dollars'],
+        message: 'Please enter a valid number',
+      })
+    }
+  })
 
 export type ApiKeyFormValues = z.infer<typeof apiKeyFormSchema>
 
