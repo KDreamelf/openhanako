@@ -33,6 +33,9 @@ const int kStoryParserCandidatesPerColumn = 5;
 
 /// 期望的列数（即助记词长度，固定 12）。
 const int kStoryParserColumns = 12;
+const int _candidateDeadLetterMaxRounds = 100;
+const Duration _candidateDeadLetterInitialBackoff = Duration(milliseconds: 800);
+const Duration _candidateDeadLetterMaxBackoff = Duration(seconds: 30);
 
 class StoryParseResult {
   StoryParseResult({
@@ -148,30 +151,100 @@ class StoryParser {
       anchors.length,
       (_) => const <int>[],
     );
-    final candidateRows = await Future.wait([
+    final candidateRows = await _generateCandidateRowsWithDeadLetters(
+      storyOrWords: storyOrWords,
+      anchors: anchors,
+      partial: partial,
+      onCandidateMatrixProgress: onCandidateMatrixProgress,
+    );
+    final cols = [
       for (var index = 0; index < anchors.length; index++)
-        _generateCandidateRow(
-          storyOrWords: storyOrWords,
-          anchors: anchors,
-          index: index,
-        ).then((row) {
-          partial[index] = List<int>.unmodifiable(row.row);
-          onCandidateMatrixProgress?.call(_copyMatrix(partial));
-          return row;
-        }),
-    ]);
-    final cols = [for (final candidate in candidateRows) candidate.row];
+        candidateRows[index]?.row ?? const <int>[],
+    ];
     return StoryParseResult(
       columns: cols,
       rawResponse: _debugRawResponse(
         anchorsRaw: anchorsRaw,
         anchors: anchors,
-        candidateRows: candidateRows,
+        candidateRows: [for (final row in candidateRows) ?row],
       ),
       candidatesPerColumn: candidatesPerColumn,
       usedLlm: true,
       anchors: anchors,
     );
+  }
+
+  Future<List<_CandidateRowResult?>> _generateCandidateRowsWithDeadLetters({
+    required String storyOrWords,
+    required List<String> anchors,
+    required List<List<int>> partial,
+    void Function(List<List<int>> columns)? onCandidateMatrixProgress,
+  }) async {
+    final rows = List<_CandidateRowResult?>.filled(anchors.length, null);
+    final deadLetters = <_CandidateDeadLetter>[];
+
+    await Future.wait([
+      for (var index = 0; index < anchors.length; index++)
+        _generateCandidateRow(
+              storyOrWords: storyOrWords,
+              anchors: anchors,
+              index: index,
+            )
+            .then((row) {
+              rows[index] = row;
+              partial[index] = List<int>.unmodifiable(row.row);
+              onCandidateMatrixProgress?.call(_copyMatrix(partial));
+            })
+            .catchError((Object error, StackTrace stackTrace) {
+              deadLetters.add(
+                _CandidateDeadLetter(
+                  index: index,
+                  error: error,
+                  stackTrace: stackTrace,
+                ),
+              );
+            }),
+    ]);
+
+    for (
+      var round = 1;
+      deadLetters.isNotEmpty && round <= _candidateDeadLetterMaxRounds;
+      round++
+    ) {
+      final failed = List<_CandidateDeadLetter>.of(deadLetters);
+      deadLetters.clear();
+      for (final letter in failed) {
+        try {
+          final row = await _generateCandidateRow(
+            storyOrWords: storyOrWords,
+            anchors: anchors,
+            index: letter.index,
+          );
+          rows[letter.index] = row;
+          partial[letter.index] = List<int>.unmodifiable(row.row);
+          onCandidateMatrixProgress?.call(_copyMatrix(partial));
+        } catch (error, stackTrace) {
+          deadLetters.add(
+            _CandidateDeadLetter(
+              index: letter.index,
+              error: error,
+              stackTrace: stackTrace,
+            ),
+          );
+        }
+      }
+      if (deadLetters.isNotEmpty) {
+        await Future<void>.delayed(_candidateDeadLetterBackoff(round));
+      }
+    }
+
+    if (deadLetters.isNotEmpty) {
+      Error.throwWithStackTrace(
+        deadLetters.first.error,
+        deadLetters.first.stackTrace,
+      );
+    }
+    return rows;
   }
 
   Future<_CandidateRowResult> _generateCandidateRow({
@@ -499,6 +572,18 @@ ${index + 1}. ${anchors[index]}
   }
 }
 
+class _CandidateDeadLetter {
+  const _CandidateDeadLetter({
+    required this.index,
+    required this.error,
+    required this.stackTrace,
+  });
+
+  final int index;
+  final Object error;
+  final StackTrace stackTrace;
+}
+
 class _WordEntry {
   const _WordEntry(this.word, this.id);
 
@@ -522,6 +607,18 @@ List<List<int>> _copyMatrix(List<List<int>> matrix) {
   return List<List<int>>.unmodifiable([
     for (final row in matrix) List<int>.unmodifiable(row),
   ]);
+}
+
+Duration _candidateDeadLetterBackoff(int round) {
+  final exponent = (round - 1).clamp(0, 12).toInt();
+  final multiplier = 1 << exponent;
+  final exponentialMs =
+      _candidateDeadLetterInitialBackoff.inMilliseconds * multiplier;
+  final cappedMs = exponentialMs.clamp(
+    _candidateDeadLetterInitialBackoff.inMilliseconds,
+    _candidateDeadLetterMaxBackoff.inMilliseconds,
+  );
+  return Duration(milliseconds: cappedMs);
 }
 
 final List<_WordEntry> _wordEntriesByLength = List.unmodifiable(

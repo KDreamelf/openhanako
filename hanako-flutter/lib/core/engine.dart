@@ -295,11 +295,11 @@ Future<String> _callGatewayForStory({
   return _extractAssistantText(response);
 }
 
-const int _publicStoryRateLimitMaxAttempts = 6;
+const int _publicStoryRateLimitMaxAttempts = 100;
 const Duration _publicStoryRateLimitInitialBackoff = Duration(
   milliseconds: 350,
 );
-const Duration _publicStoryRateLimitMaxBackoff = Duration(seconds: 4);
+const Duration _publicStoryRateLimitMaxBackoff = Duration(seconds: 30);
 
 Future<Map<String, dynamic>> _callPublicStoryChatWithRetry({
   required HanakoBackendClient gateway,

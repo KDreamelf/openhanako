@@ -257,6 +257,54 @@ void main() {
       expect(parsed.columns.first, List.filled(5, 0));
     });
 
+    test('StoryParser 候选行失败进入死信队列，不打断已完成行', () async {
+      var candidateCalls = 0;
+      final progressCounts = <int>[];
+      final parser = StoryParser(
+        caller:
+            ({
+              required String systemPrompt,
+              required String userPrompt,
+              int? maxTokens,
+            }) async {
+              if (systemPrompt.contains('锚点提取器')) {
+                return jsonEncode({
+                  'anchors': [for (var row = 0; row < 12; row++) '锚$row'],
+                });
+              }
+              final indexMatch = RegExp(
+                r'当前只处理第 (\d+) 个锚点',
+              ).firstMatch(userPrompt);
+              final index = int.parse(indexMatch!.group(1)!) - 1;
+              candidateCalls++;
+              if (index == 3 && candidateCalls <= 12) {
+                throw StateError('上游请求过于频繁');
+              }
+              return jsonEncode({
+                'candidates': [
+                  index * 5 + 1,
+                  index * 5 + 2,
+                  index * 5 + 3,
+                  index * 5 + 4,
+                  index * 5 + 5,
+                ],
+              });
+            },
+      );
+
+      final parsed = await parser.parse(
+        '测试故事',
+        onCandidateMatrixProgress: (columns) {
+          progressCounts.add(columns.where((row) => row.isNotEmpty).length);
+        },
+      );
+
+      expect(parsed.isWellFormed, isTrue);
+      expect(parsed.columns[3], [16, 17, 18, 19, 20]);
+      expect(progressCounts, contains(11));
+      expect(progressCounts.last, 12);
+    });
+
     test('StoryParser prompt 要求为错记近义词保留 top-5 候选', () {
       final parser = StoryParser(
         caller:
