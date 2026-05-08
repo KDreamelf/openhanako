@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+
+import 'package:path/path.dart' as p;
 
 import '../identity/identity.dart';
 import '../shared/hana_home.dart';
@@ -78,7 +81,10 @@ class HanaEngine {
   }) async {
     final h = home ?? await HanaHome.resolve();
     final gateway = backendClient ?? HanakoBackendClient();
-    final publicStoryCaller = _PublicStoryGatewayCaller(gateway);
+    final publicStoryCaller = _PublicStoryGatewayCaller(
+      gateway,
+      logFile: File(p.join(h.logsDir.path, 'public-story-recovery.jsonl')),
+    );
     late final IdentityRepository identityRepo;
     late final ModelManager models;
     identityRepo =
@@ -267,13 +273,16 @@ const Duration _publicStoryRateLimitInitialBackoff = Duration(
 const Duration _publicStoryRateLimitMaxBackoff = Duration(seconds: 30);
 
 class _PublicStoryGatewayCaller {
-  _PublicStoryGatewayCaller(this.gateway);
+  _PublicStoryGatewayCaller(this.gateway, {required this.logFile});
 
   final HanakoBackendClient gateway;
+  final File logFile;
   final Queue<_PublicStoryJob> _ready = Queue<_PublicStoryJob>();
   final Random _random = Random();
   Future<String>? _modelFuture;
   int _active = 0;
+  int _sleeping = 0;
+  int _nextJobId = 0;
 
   Future<String> call({
     required String systemPrompt,
@@ -291,13 +300,30 @@ class _PublicStoryGatewayCaller {
     required String systemPrompt,
     required String userPrompt,
   }) {
+    final metadata = _detectPublicStoryJob(
+      systemPrompt: systemPrompt,
+      userPrompt: userPrompt,
+    );
     final job = _PublicStoryJob(
+      id: ++_nextJobId,
+      kind: metadata.kind,
+      rowIndex: metadata.rowIndex,
+      systemPromptChars: systemPrompt.length,
+      userPromptChars: userPrompt.length,
       messages: [
         {'role': 'system', 'content': systemPrompt},
         {'role': 'user', 'content': userPrompt},
       ],
     );
     _ready.add(job);
+    _writeLog(
+      'enqueue',
+      job: job,
+      fields: {
+        'system_prompt_chars': systemPrompt.length,
+        'user_prompt_chars': userPrompt.length,
+      },
+    );
     _pump();
     return job.completer.future;
   }
@@ -306,27 +332,55 @@ class _PublicStoryGatewayCaller {
     while (_active < _publicStoryMaxConcurrentCalls && _ready.isNotEmpty) {
       final job = _ready.removeFirst();
       _active++;
-      _run(job);
+      unawaited(_run(job));
     }
   }
 
   Future<void> _run(_PublicStoryJob job) async {
+    final startedAt = DateTime.now();
+    _writeLog('start', job: job);
     try {
       final model = await _resolveModel();
       final response = await gateway.publicStoryChat(
         model: model,
         messages: job.messages,
       );
+      _writeLog(
+        'success',
+        job: job,
+        fields: {
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          'model': model,
+        },
+      );
       if (!job.completer.isCompleted) job.completer.complete(response);
     } on HanakoBackendException catch (error, stackTrace) {
       if (_isPublicStoryRateLimit(error) &&
           job.attempt < _publicStoryRateLimitMaxAttempts) {
-        _scheduleRetry(job);
+        _scheduleRetry(job, error);
       } else if (!job.completer.isCompleted) {
+        _writeLog(
+          'failure',
+          job: job,
+          fields: {
+            'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+            'max_attempts_exhausted':
+                job.attempt >= _publicStoryRateLimitMaxAttempts,
+            ..._backendErrorFields(error),
+          },
+        );
         job.completer.completeError(error, stackTrace);
       }
     } catch (error, stackTrace) {
       if (!job.completer.isCompleted) {
+        _writeLog(
+          'failure',
+          job: job,
+          fields: {
+            'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+            ..._objectErrorFields(error),
+          },
+        );
         job.completer.completeError(error, stackTrace);
       }
     } finally {
@@ -335,16 +389,30 @@ class _PublicStoryGatewayCaller {
     }
   }
 
-  void _scheduleRetry(_PublicStoryJob job) {
+  void _scheduleRetry(_PublicStoryJob job, HanakoBackendException error) {
     final failedAttempt = job.attempt;
-    job.attempt++;
     final delay = _publicStoryRateLimitBackoff(
       attempt: failedAttempt,
       random: _random,
     );
+    job.attempt++;
+    _sleeping++;
+    _writeLog(
+      'rate_limit_retry',
+      job: job,
+      fields: {
+        'failed_attempt': failedAttempt,
+        'next_attempt': job.attempt,
+        'retry_delay_ms': delay.inMilliseconds,
+        'retry_at': DateTime.now().add(delay).toUtc().toIso8601String(),
+        ..._backendErrorFields(error),
+      },
+    );
     Timer(delay, () {
+      _sleeping--;
       if (job.completer.isCompleted) return;
       _ready.add(job);
+      _writeLog('retry_ready', job: job);
       _pump();
     });
   }
@@ -354,22 +422,135 @@ class _PublicStoryGatewayCaller {
   }
 
   Future<String> _loadModel() async {
-    final modelList = await gateway.listPublicStoryModels();
-    final model = _selectStoryModel(modelList.models);
-    if (model == null) {
-      throw StateError('未找到可用于故事生成/恢复的公开模型');
+    _writeLog('model_list_start');
+    try {
+      final modelList = await gateway.listPublicStoryModels();
+      final model = _selectStoryModel(modelList.models);
+      if (model == null) {
+        throw StateError('未找到可用于故事生成/恢复的公开模型');
+      }
+      _writeLog(
+        'model_list_success',
+        fields: {
+          'model_count': modelList.models.length,
+          'selected_model': model,
+        },
+      );
+      return model;
+    } catch (error) {
+      _writeLog('model_list_failure', fields: _objectErrorFields(error));
+      rethrow;
     }
-    return model;
+  }
+
+  void _writeLog(
+    String event, {
+    _PublicStoryJob? job,
+    Map<String, dynamic>? fields,
+  }) {
+    final now = DateTime.now();
+    final payload = <String, dynamic>{
+      'ts': now.toUtc().toIso8601String(),
+      'event': event,
+      'active': _active,
+      'ready': _ready.length,
+      'sleeping': _sleeping,
+      'max_concurrency': _publicStoryMaxConcurrentCalls,
+    };
+    if (job != null) {
+      payload.addAll({
+        'job_id': job.id,
+        'kind': job.kind,
+        'attempt': job.attempt,
+        'age_ms': now.difference(job.createdAt).inMilliseconds,
+        'system_prompt_chars': job.systemPromptChars,
+        'user_prompt_chars': job.userPromptChars,
+      });
+      if (job.rowIndex != null) {
+        payload['row_index'] = job.rowIndex;
+        payload['row_number'] = job.rowIndex! + 1;
+      }
+    }
+    if (fields != null) payload.addAll(fields);
+
+    try {
+      logFile.parent.createSync(recursive: true);
+      logFile.writeAsStringSync(
+        '${jsonEncode(payload)}\n',
+        mode: FileMode.append,
+        flush: true,
+      );
+    } catch (_) {
+      // 诊断日志不能影响登录恢复主流程。
+    }
   }
 }
 
 class _PublicStoryJob {
-  _PublicStoryJob({required this.messages});
+  _PublicStoryJob({
+    required this.id,
+    required this.kind,
+    required this.rowIndex,
+    required this.systemPromptChars,
+    required this.userPromptChars,
+    required this.messages,
+  });
 
+  final int id;
+  final String kind;
+  final int? rowIndex;
+  final int systemPromptChars;
+  final int userPromptChars;
+  final DateTime createdAt = DateTime.now();
   final List<Map<String, dynamic>> messages;
   final Completer<Map<String, dynamic>> completer =
       Completer<Map<String, dynamic>>();
   int attempt = 1;
+}
+
+class _PublicStoryJobMetadata {
+  const _PublicStoryJobMetadata({required this.kind, this.rowIndex});
+
+  final String kind;
+  final int? rowIndex;
+}
+
+_PublicStoryJobMetadata _detectPublicStoryJob({
+  required String systemPrompt,
+  required String userPrompt,
+}) {
+  if (systemPrompt.contains('记忆故事锚点提取器')) {
+    return const _PublicStoryJobMetadata(kind: 'anchor_extraction');
+  }
+  if (systemPrompt.contains('语义候选生成器')) {
+    final match = RegExp(r'当前只处理第\s*(\d+)\s*个锚点').firstMatch(userPrompt);
+    final rowNumber = match == null ? null : int.tryParse(match.group(1)!);
+    return _PublicStoryJobMetadata(
+      kind: 'candidate_row',
+      rowIndex: rowNumber == null ? null : rowNumber - 1,
+    );
+  }
+  if (systemPrompt.contains('记忆宫殿故事生成器')) {
+    return const _PublicStoryJobMetadata(kind: 'story_composition');
+  }
+  return const _PublicStoryJobMetadata(kind: 'unknown');
+}
+
+Map<String, dynamic> _backendErrorFields(HanakoBackendException error) {
+  return {
+    'error_type': error.runtimeType.toString(),
+    'message': error.message,
+    if (error.statusCode != null) 'status_code': error.statusCode,
+    if (error.details != null && error.details!.isNotEmpty)
+      'details': error.details,
+  };
+}
+
+Map<String, dynamic> _objectErrorFields(Object error) {
+  if (error is HanakoBackendException) {
+    return _backendErrorFields(error);
+  }
+  return {'error_type': error.runtimeType.toString(), 'message': '$error'};
 }
 
 bool _isPublicStoryRateLimit(HanakoBackendException error) {

@@ -113,6 +113,16 @@ void main() {
       expect(backend.publicChatCalls, 2);
       expect(backend.handshakeCalls, 0);
       expect(backend.privateChatCalls, 0);
+
+      final logFile = File(
+        '${home.logsDir.path}${Platform.pathSeparator}public-story-recovery.jsonl',
+      );
+      expect(logFile.existsSync(), isTrue);
+      final logs = logFile.readAsStringSync();
+      expect(logs, contains('"event":"rate_limit_retry"'));
+      expect(logs, contains('"status_code":429'));
+      expect(logs, contains('上游模型 API 返回 429 Too Many Requests'));
+      expect(logs, contains('"sleeping"'));
     });
 
     test('故事恢复解析同样走 root 公开故事接口', () async {
