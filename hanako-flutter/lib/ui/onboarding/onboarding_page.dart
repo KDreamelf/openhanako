@@ -27,6 +27,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
 import '../../identity/identity.dart';
+import '../widgets/recovery_matrix_table.dart';
 
 enum _OnboardingAccountFlow { unknown, register, login }
 
@@ -65,6 +66,15 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
   int? _loginAttempted;
   int? _loginElapsedMs;
   int? _loginDistance;
+  int? _loginCombinationId;
+  StoryRecoveryProgressStage? _loginRecoveryPhase;
+  List<List<int>> _loginMatrix = const [];
+  List<String> _loginAnchors = const [];
+  int _loginCandidatesPerColumn = 0;
+  bool _loginUsedLlm = false;
+  List<int> _loginCandidateRanks = const [];
+  List<int> _loginWordIds = const [];
+  List<int> _loginActivePositions = const [];
   Timer? _emailCooldownTimer;
   int _emailCooldownRemaining = 0;
 
@@ -93,6 +103,44 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     }
   }
 
+  void _clearLoginRecoveryProgress() {
+    _loginAttempted = null;
+    _loginElapsedMs = null;
+    _loginDistance = null;
+    _loginCombinationId = null;
+    _loginRecoveryPhase = null;
+    _loginMatrix = const [];
+    _loginAnchors = const [];
+    _loginCandidatesPerColumn = 0;
+    _loginUsedLlm = false;
+    _loginCandidateRanks = const [];
+    _loginWordIds = const [];
+    _loginActivePositions = const [];
+  }
+
+  void _applyLoginRecoveryProgress(StoryRecoveryProgress progress) {
+    _loginRecoveryPhase = progress.stage;
+    switch (progress.stage) {
+      case StoryRecoveryProgressStage.aiSemanticAnalysis:
+        break;
+      case StoryRecoveryProgressStage.matrixReady:
+        _loginMatrix = progress.columns;
+        _loginAnchors = progress.anchors;
+        _loginCandidatesPerColumn = progress.candidatesPerColumn;
+        _loginUsedLlm = progress.usedLlm;
+        break;
+      case StoryRecoveryProgressStage.matrixRecovery:
+        _loginAttempted = progress.attempted;
+        _loginElapsedMs = progress.elapsedMs;
+        _loginDistance = progress.currentHammingDistance;
+        _loginCombinationId = progress.combinationId;
+        _loginCandidateRanks = progress.candidateRanks;
+        _loginWordIds = progress.wordIds;
+        _loginActivePositions = progress.activePositions;
+        break;
+    }
+  }
+
   /// step 1 → step 2：先向认证中心核验用户名。
   ///
   /// 用户名可用则进入新账号注册；已存在则进入既有账号恢复登录。
@@ -102,9 +150,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     setState(() {
       _busy = true;
       _error = null;
-      _loginAttempted = null;
-      _loginElapsedMs = null;
-      _loginDistance = null;
+      _clearLoginRecoveryProgress();
     });
     try {
       final eng = ref.read(engineProvider);
@@ -274,9 +320,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     setState(() {
       _busy = true;
       _error = null;
-      _loginAttempted = null;
-      _loginElapsedMs = null;
-      _loginDistance = null;
+      _clearLoginRecoveryProgress();
     });
     try {
       final eng = ref.read(engineProvider);
@@ -292,13 +336,9 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
         targetPublicKeyHashes: hashes.toSet(),
         softDeadline: const Duration(minutes: 5),
         hardDeadline: const Duration(minutes: 10),
-        onProgress: (attempted, elapsedMs, currentHammingDistance) {
+        onRecoveryProgress: (progress) {
           if (!mounted) return;
-          setState(() {
-            _loginAttempted = attempted;
-            _loginElapsedMs = elapsedMs;
-            _loginDistance = currentHammingDistance;
-          });
+          setState(() => _applyLoginRecoveryProgress(progress));
         },
       );
       if (!outcome.success) {
@@ -312,6 +352,15 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
           _busy = false;
           _loginAttempted = outcome.attempted;
           _loginElapsedMs = outcome.elapsedMs;
+          _loginDistance = outcome.hammingDistance;
+          _loginCombinationId = outcome.attempted;
+          _loginMatrix = outcome.parsedColumns;
+          _loginAnchors = outcome.anchors;
+          _loginCandidatesPerColumn = outcome.candidatesPerColumn;
+          _loginUsedLlm = outcome.usedLlm;
+          _loginCandidateRanks = const [];
+          _loginWordIds = const [];
+          _loginActivePositions = const [];
         });
         return;
       }
@@ -467,7 +516,11 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
       ),
       body: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 580),
+          constraints: BoxConstraints(
+            maxWidth: _step == 2 && _accountFlow == _OnboardingAccountFlow.login
+                ? 820
+                : 580,
+          ),
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(24),
             child: Column(
@@ -507,6 +560,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
             _accountFlow = _OnboardingAccountFlow.unknown;
             _emailChallenge = null;
             _emailCode = '';
+            _clearLoginRecoveryProgress();
           }),
         );
       case 2:
@@ -514,10 +568,24 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
           return _StepExistingLogin(
             userName: _userName.trim(),
             recoveryText: _recoveryText,
+            busy: _busy,
+            phase: _loginRecoveryPhase,
             attempted: _loginAttempted,
             elapsedMs: _loginElapsedMs,
             distance: _loginDistance,
-            onRecoveryTextChanged: (v) => setState(() => _recoveryText = v),
+            combinationId: _loginCombinationId,
+            matrix: _loginMatrix,
+            anchors: _loginAnchors,
+            candidatesPerColumn: _loginCandidatesPerColumn,
+            usedLlm: _loginUsedLlm,
+            candidateRanks: _loginCandidateRanks,
+            wordIds: _loginWordIds,
+            activePositions: _loginActivePositions,
+            onRecoveryTextChanged: (v) => setState(() {
+              _recoveryText = v;
+              _error = null;
+              _clearLoginRecoveryProgress();
+            }),
           );
         }
         return _StepRegistrationEmail(
@@ -810,27 +878,47 @@ class _StepExistingLogin extends StatelessWidget {
   const _StepExistingLogin({
     required this.userName,
     required this.recoveryText,
+    required this.busy,
+    required this.phase,
     required this.attempted,
     required this.elapsedMs,
     required this.distance,
+    required this.combinationId,
+    required this.matrix,
+    required this.anchors,
+    required this.candidatesPerColumn,
+    required this.usedLlm,
+    required this.candidateRanks,
+    required this.wordIds,
+    required this.activePositions,
     required this.onRecoveryTextChanged,
   });
 
   final String userName;
   final String recoveryText;
+  final bool busy;
+  final StoryRecoveryProgressStage? phase;
   final int? attempted;
   final int? elapsedMs;
   final int? distance;
+  final int? combinationId;
+  final List<List<int>> matrix;
+  final List<String> anchors;
+  final int candidatesPerColumn;
+  final bool usedLlm;
+  final List<int> candidateRanks;
+  final List<int> wordIds;
+  final List<int> activePositions;
   final ValueChanged<String> onRecoveryTextChanged;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final progressText = attempted == null
-        ? null
-        : '已尝试 $attempted 次'
-              '${distance == null ? '' : '，距离 $distance'}'
-              '${elapsedMs == null ? '' : '，耗时 ${(elapsedMs! / 1000).toStringAsFixed(1)} 秒'}';
+    final showProgress =
+        phase != null ||
+        attempted != null ||
+        matrix.isNotEmpty ||
+        anchors.isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -845,6 +933,7 @@ class _StepExistingLogin extends StatelessWidget {
           initialValue: recoveryText,
           minLines: 3,
           maxLines: 6,
+          enabled: !busy,
           decoration: const InputDecoration(
             labelText: '12 个名词或记忆故事',
             helperText: '直接粘贴 12 个名词时不依赖 AI 网关',
@@ -852,12 +941,66 @@ class _StepExistingLogin extends StatelessWidget {
           ),
           onChanged: onRecoveryTextChanged,
         ),
-        if (progressText != null) ...[
+        if (showProgress) ...[
           const SizedBox(height: 12),
-          Text(progressText, style: theme.textTheme.bodySmall),
+          if (busy) ...[
+            const LinearProgressIndicator(),
+            const SizedBox(height: 10),
+          ],
+          Text(
+            _loginRecoveryProgressText(),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          if (matrix.isNotEmpty || anchors.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            RecoveryCandidateMatrixTable(
+              matrix: matrix,
+              anchors: anchors,
+              candidatesPerColumn: candidatesPerColumn,
+              usedLlm: usedLlm,
+              hammingDistance: distance ?? 0,
+              attempted: attempted ?? 0,
+              elapsedMs: elapsedMs ?? 0,
+              combinationId: combinationId,
+              candidateRanks: candidateRanks,
+              wordIds: wordIds,
+              activePositions: activePositions,
+            ),
+          ],
         ],
       ],
     );
+  }
+
+  String _loginRecoveryProgressText() {
+    if (phase == StoryRecoveryProgressStage.aiSemanticAnalysis) {
+      return '正在进行AI语义分析';
+    }
+    if (phase == StoryRecoveryProgressStage.matrixReady) {
+      final completedRows = matrix.where((row) => row.isNotEmpty).length;
+      if (completedRows < anchors.length) {
+        return '已提取故事锚点，正在并发生成候选词 · $completedRows/${anchors.length}';
+      }
+      return '候选矩阵已生成，准备开始矩阵恢复';
+    }
+    final parts = <String>[busy ? '正在恢复' : '恢复结束'];
+    final currentAttempted = attempted;
+    final currentElapsedMs = elapsedMs;
+    final currentDistance = distance;
+    if (currentAttempted != null) parts.add('已尝试 $currentAttempted 次');
+    if (combinationId != null) parts.add('组合 #$combinationId');
+    if (currentDistance != null) parts.add('距离 $currentDistance');
+    if (currentElapsedMs != null) {
+      parts.add('耗时 ${(currentElapsedMs / 1000).toStringAsFixed(1)} 秒');
+      if (currentAttempted != null) {
+        parts.add(
+          '吞吐 ${formatRecoveryAttemptRate(currentAttempted, currentElapsedMs)}',
+        );
+      }
+    }
+    return parts.join(' · ');
   }
 }
 
