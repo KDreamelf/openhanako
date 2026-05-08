@@ -205,8 +205,50 @@ func PH01ListModels(c *gin.Context) {
 }
 
 func PH01PublicStoryModels(c *gin.Context) {
+	var encryptedChannel *ph01Channel
+	var encryptedAESKey []byte
+	if c.Request.Method == http.MethodPost {
+		rawBody, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			ph01ProtocolError(c, http.StatusBadRequest, ph01ErrInvalidPayload, err.Error())
+			return
+		}
+		env, ok := ph01ParseEncryptedEnvelope(rawBody)
+		if !ok {
+			middleware.PublicStoryAnonymousRateLimit(c)
+			if c.IsAborted() {
+				return
+			}
+			ph01ProtocolError(c, http.StatusBadRequest, ph01ErrInvalidPayload, "encrypted envelope required")
+			return
+		}
+		ch, ok := ph01RequireChannel(c, env.ChannelID)
+		if !ok {
+			return
+		}
+		aesKey, err := hex.DecodeString(ch.AESKeyHex)
+		if err != nil {
+			ph01ProtocolError(c, http.StatusInternalServerError, ph01ErrInternalError, err.Error())
+			return
+		}
+		if _, err := ph01DecryptGCM(aesKey, env.Nonce, env.Ciphertext, env.Tag); err != nil {
+			ph01ProtocolError(c, http.StatusBadRequest, ph01ErrDecryptionFailed, err.Error())
+			return
+		}
+		encryptedChannel = ch
+		encryptedAESKey = aesKey
+	}
+
 	_, _, allowedModels, ok := ph01RequireRootPublicStoryCarrier(c)
 	if !ok {
+		return
+	}
+	body := gin.H{
+		"models": allowedModels,
+		"tier":   "public",
+	}
+	if encryptedChannel != nil {
+		ph01WriteEncryptedJSON(c, encryptedChannel, encryptedAESKey, body)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -221,11 +263,45 @@ func PH01PublicStoryChat(c *gin.Context) {
 		ph01ProtocolError(c, http.StatusBadRequest, ph01ErrInvalidPayload, err.Error())
 		return
 	}
-	relayBody, chatReq, err := ph01BuildRelayBody(rawBody)
-	if err != nil {
-		ph01ProtocolError(c, http.StatusBadRequest, ph01ErrInvalidPayload, err.Error())
-		return
+
+	relayBody := []byte(nil)
+	var chatReq ph01ChatRequest
+	var encryptedChannel *ph01Channel
+	var encryptedAESKey []byte
+	if env, ok := ph01ParseEncryptedEnvelope(rawBody); ok {
+		ch, ok := ph01RequireChannel(c, env.ChannelID)
+		if !ok {
+			return
+		}
+		aesKey, err := hex.DecodeString(ch.AESKeyHex)
+		if err != nil {
+			ph01ProtocolError(c, http.StatusInternalServerError, ph01ErrInternalError, err.Error())
+			return
+		}
+		plaintext, err := ph01DecryptGCM(aesKey, env.Nonce, env.Ciphertext, env.Tag)
+		if err != nil {
+			ph01ProtocolError(c, http.StatusBadRequest, ph01ErrDecryptionFailed, err.Error())
+			return
+		}
+		relayBody, chatReq, err = ph01BuildRelayBody(plaintext)
+		if err != nil {
+			ph01ProtocolError(c, http.StatusBadRequest, ph01ErrInvalidPayload, err.Error())
+			return
+		}
+		encryptedChannel = ch
+		encryptedAESKey = aesKey
+	} else {
+		middleware.PublicStoryAnonymousRateLimit(c)
+		if c.IsAborted() {
+			return
+		}
+		relayBody, chatReq, err = ph01BuildRelayBody(rawBody)
+		if err != nil {
+			ph01ProtocolError(c, http.StatusBadRequest, ph01ErrInvalidPayload, err.Error())
+			return
+		}
 	}
+
 	if err := ph01ValidatePublicStoryChatRequest(chatReq); err != nil {
 		ph01ProtocolError(c, http.StatusBadRequest, ph01ErrInvalidPayload, err.Error())
 		return
@@ -249,7 +325,46 @@ func PH01PublicStoryChat(c *gin.Context) {
 		ph01ProtocolError(c, status, ph01ErrInternalError, string(responseBody))
 		return
 	}
+	if encryptedChannel != nil {
+		if err := ph01TouchChannel(encryptedChannel); err != nil {
+			common.SysLog("failed to touch PH01 channel: " + err.Error())
+		}
+		nonceHex, ctHex, tagHex, err := ph01EncryptGCM(encryptedAESKey, responseBody)
+		if err != nil {
+			ph01ProtocolError(c, http.StatusInternalServerError, ph01ErrInternalError, err.Error())
+			return
+		}
+		c.JSON(http.StatusOK, ph01EncryptedEnvelope{
+			ChannelID:  encryptedChannel.ID,
+			Nonce:      nonceHex,
+			Ciphertext: ctHex,
+			Tag:        tagHex,
+		})
+		return
+	}
 	c.Data(status, "application/json", responseBody)
+}
+
+func ph01WriteEncryptedJSON(c *gin.Context, ch *ph01Channel, aesKey []byte, body gin.H) {
+	if err := ph01TouchChannel(ch); err != nil {
+		common.SysLog("failed to touch PH01 channel: " + err.Error())
+	}
+	plaintext, err := common.Marshal(body)
+	if err != nil {
+		ph01ProtocolError(c, http.StatusInternalServerError, ph01ErrInternalError, err.Error())
+		return
+	}
+	nonceHex, ctHex, tagHex, err := ph01EncryptGCM(aesKey, plaintext)
+	if err != nil {
+		ph01ProtocolError(c, http.StatusInternalServerError, ph01ErrInternalError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, ph01EncryptedEnvelope{
+		ChannelID:  ch.ID,
+		Nonce:      nonceHex,
+		Ciphertext: ctHex,
+		Tag:        tagHex,
+	})
 }
 
 func PH01Chat(c *gin.Context) {
@@ -652,6 +767,24 @@ func ph01ModelAllowed(models []string, requested string) bool {
 		}
 	}
 	return false
+}
+
+func ph01ParseEncryptedEnvelope(rawBody []byte) (ph01EncryptedEnvelope, bool) {
+	var env ph01EncryptedEnvelope
+	if len(bytes.TrimSpace(rawBody)) == 0 {
+		return env, false
+	}
+	if err := common.Unmarshal(rawBody, &env); err != nil {
+		return env, false
+	}
+	env.ChannelID = strings.TrimSpace(env.ChannelID)
+	env.Nonce = strings.TrimSpace(env.Nonce)
+	env.Ciphertext = strings.TrimSpace(env.Ciphertext)
+	env.Tag = strings.TrimSpace(env.Tag)
+	if env.ChannelID == "" || env.Nonce == "" || env.Ciphertext == "" || env.Tag == "" {
+		return env, false
+	}
+	return env, true
 }
 
 func ph01ProtocolError(c *gin.Context, status int, code string, message string) {

@@ -554,12 +554,27 @@ Map<String, dynamic> _objectErrorFields(Object error) {
 }
 
 bool _isPublicStoryRateLimit(HanakoBackendException error) {
-  if (error.statusCode == 429) return true;
-  final text = '${error.message}\n${error.details ?? ''}'.toLowerCase();
+  final details = error.details ?? '';
+  final text = details.toLowerCase();
+  final hasServerBody = details.contains('服务端返回明文');
+  final hasExplicitUpstream =
+      details.contains('上游') || text.contains('upstream');
+  final hasRetryableSource =
+      hasServerBody ||
+      hasExplicitUpstream ||
+      text.contains('"error": "internal_error"') ||
+      text.contains('"error":"internal_error"');
+  if (!hasRetryableSource) return false;
+  final isGatewayQuotaLimit =
+      text.contains('rate_limit_exceeded') &&
+      !text.contains('internal_error') &&
+      !hasExplicitUpstream;
+  if (isGatewayQuotaLimit) return false;
   return text.contains('请求过于频繁') ||
       text.contains('too many requests') ||
       text.contains('rate limit') ||
-      text.contains('rate_limit');
+      text.contains('rate_limit') ||
+      error.statusCode == 429 && hasExplicitUpstream;
 }
 
 Duration _publicStoryRateLimitBackoff({

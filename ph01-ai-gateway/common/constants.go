@@ -194,6 +194,9 @@ var (
 	CriticalRateLimitNum            = 20
 	CriticalRateLimitDuration int64 = 20 * 60
 
+	PublicStoryRateLimitNum            = 50
+	PublicStoryRateLimitDuration int64 = 30 * 60
+
 	UploadRateLimitNum            = 10
 	UploadRateLimitDuration int64 = 60
 
@@ -206,7 +209,7 @@ var (
 	SearchRateLimitDuration int64 = 60
 )
 
-var RateLimitKeyExpirationDuration = 20 * time.Minute
+var RateLimitKeyExpirationDuration = 30 * time.Minute
 
 const (
 	UserStatusEnabled  = 1 // don't use 0, 0 is the default value!

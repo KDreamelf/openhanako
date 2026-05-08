@@ -20,8 +20,9 @@ func SetApiRouter(router *gin.Engine) {
 		ph01ProtocolRoute.POST("/channel/handshake", middleware.CriticalRateLimit(), controller.PH01ChannelHandshake)
 		ph01ProtocolRoute.GET("/models", controller.PH01ListModels)
 		ph01ProtocolRoute.POST("/llm/chat", controller.PH01Chat)
-		ph01ProtocolRoute.GET("/public/story/models", middleware.CriticalRateLimit(), controller.PH01PublicStoryModels)
-		ph01ProtocolRoute.POST("/public/story/chat", middleware.CriticalRateLimit(), controller.PH01PublicStoryChat)
+		ph01ProtocolRoute.GET("/public/story/models", middleware.PublicStoryRateLimit(), controller.PH01PublicStoryModels)
+		ph01ProtocolRoute.POST("/public/story/models", controller.PH01PublicStoryModels)
+		ph01ProtocolRoute.POST("/public/story/chat", controller.PH01PublicStoryChat)
 	}
 
 	apiRouter := router.Group("/api")

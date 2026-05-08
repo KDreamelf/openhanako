@@ -108,6 +108,18 @@ func CriticalRateLimit() func(c *gin.Context) {
 	return defNext
 }
 
+func PublicStoryRateLimit() func(c *gin.Context) {
+	return publicStoryRateLimitFactory()
+}
+
+func PublicStoryAnonymousRateLimit(c *gin.Context) {
+	publicStoryRateLimitFactory()(c)
+}
+
+func publicStoryRateLimitFactory() func(c *gin.Context) {
+	return rateLimitFactory(common.PublicStoryRateLimitNum, common.PublicStoryRateLimitDuration, "PS")
+}
+
 func DownloadRateLimit() func(c *gin.Context) {
 	return rateLimitFactory(common.DownloadRateLimitNum, common.DownloadRateLimitDuration, "DW")
 }

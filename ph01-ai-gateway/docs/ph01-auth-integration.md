@@ -259,10 +259,13 @@ AI 网关直接承载子体协议路由：
 | `POST` | `/api/v1/channel/handshake` | 私钥签名 + ECDH 握手，返回 `channel_id`、服务端临时公钥、空闲过期时间、授权模型 |
 | `GET` | `/api/v1/models?channel_id=...` | 读取当前短期通道的授权模型列表 |
 | `POST` | `/api/v1/llm/chat` | 使用通道对称密钥加密后的聊天请求 |
-| `GET` | `/api/v1/public/story/models` | 读取 root `PH01 Public Key` 配置承载的公开故事模型列表 |
-| `POST` | `/api/v1/public/story/chat` | 注册/登录恢复期故事生成与故事解析；明文 OpenAI chat body，服务端禁止 stream/tools |
+| `GET` | `/api/v1/public/story/models` | 匿名读取 root `PH01 Public Key` 配置承载的公开故事模型列表，受公开故事 IP 限流保护 |
+| `POST` | `/api/v1/public/story/models` | 已登录子体用 PH01 加密信封读取公开故事模型列表，跳过匿名 IP 限流 |
+| `POST` | `/api/v1/public/story/chat` | 注册/登录恢复期故事生成与故事解析；匿名请求用明文 OpenAI chat body，已登录请求可用 PH01 加密信封；服务端禁止 stream/tools |
 
 默认密钥只用于管理端绑定分组、额度、模型限制与订阅权益等配置承载，不作为子体请求凭证下发或使用。root 的公共密钥只用于承载注册/登录期故事生成与还原配置，同样不能作为 API key 使用或展示。
+
+公开故事接口的模型调用始终使用 root 的 `PH01 Public Key` 配置承载。PH01 加密信封只用于已登录子体的传输保密和匿名限流绕过，不会改用当前用户密钥或余额。
 
 ## root 用户
 

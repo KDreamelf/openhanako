@@ -125,6 +125,35 @@ void main() {
       expect(logs, contains('"sleeping"'));
     });
 
+    test('公开故事网关自身 429 不会按上游限流长重试', () async {
+      final backend = _PublicStoryBackendClient(
+        models: const ['public-story-model'],
+        responses: const ['不应返回'],
+        gatewayRateLimitFailures: 1,
+      );
+      final engine = await HanaEngine.initialize(
+        home: home,
+        backendClient: backend,
+      );
+      addTearDown(engine.dispose);
+
+      final result = await engine.identityRepository.composer.compose(
+        hanakoWordlist.take(12).toList(growable: false),
+      );
+
+      expect(result.fallback, isTrue);
+      expect(backend.publicModelListCalls, 1);
+      expect(backend.publicChatCalls, 1);
+
+      final logFile = File(
+        '${home.logsDir.path}${Platform.pathSeparator}public-story-recovery.jsonl',
+      );
+      final logs = logFile.readAsStringSync();
+      expect(logs, contains('"event":"failure"'));
+      expect(logs, contains('"status_code":429'));
+      expect(logs, isNot(contains('"event":"rate_limit_retry"')));
+    });
+
     test('故事恢复解析同样走 root 公开故事接口', () async {
       final matrix = List.generate(
         12,
@@ -214,12 +243,14 @@ class _PublicStoryBackendClient extends HanakoBackendClient {
     required this.models,
     required this.responses,
     this.publicStoryRateLimitFailures = 0,
+    this.gatewayRateLimitFailures = 0,
     this.chatDelay = Duration.zero,
   });
 
   final List<String> models;
   final List<String> responses;
   final int publicStoryRateLimitFailures;
+  final int gatewayRateLimitFailures;
   final Duration chatDelay;
   final requestedModels = <String>[];
   final extras = <Map<String, dynamic>?>[];
@@ -254,14 +285,26 @@ class _PublicStoryBackendClient extends HanakoBackendClient {
       if (chatDelay > Duration.zero) {
         await Future<void>.delayed(chatDelay);
       }
-      if (callNumber <= publicStoryRateLimitFailures) {
+      if (callNumber <= gatewayRateLimitFailures) {
+        throw HanakoBackendException(
+          message: '调用公开故事模型失败：请求过于频繁',
+          details: '调用公开故事模型失败\nHTTP 状态：429\n请求被网关前置限流拦截',
+          statusCode: 429,
+        );
+      }
+      if (callNumber <=
+          gatewayRateLimitFailures + publicStoryRateLimitFailures) {
         throw HanakoBackendException(
           message: '调用公开故事模型失败：请求过于频繁',
           details: '上游模型 API 返回 429 Too Many Requests',
           statusCode: 429,
         );
       }
-      final response = responses[callNumber - publicStoryRateLimitFailures - 1];
+      final response =
+          responses[callNumber -
+              gatewayRateLimitFailures -
+              publicStoryRateLimitFailures -
+              1];
       return {
         'choices': [
           {

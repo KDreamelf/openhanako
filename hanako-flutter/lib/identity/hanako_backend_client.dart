@@ -305,11 +305,24 @@ class HanakoBackendClient {
   /// 普通聊天的 ECDH [_channel]。
   Future<GatewayModelList> listPublicStoryModels() async {
     try {
-      final resp = await _dio.getUri<Map<String, dynamic>>(
-        Uri.parse('$aiBaseUrl/api/v1/public/story/models'),
-        options: Options(contentType: Headers.jsonContentType),
-      );
-      final body = resp.data!;
+      final ch = _currentChannelOrNull();
+      final Response<Map<String, dynamic>> resp;
+      Map<String, dynamic> body;
+      if (ch != null) {
+        resp = await _dio.postUri<Map<String, dynamic>>(
+          Uri.parse('$aiBaseUrl/api/v1/public/story/models'),
+          data: _encryptedEnvelope(ch, {'purpose': 'public_story_models'}),
+          options: Options(contentType: Headers.jsonContentType),
+        );
+        body = _decryptEnvelope(ch, resp.data!);
+        _extendChannel(ch);
+      } else {
+        resp = await _dio.getUri<Map<String, dynamic>>(
+          Uri.parse('$aiBaseUrl/api/v1/public/story/models'),
+          options: Options(contentType: Headers.jsonContentType),
+        );
+        body = resp.data!;
+      }
       return GatewayModelList(
         models: (body['models'] as List?)?.cast<String>() ?? const <String>[],
         tier: body['tier'] as String?,
@@ -376,15 +389,27 @@ class HanakoBackendClient {
     required List<Map<String, dynamic>> messages,
     Map<String, dynamic>? extra,
   }) async {
+    final payload = _chatPayload(
+      model: model,
+      messages: messages,
+      stream: false,
+      extra: extra,
+    );
     try {
+      final ch = _currentChannelOrNull();
+      if (ch != null) {
+        final resp = await _dio.postUri<Map<String, dynamic>>(
+          Uri.parse('$aiBaseUrl/api/v1/public/story/chat'),
+          data: _encryptedEnvelope(ch, payload),
+          options: Options(contentType: Headers.jsonContentType),
+        );
+        final body = _decryptEnvelope(ch, resp.data!);
+        _extendChannel(ch);
+        return body;
+      }
       final resp = await _dio.postUri<Map<String, dynamic>>(
         Uri.parse('$aiBaseUrl/api/v1/public/story/chat'),
-        data: _chatPayload(
-          model: model,
-          messages: messages,
-          stream: false,
-          extra: extra,
-        ),
+        data: payload,
         options: Options(contentType: Headers.jsonContentType),
       );
       return resp.data!;
@@ -505,6 +530,61 @@ class HanakoBackendClient {
       throw StateError('通信通道已过期，请重新 handshake()');
     }
     return ch;
+  }
+
+  HanakoChannel? _currentChannelOrNull() {
+    final ch = _channel;
+    if (ch == null) return null;
+    if (DateTime.now().isAfter(ch.expiresAt)) {
+      _channel = null;
+      return null;
+    }
+    return ch;
+  }
+
+  Map<String, dynamic> _encryptedEnvelope(
+    HanakoChannel channel,
+    Map<String, dynamic> plaintext,
+  ) {
+    final enc = encryptGcm(
+      channel.aesKey,
+      Uint8List.fromList(utf8.encode(jsonEncode(plaintext))),
+    );
+    return {
+      'channel_id': channel.channelId,
+      'nonce': enc.nonceHex,
+      'ciphertext': enc.ciphertextHex,
+      'tag': enc.tagHex,
+    };
+  }
+
+  Map<String, dynamic> _decryptEnvelope(
+    HanakoChannel channel,
+    Map<String, dynamic> envelope,
+  ) {
+    final channelId = envelope['channel_id'];
+    if (channelId is String &&
+        channelId.isNotEmpty &&
+        channelId != channel.channelId) {
+      throw StateError('AI 网关返回了不匹配的加密通道');
+    }
+    final plaintext = decryptGcm(
+      channel.aesKey,
+      nonceHex: envelope['nonce'] as String,
+      ciphertextHex: envelope['ciphertext'] as String,
+      tagHex: envelope['tag'] as String,
+    );
+    return jsonDecode(utf8.decode(plaintext)) as Map<String, dynamic>;
+  }
+
+  void _extendChannel(HanakoChannel channel) {
+    if (_channel?.channelId != channel.channelId) return;
+    _channel = HanakoChannel(
+      channelId: channel.channelId,
+      aesKey: channel.aesKey,
+      expiresAt: DateTime.now().add(const Duration(minutes: 10)),
+      allowedModels: channel.allowedModels,
+    );
   }
 }
 

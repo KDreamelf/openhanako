@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -111,6 +112,83 @@ func TestPH01PublicStoryModelsPreservesPublicTokenLimitOrder(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Equal(t, []string{"login-story-model", "gpt-5.5"}, body.Models)
+}
+
+func TestPH01PublicStoryModelsAcceptsEncryptedEnvelope(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Token{}, &model.PH01Identity{}))
+
+	oldSelfUseModeEnabled := operation_setting.SelfUseModeEnabled
+	oldChannels := ph01Channels
+	operation_setting.SelfUseModeEnabled = true
+	ph01Channels = sync.Map{}
+	t.Cleanup(func() {
+		operation_setting.SelfUseModeEnabled = oldSelfUseModeEnabled
+		ph01Channels = oldChannels
+	})
+
+	rootUser, _, err := model.FindOrCreateUserFromPH01(1, "root", "beef")
+	require.NoError(t, err)
+	var publicToken model.Token
+	require.NoError(t, db.First(&publicToken, "user_id = ? AND name = ?", rootUser.Id, model.PH01PublicTokenName).Error)
+	require.NoError(t, db.Model(&publicToken).Updates(map[string]any{
+		"group":                "default",
+		"unlimited_quota":      true,
+		"model_limits_enabled": true,
+		"model_limits":         "story-model",
+	}).Error)
+	require.NoError(t, db.Create(&model.Ability{
+		Group: "default", Model: "story-model", ChannelId: 1, Enabled: true,
+	}).Error)
+
+	aesKey := []byte("0123456789abcdef0123456789abcdef")
+	ch := &ph01Channel{
+		ID:            "story-models-channel",
+		GatewayUserID: rootUser.Id,
+		PH01UserID:    1,
+		Username:      "root",
+		Tier:          "free",
+		TokenID:       int(publicToken.Id),
+		AESKeyHex:     hex.EncodeToString(aesKey),
+		AllowedModels: []string{"chat-model"},
+		CreatedAt:     time.Now(),
+		ExpiresAt:     time.Now().Add(time.Minute),
+	}
+	require.NoError(t, ph01StoreChannel(ch))
+
+	nonce, ciphertext, tag, err := ph01EncryptGCM(aesKey, []byte(`{"purpose":"public_story_models"}`))
+	require.NoError(t, err)
+	reqBody, err := json.Marshal(ph01EncryptedEnvelope{
+		ChannelID:  ch.ID,
+		Nonce:      nonce,
+		Ciphertext: ciphertext,
+		Tag:        tag,
+	})
+	require.NoError(t, err)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/public/story/models", strings.NewReader(string(reqBody)))
+
+	PH01PublicStoryModels(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var encryptedResp ph01EncryptedEnvelope
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &encryptedResp))
+	plaintext, err := ph01DecryptGCM(
+		aesKey,
+		encryptedResp.Nonce,
+		encryptedResp.Ciphertext,
+		encryptedResp.Tag,
+	)
+	require.NoError(t, err)
+	var body struct {
+		Models []string `json:"models"`
+		Tier   string   `json:"tier"`
+	}
+	require.NoError(t, json.Unmarshal(plaintext, &body))
+	require.Equal(t, "public", body.Tier)
+	require.Equal(t, []string{"story-model"}, body.Models)
 }
 
 func TestPH01PublicStoryChatRejectsStreamAndTools(t *testing.T) {
