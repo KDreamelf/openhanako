@@ -210,6 +210,41 @@ class IdentityRepository {
     );
   }
 
+  /// 生成一份新的未落盘身份，用于密钥轮换预览。
+  ///
+  /// 该方法只生成新私钥、助记词和故事，不覆盖当前 vault。调用方必须先完成
+  /// 服务端轮换，再调用 [replaceCurrentIdentity] 持久化新身份。
+  Future<IdentityRegistration> generateReplacementIdentityPreview() async {
+    final mnemonic = generateMnemonic();
+    final keyPair = HanakoKeyPair.fromPrivateKeyBytes(mnemonic.privateKeyBytes);
+    final composition = await composer.compose(mnemonic.words);
+    return IdentityRegistration(
+      identity: HanakoIdentity(keyPair: keyPair, mnemonic: mnemonic),
+      story: composition.story,
+      fallback: composition.fallback,
+    );
+  }
+
+  /// 用新身份覆盖本机 vault，并把运行期当前身份切换到新身份。
+  Future<void> replaceCurrentIdentity(
+    HanakoIdentity identity, {
+    String? pin,
+  }) async {
+    final mnemonic = identity.mnemonic;
+    if (mnemonic == null) {
+      throw StateError('新身份没有助记词，不能覆盖本机身份 vault');
+    }
+    await keystore.writeVault(
+      IdentityVault(
+        privateKey: Uint8List.fromList(identity.keyPair.privateKeyBytes),
+        mnemonicIds: mnemonic.words.map((word) => idByWord(word)!).toList(),
+        wordlistVersion: hanakoWordlistVersion,
+      ),
+      pin: pin,
+    );
+    _current = identity;
+  }
+
   /// 在已登录/已解锁状态下自检一段故事是否能恢复当前身份。
   ///
   /// 这不是词表快捷校验；它复用 [loginWithStory] 的完整解析与矩阵恢复流程。

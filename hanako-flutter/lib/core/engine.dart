@@ -84,9 +84,16 @@ class HanaEngine {
       File(p.join(h.logsDir.path, 'public-story-recovery.jsonl')),
       source: 'hanako-flutter',
     );
+    final backendDiagnostics = DiagnosticsLog(
+      File(p.join(h.logsDir.path, 'backend-client.jsonl')),
+      source: 'hanako-flutter',
+    );
     final gateway =
         backendClient ??
-        HanakoBackendClient(publicStoryDiagnosticsLog: publicStoryDiagnostics);
+        HanakoBackendClient(
+          backendDiagnosticsLog: backendDiagnostics,
+          publicStoryDiagnosticsLog: publicStoryDiagnostics,
+        );
     final publicStoryCaller = _PublicStoryGatewayCaller(
       gateway,
       diagnosticsLog: publicStoryDiagnostics,

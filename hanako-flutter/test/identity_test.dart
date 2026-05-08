@@ -581,6 +581,30 @@ void main() {
       expect(regenerated.fallback, isFalse);
     });
 
+    test(
+      'generateReplacementIdentityPreview → 确认前不覆盖，replace 后写入新身份',
+      () async {
+        final original = await repo.registerNew(pin: '1234');
+        final originalHash = original.identity.publicKeyHash;
+
+        final preview = await repo.generateReplacementIdentityPreview();
+        expect(preview.identity.publicKeyHash, isNot(originalHash));
+        expect(repo.current!.publicKeyHash, originalHash);
+
+        await repo.replaceCurrentIdentity(preview.identity, pin: '1234');
+        expect(repo.current!.publicKeyHash, preview.identity.publicKeyHash);
+
+        final repo2 = IdentityRepository(
+          keystore: FileSecureKeystore(hanaHome: tmp),
+          composer: repo.composer,
+          parser: repo.parser,
+        );
+        final loaded = await repo2.unlock(pin: '1234');
+        expect(loaded.publicKeyHash, preview.identity.publicKeyHash);
+        expect(loaded.mnemonic!.words, preview.words);
+      },
+    );
+
     test('verifyCurrentStory → 不退出登录也走恢复链路验证当前身份', () async {
       final reg = await repo.registerNew(pin: '1234');
       final originalHash = reg.identity.publicKeyHash;

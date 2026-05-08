@@ -25,6 +25,7 @@ class HanakoBackendClient {
   HanakoBackendClient({
     this.authBaseUrl = defaultAuthBaseUrl,
     this.aiBaseUrl = defaultAiBaseUrl,
+    this.backendDiagnosticsLog,
     this.publicStoryDiagnosticsLog,
     Dio? dio,
   }) : _dio = dio ?? Dio();
@@ -41,6 +42,9 @@ class HanakoBackendClient {
 
   /// 公开故事/恢复链路本地 JSONL 诊断日志。
   final DiagnosticsLog? publicStoryDiagnosticsLog;
+
+  /// 通用认证/AI 网关传输诊断日志。
+  final DiagnosticsLog? backendDiagnosticsLog;
 
   final Dio _dio;
 
@@ -141,6 +145,155 @@ class HanakoBackendClient {
       tier: body['tier'] as String,
       pubkeyHash: body['pubkey_hash'] as String,
     );
+  }
+
+  /// 密钥轮换第一步：当前有效旧私钥签名后，请求绑定邮箱验证码。
+  Future<PubkeyRotationEmailChallenge> startPubkeyRotationEmail({
+    required HanakoKeyPair keyPair,
+    required String username,
+  }) async {
+    final startedAt = DateTime.now();
+    const endpoint = '/api/v1/auth/rotate_pubkey_email/start';
+    final req = signRequest(
+      keyPair: keyPair,
+      businessPayload: {'username': username.trim()},
+    );
+    _writeBackendTransportLog(
+      'transport_request',
+      operation: 'pubkey_rotation_email_start',
+      phase: 'request',
+      status: 'start',
+      method: 'POST',
+      endpoint: endpoint,
+      fields: {'has_current_key': true},
+    );
+    try {
+      final resp = await _dio.postUri<Map<String, dynamic>>(
+        Uri.parse('$authBaseUrl$endpoint'),
+        data: req.toJson(),
+        options: Options(contentType: Headers.jsonContentType),
+      );
+      final body = resp.data!;
+      final result = PubkeyRotationEmailChallenge(
+        challengeId: body['challenge_id'] as String,
+        delivery: body['delivery'] as String,
+        expiresIn: (body['expires_in'] as num).toInt(),
+        cooldownSeconds: (body['cooldown_seconds'] as num?)?.toInt() ?? 60,
+      );
+      _writeBackendTransportLog(
+        'transport_success',
+        operation: 'pubkey_rotation_email_start',
+        phase: 'response',
+        status: 'success',
+        method: 'POST',
+        endpoint: endpoint,
+        fields: {
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          'status_code': resp.statusCode,
+          'delivery': result.delivery,
+        },
+      );
+      return result;
+    } on DioException catch (e) {
+      final error = await HanakoBackendException.fromDio(
+        e,
+        action: '发送密钥轮换验证码',
+      );
+      _writeBackendTransportLog(
+        'transport_failure',
+        operation: 'pubkey_rotation_email_start',
+        phase: 'response',
+        status: 'failure',
+        method: 'POST',
+        endpoint: endpoint,
+        fields: {
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          ..._backendExceptionLogFields(error),
+        },
+      );
+      throw error;
+    }
+  }
+
+  /// 密钥轮换第二步：仍由旧私钥签名，提交邮箱验证码和新公钥。
+  Future<PubkeyRotationResult> rotatePubkey({
+    required HanakoKeyPair keyPair,
+    required String username,
+    required String emailChallengeId,
+    required String emailCode,
+    required String newPubkeyHex,
+  }) async {
+    final startedAt = DateTime.now();
+    const endpoint = '/api/v1/auth/rotate_pubkey';
+    final cleanNewPubkey = newPubkeyHex.trim();
+    final req = signRequest(
+      keyPair: keyPair,
+      businessPayload: {
+        'username': username.trim(),
+        'email_challenge_id': emailChallengeId.trim(),
+        'email_code': emailCode.trim(),
+        'new_pubkey_hex': cleanNewPubkey,
+      },
+    );
+    _writeBackendTransportLog(
+      'transport_request',
+      operation: 'pubkey_rotation',
+      phase: 'request',
+      status: 'start',
+      method: 'POST',
+      endpoint: endpoint,
+      fields: {
+        'has_current_key': true,
+        'new_pubkey_hex_chars': cleanNewPubkey.length,
+      },
+    );
+    try {
+      final resp = await _dio.postUri<Map<String, dynamic>>(
+        Uri.parse('$authBaseUrl$endpoint'),
+        data: req.toJson(),
+        options: Options(contentType: Headers.jsonContentType),
+      );
+      final body = resp.data!;
+      final result = PubkeyRotationResult(
+        userId: (body['user_id'] as num).toInt(),
+        username: body['username'] as String,
+        tier: body['tier'] as String,
+        oldPubkeyHash: body['old_pubkey_hash'] as String,
+        newPubkeyHash: body['new_pubkey_hash'] as String,
+        effectiveAt: (body['effective_at'] as num).toInt(),
+        revokedPreviousCount: (body['revoked_previous_count'] as num).toInt(),
+      );
+      _writeBackendTransportLog(
+        'transport_success',
+        operation: 'pubkey_rotation',
+        phase: 'response',
+        status: 'success',
+        method: 'POST',
+        endpoint: endpoint,
+        fields: {
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          'status_code': resp.statusCode,
+          'user_id': result.userId,
+          'revoked_previous_count': result.revokedPreviousCount,
+        },
+      );
+      return result;
+    } on DioException catch (e) {
+      final error = await HanakoBackendException.fromDio(e, action: '轮换密钥');
+      _writeBackendTransportLog(
+        'transport_failure',
+        operation: 'pubkey_rotation',
+        phase: 'response',
+        status: 'failure',
+        method: 'POST',
+        endpoint: endpoint,
+        fields: {
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          ..._backendExceptionLogFields(error),
+        },
+      );
+      throw error;
+    }
   }
 
   /// 故事恢复长期身份的第一步：拉某 username 名下所有公钥哈希。
@@ -748,6 +901,29 @@ class HanakoBackendClient {
       },
     );
   }
+
+  void _writeBackendTransportLog(
+    String event, {
+    required String operation,
+    required String phase,
+    required String status,
+    required String method,
+    required String endpoint,
+    Map<String, dynamic> fields = const {},
+  }) {
+    backendDiagnosticsLog?.write(
+      event,
+      layer: 'backend_client',
+      fields: {
+        'operation': operation,
+        'phase': phase,
+        'status': status,
+        'method': method,
+        'endpoint': endpoint,
+        ...fields,
+      },
+    );
+  }
 }
 
 Map<String, dynamic> _chatPayload({
@@ -1203,6 +1379,42 @@ class RegistrationEmailChallenge {
   final String delivery;
   final int expiresIn;
   final int cooldownSeconds;
+}
+
+/// 密钥轮换邮箱验证码挑战。
+class PubkeyRotationEmailChallenge {
+  PubkeyRotationEmailChallenge({
+    required this.challengeId,
+    required this.delivery,
+    required this.expiresIn,
+    required this.cooldownSeconds,
+  });
+
+  final String challengeId;
+  final String delivery;
+  final int expiresIn;
+  final int cooldownSeconds;
+}
+
+/// 密钥轮换成功后的新旧公钥摘要。
+class PubkeyRotationResult {
+  PubkeyRotationResult({
+    required this.userId,
+    required this.username,
+    required this.tier,
+    required this.oldPubkeyHash,
+    required this.newPubkeyHash,
+    required this.effectiveAt,
+    required this.revokedPreviousCount,
+  });
+
+  final int userId;
+  final String username;
+  final String tier;
+  final String oldPubkeyHash;
+  final String newPubkeyHash;
+  final int effectiveAt;
+  final int revokedPreviousCount;
 }
 
 /// 邮箱 RFA 挑战。

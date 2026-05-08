@@ -303,6 +303,111 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     await _refresh();
   }
 
+  String? _configuredUsername() {
+    return _textValue((_authConfig ?? const <String, dynamic>{})['username']) ??
+        _textValue((_userConfig ?? const <String, dynamic>{})['name']);
+  }
+
+  Future<void> _rotatePubkey() async {
+    if (_accountBusy) return;
+    final username = _configuredUsername();
+    if (username == null || username.trim().isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('当前配置缺少云端用户名')));
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _PubkeyRotationDialog(
+        username: username.trim(),
+        onSendCode: () => _startPubkeyRotationEmail(username.trim()),
+        onRotate: (challengeId, code) => _confirmPubkeyRotation(
+          username: username.trim(),
+          challengeId: challengeId,
+          code: code,
+        ),
+      ),
+    );
+    await _refresh();
+  }
+
+  Future<PubkeyRotationEmailChallenge> _startPubkeyRotationEmail(
+    String username,
+  ) async {
+    final identity = await _loadIdentityForAccountAction();
+    return ref
+        .read(engineProvider)
+        .backendClient
+        .startPubkeyRotationEmail(
+          keyPair: identity.keyPair,
+          username: username,
+        );
+  }
+
+  Future<_PubkeyRotationOutcome> _confirmPubkeyRotation({
+    required String username,
+    required String challengeId,
+    required String code,
+  }) async {
+    final eng = ref.read(engineProvider);
+    final repo = ref.read(identityRepositoryProvider);
+    final oldIdentity = await _loadIdentityForAccountAction();
+    final replacement = await repo.generateReplacementIdentityPreview();
+    final result = await eng.backendClient.rotatePubkey(
+      keyPair: oldIdentity.keyPair,
+      username: username,
+      emailChallengeId: challengeId,
+      emailCode: code,
+      newPubkeyHex: replacement.identity.publicKeyHex,
+    );
+    if (result.newPubkeyHash != replacement.identity.publicKeyHash) {
+      throw StateError('认证中心返回的新公钥指纹与本机新身份不一致');
+    }
+
+    String? warning;
+    var localPersisted = false;
+    try {
+      await repo.replaceCurrentIdentity(replacement.identity);
+      localPersisted = true;
+    } catch (e) {
+      warning = '云端密钥已轮换，但本机身份 vault 写入失败：$e';
+    }
+    if (localPersisted) {
+      try {
+        eng.config.writeAt([
+          'identity',
+          'public_key',
+        ], replacement.identity.publicKeyHex);
+        eng.config.writeAt([
+          'identity',
+          'public_key_hash',
+        ], replacement.identity.publicKeyHash);
+        eng.config.writeAt(['auth', 'user_id'], result.userId);
+        eng.config.writeAt(['auth', 'username'], result.username);
+        eng.config.writeAt(['auth', 'tier'], result.tier);
+        eng.config.writeAt(['auth', 'pubkey_hash'], result.newPubkeyHash);
+        ref.read(identityRevisionProvider.notifier).state++;
+      } catch (e) {
+        warning = '密钥已轮换，本机身份已更新，但配置写入失败：$e';
+      }
+    }
+    if (localPersisted) {
+      try {
+        await eng.syncGatewayModels(replacement.identity);
+      } catch (e) {
+        warning = warning == null ? '密钥已轮换，但模型同步失败：$e' : '$warning；模型同步失败：$e';
+      }
+    }
+
+    return _PubkeyRotationOutcome(
+      registration: replacement,
+      result: result,
+      localPersisted: localPersisted,
+      warning: warning,
+    );
+  }
+
   Future<_StoryVerificationResult> _runStoryRecovery(
     String story,
     void Function(StoryRecoveryProgress progress) onProgress,
@@ -1026,6 +1131,12 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
                           onPressed: _accountBusy ? null : _verifyStoryRecovery,
                           icon: const Icon(Icons.fact_check_outlined, size: 18),
                           label: const Text('尝试验证'),
+                        ),
+                      if (_identityReady)
+                        OutlinedButton.icon(
+                          onPressed: _accountBusy ? null : _rotatePubkey,
+                          icon: const Icon(Icons.key_outlined, size: 18),
+                          label: const Text('密钥轮换'),
                         ),
                       if (_identityReady)
                         OutlinedButton.icon(
@@ -1900,6 +2011,280 @@ class _StoryVerificationResult {
   final int candidatesPerColumn;
   final List<String> anchors;
   final String? publicKeyHash;
+}
+
+class _PubkeyRotationOutcome {
+  const _PubkeyRotationOutcome({
+    required this.registration,
+    required this.result,
+    required this.localPersisted,
+    this.warning,
+  });
+
+  final IdentityRegistration registration;
+  final PubkeyRotationResult result;
+  final bool localPersisted;
+  final String? warning;
+}
+
+class _PubkeyRotationDialog extends StatefulWidget {
+  const _PubkeyRotationDialog({
+    required this.username,
+    required this.onSendCode,
+    required this.onRotate,
+  });
+
+  final String username;
+  final Future<PubkeyRotationEmailChallenge> Function() onSendCode;
+  final Future<_PubkeyRotationOutcome> Function(String challengeId, String code)
+  onRotate;
+
+  @override
+  State<_PubkeyRotationDialog> createState() => _PubkeyRotationDialogState();
+}
+
+class _PubkeyRotationDialogState extends State<_PubkeyRotationDialog> {
+  final _codeController = TextEditingController();
+  PubkeyRotationEmailChallenge? _challenge;
+  _PubkeyRotationOutcome? _outcome;
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _codeController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _sendCode() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final challenge = await widget.onSendCode();
+      if (!mounted) return;
+      setState(() {
+        _challenge = challenge;
+        _codeController.clear();
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _rotate() async {
+    final challenge = _challenge;
+    final code = _codeController.text.trim();
+    if (_busy || challenge == null || code.length < 6) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final outcome = await widget.onRotate(challenge.challengeId, code);
+      if (!mounted) return;
+      setState(() => _outcome = outcome);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final outcome = _outcome;
+    final theme = Theme.of(context);
+    final c = theme.colorScheme;
+    return AlertDialog(
+      title: const Text('密钥轮换'),
+      content: SizedBox(
+        width: 620,
+        child: SingleChildScrollView(
+          child: outcome == null
+              ? _buildForm(context)
+              : _buildResult(context, outcome),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.pop(context),
+          child: Text(outcome == null ? '关闭' : '完成'),
+        ),
+        if (outcome == null) ...[
+          OutlinedButton.icon(
+            onPressed: _busy ? null : _sendCode,
+            icon: _busy && _challenge == null
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.mail_outline, size: 18),
+            label: Text(_challenge == null ? '发送验证码' : '重新发送'),
+          ),
+          FilledButton.icon(
+            onPressed:
+                _busy ||
+                    _challenge == null ||
+                    _codeController.text.trim().length < 6
+                ? null
+                : _rotate,
+            icon: _busy && _challenge != null
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.key_outlined, size: 18),
+            label: const Text('确认轮换'),
+          ),
+        ] else ...[
+          TextButton.icon(
+            onPressed: () {
+              Clipboard.setData(
+                ClipboardData(text: outcome.registration.words.join(' ')),
+              );
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('新助记词已复制'),
+                  duration: Duration(seconds: 1),
+                ),
+              );
+            },
+            icon: const Icon(Icons.copy_all_outlined, size: 18),
+            label: const Text('复制助记词'),
+          ),
+          if (outcome.registration.story.trim().isNotEmpty)
+            FilledButton.icon(
+              onPressed: () {
+                Clipboard.setData(
+                  ClipboardData(text: outcome.registration.story.trim()),
+                );
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('新故事已复制'),
+                    duration: Duration(seconds: 1),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.copy, size: 18),
+              label: const Text('复制故事'),
+            ),
+        ],
+      ],
+      icon: Icon(Icons.key_outlined, color: c.primary),
+    );
+  }
+
+  Widget _buildForm(BuildContext context) {
+    final theme = Theme.of(context);
+    final challenge = _challenge;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('账号：${widget.username}', style: theme.textTheme.bodyMedium),
+        const SizedBox(height: 12),
+        Text(
+          '轮换会生成新的 12 个名词和记忆故事；旧密钥会在云端失效。',
+          style: theme.textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _codeController,
+          enabled: challenge != null && !_busy,
+          keyboardType: TextInputType.number,
+          inputFormatters: [
+            FilteringTextInputFormatter.digitsOnly,
+            LengthLimitingTextInputFormatter(6),
+          ],
+          decoration: InputDecoration(
+            labelText: '邮箱验证码',
+            helperText: challenge == null
+                ? '先发送验证码'
+                : '已发送至 ${challenge.delivery}',
+            border: const OutlineInputBorder(),
+          ),
+          onChanged: (_) => setState(() {}),
+        ),
+        if (_error != null) ...[
+          const SizedBox(height: 12),
+          Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildResult(BuildContext context, _PubkeyRotationOutcome outcome) {
+    final theme = Theme.of(context);
+    final c = theme.colorScheme;
+    final registration = outcome.registration;
+    final story = registration.story.trim();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: outcome.localPersisted
+                ? c.primaryContainer.withValues(alpha: 0.35)
+                : c.errorContainer.withValues(alpha: 0.35),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: outcome.localPersisted ? c.primary : c.error,
+            ),
+          ),
+          child: Text(
+            outcome.localPersisted ? '轮换完成：本机身份已切换到新密钥。' : '云端已完成轮换，但本机写入未完成。',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: outcome.localPersisted ? c.onPrimaryContainer : c.error,
+            ),
+          ),
+        ),
+        if (outcome.warning != null) ...[
+          const SizedBox(height: 10),
+          Text(
+            outcome.warning!,
+            style: theme.textTheme.bodySmall?.copyWith(color: c.error),
+          ),
+        ],
+        const SizedBox(height: 16),
+        if (story.isNotEmpty)
+          SelectableText(story, style: theme.textTheme.bodyLarge)
+        else
+          Text(
+            '新故事生成暂不可用，可以直接使用下面的 12 个名词。',
+            style: theme.textTheme.bodyMedium,
+          ),
+        const SizedBox(height: 16),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (var i = 0; i < registration.words.length; i++)
+              Chip(
+                label: Text('${i + 1}. ${registration.words[i]}'),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Text(
+          '新指纹：${_shortHash(outcome.result.newPubkeyHash)}',
+          style: theme.textTheme.bodySmall?.copyWith(color: c.onSurfaceVariant),
+        ),
+      ],
+    );
+  }
 }
 
 class _StoryVerificationDialog extends StatefulWidget {
