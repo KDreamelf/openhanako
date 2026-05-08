@@ -128,6 +128,7 @@ void main() {
           }),
           for (final row in matrix) jsonEncode({'candidates': row}),
         ],
+        chatDelay: const Duration(milliseconds: 20),
       );
       final engine = await HanaEngine.initialize(
         home: home,
@@ -139,8 +140,9 @@ void main() {
 
       expect(parsed.isWellFormed, isTrue);
       expect(parsed.columns, matrix);
-      expect(backend.publicModelListCalls, 13);
+      expect(backend.publicModelListCalls, 1);
       expect(backend.publicChatCalls, 13);
+      expect(backend.maxConcurrentPublicChatCalls, lessThanOrEqualTo(3));
       expect(backend.handshakeCalls, 0);
       expect(backend.privateChatCalls, 0);
     });
@@ -202,15 +204,19 @@ class _PublicStoryBackendClient extends HanakoBackendClient {
     required this.models,
     required this.responses,
     this.publicStoryRateLimitFailures = 0,
+    this.chatDelay = Duration.zero,
   });
 
   final List<String> models;
   final List<String> responses;
   final int publicStoryRateLimitFailures;
+  final Duration chatDelay;
   final requestedModels = <String>[];
   final extras = <Map<String, dynamic>?>[];
   int publicModelListCalls = 0;
   int publicChatCalls = 0;
+  int activePublicChatCalls = 0;
+  int maxConcurrentPublicChatCalls = 0;
   int handshakeCalls = 0;
   int privateChatCalls = 0;
 
@@ -228,23 +234,34 @@ class _PublicStoryBackendClient extends HanakoBackendClient {
   }) async {
     requestedModels.add(model);
     extras.add(extra);
-    publicChatCalls++;
-    if (publicChatCalls <= publicStoryRateLimitFailures) {
-      throw HanakoBackendException(
-        message: '调用公开故事模型失败：请求过于频繁',
-        details: '上游模型 API 返回 429 Too Many Requests',
-        statusCode: 429,
-      );
+    activePublicChatCalls++;
+    if (activePublicChatCalls > maxConcurrentPublicChatCalls) {
+      maxConcurrentPublicChatCalls = activePublicChatCalls;
     }
-    final response =
-        responses[publicChatCalls - publicStoryRateLimitFailures - 1];
-    return {
-      'choices': [
-        {
-          'message': {'content': response},
-        },
-      ],
-    };
+    publicChatCalls++;
+    final callNumber = publicChatCalls;
+    try {
+      if (chatDelay > Duration.zero) {
+        await Future<void>.delayed(chatDelay);
+      }
+      if (callNumber <= publicStoryRateLimitFailures) {
+        throw HanakoBackendException(
+          message: '调用公开故事模型失败：请求过于频繁',
+          details: '上游模型 API 返回 429 Too Many Requests',
+          statusCode: 429,
+        );
+      }
+      final response = responses[callNumber - publicStoryRateLimitFailures - 1];
+      return {
+        'choices': [
+          {
+            'message': {'content': response},
+          },
+        ],
+      };
+    } finally {
+      activePublicChatCalls--;
+    }
   }
 
   @override

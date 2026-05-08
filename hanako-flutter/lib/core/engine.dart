@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
+import 'dart:math';
 
 import '../identity/identity.dart';
 import '../shared/hana_home.dart';
@@ -76,28 +78,15 @@ class HanaEngine {
   }) async {
     final h = home ?? await HanaHome.resolve();
     final gateway = backendClient ?? HanakoBackendClient();
+    final publicStoryCaller = _PublicStoryGatewayCaller(gateway);
     late final IdentityRepository identityRepo;
     late final ModelManager models;
     identityRepo =
         identityRepository ??
         IdentityRepository(
           keystore: PlatformSecureKeystore(hanaHome: h.root),
-          composer: StoryComposer(
-            caller: ({required systemPrompt, required userPrompt, maxTokens}) =>
-                _callGatewayForStory(
-                  gateway: gateway,
-                  systemPrompt: systemPrompt,
-                  userPrompt: userPrompt,
-                ),
-          ),
-          parser: StoryParser(
-            caller: ({required systemPrompt, required userPrompt, maxTokens}) =>
-                _callGatewayForStory(
-                  gateway: gateway,
-                  systemPrompt: systemPrompt,
-                  userPrompt: userPrompt,
-                ),
-          ),
+          composer: StoryComposer(caller: publicStoryCaller.call),
+          parser: StoryParser(caller: publicStoryCaller.call),
           recoveryAccelerator: Platform.isWindows
               ? const WindowsRecoveryAccelerator()
               : null,
@@ -270,61 +259,117 @@ Future<void> _restoreSavedIdentity(IdentityRepository repo) async {
   }
 }
 
-Future<String> _callGatewayForStory({
-  required HanakoBackendClient gateway,
-  required String systemPrompt,
-  required String userPrompt,
-}) async {
-  final modelList = await gateway.listPublicStoryModels();
-  final model = _selectStoryModel(modelList.models);
-  if (model == null) {
-    throw StateError('未找到可用于故事生成/恢复的公开模型');
-  }
-
-  final messages = <Map<String, dynamic>>[
-    {'role': 'system', 'content': systemPrompt},
-    {'role': 'user', 'content': userPrompt},
-  ];
-  final response = await _callPublicStoryChatWithRetry(
-    gateway: gateway,
-    model: model,
-    messages: messages,
-    systemPrompt: systemPrompt,
-    userPrompt: userPrompt,
-  );
-  return _extractAssistantText(response);
-}
-
 const int _publicStoryRateLimitMaxAttempts = 100;
+const int _publicStoryMaxConcurrentCalls = 3;
 const Duration _publicStoryRateLimitInitialBackoff = Duration(
   milliseconds: 350,
 );
 const Duration _publicStoryRateLimitMaxBackoff = Duration(seconds: 30);
 
-Future<Map<String, dynamic>> _callPublicStoryChatWithRetry({
-  required HanakoBackendClient gateway,
-  required String model,
-  required List<Map<String, dynamic>> messages,
-  required String systemPrompt,
-  required String userPrompt,
-}) async {
-  for (var attempt = 1; ; attempt++) {
-    try {
-      return await gateway.publicStoryChat(model: model, messages: messages);
-    } on HanakoBackendException catch (error) {
-      if (!_isPublicStoryRateLimit(error) ||
-          attempt >= _publicStoryRateLimitMaxAttempts) {
-        rethrow;
-      }
-      await Future<void>.delayed(
-        _publicStoryRateLimitBackoff(
-          attempt: attempt,
-          systemPrompt: systemPrompt,
-          userPrompt: userPrompt,
-        ),
-      );
+class _PublicStoryGatewayCaller {
+  _PublicStoryGatewayCaller(this.gateway);
+
+  final HanakoBackendClient gateway;
+  final Queue<_PublicStoryJob> _ready = Queue<_PublicStoryJob>();
+  final Random _random = Random();
+  Future<String>? _modelFuture;
+  int _active = 0;
+
+  Future<String> call({
+    required String systemPrompt,
+    required String userPrompt,
+    int? maxTokens,
+  }) async {
+    final response = await _enqueue(
+      systemPrompt: systemPrompt,
+      userPrompt: userPrompt,
+    );
+    return _extractAssistantText(response);
+  }
+
+  Future<Map<String, dynamic>> _enqueue({
+    required String systemPrompt,
+    required String userPrompt,
+  }) {
+    final job = _PublicStoryJob(
+      messages: [
+        {'role': 'system', 'content': systemPrompt},
+        {'role': 'user', 'content': userPrompt},
+      ],
+    );
+    _ready.add(job);
+    _pump();
+    return job.completer.future;
+  }
+
+  void _pump() {
+    while (_active < _publicStoryMaxConcurrentCalls && _ready.isNotEmpty) {
+      final job = _ready.removeFirst();
+      _active++;
+      _run(job);
     }
   }
+
+  Future<void> _run(_PublicStoryJob job) async {
+    try {
+      final model = await _resolveModel();
+      final response = await gateway.publicStoryChat(
+        model: model,
+        messages: job.messages,
+      );
+      if (!job.completer.isCompleted) job.completer.complete(response);
+    } on HanakoBackendException catch (error, stackTrace) {
+      if (_isPublicStoryRateLimit(error) &&
+          job.attempt < _publicStoryRateLimitMaxAttempts) {
+        _scheduleRetry(job);
+      } else if (!job.completer.isCompleted) {
+        job.completer.completeError(error, stackTrace);
+      }
+    } catch (error, stackTrace) {
+      if (!job.completer.isCompleted) {
+        job.completer.completeError(error, stackTrace);
+      }
+    } finally {
+      _active--;
+      _pump();
+    }
+  }
+
+  void _scheduleRetry(_PublicStoryJob job) {
+    final failedAttempt = job.attempt;
+    job.attempt++;
+    final delay = _publicStoryRateLimitBackoff(
+      attempt: failedAttempt,
+      random: _random,
+    );
+    Timer(delay, () {
+      if (job.completer.isCompleted) return;
+      _ready.add(job);
+      _pump();
+    });
+  }
+
+  Future<String> _resolveModel() {
+    return _modelFuture ??= _loadModel();
+  }
+
+  Future<String> _loadModel() async {
+    final modelList = await gateway.listPublicStoryModels();
+    final model = _selectStoryModel(modelList.models);
+    if (model == null) {
+      throw StateError('未找到可用于故事生成/恢复的公开模型');
+    }
+    return model;
+  }
+}
+
+class _PublicStoryJob {
+  _PublicStoryJob({required this.messages});
+
+  final List<Map<String, dynamic>> messages;
+  final Completer<Map<String, dynamic>> completer =
+      Completer<Map<String, dynamic>>();
+  int attempt = 1;
 }
 
 bool _isPublicStoryRateLimit(HanakoBackendException error) {
@@ -338,8 +383,7 @@ bool _isPublicStoryRateLimit(HanakoBackendException error) {
 
 Duration _publicStoryRateLimitBackoff({
   required int attempt,
-  required String systemPrompt,
-  required String userPrompt,
+  required Random random,
 }) {
   final multiplier = 1 << (attempt - 1);
   final exponentialMs =
@@ -348,9 +392,10 @@ Duration _publicStoryRateLimitBackoff({
     _publicStoryRateLimitInitialBackoff.inMilliseconds,
     _publicStoryRateLimitMaxBackoff.inMilliseconds,
   );
-  final jitterSeed = Object.hash(systemPrompt, userPrompt, attempt).abs();
-  final jitterMs = jitterSeed % 180;
-  return Duration(milliseconds: cappedMs + jitterMs);
+  final jitterMs = random.nextInt(cappedMs + 1);
+  return Duration(
+    milliseconds: _publicStoryRateLimitInitialBackoff.inMilliseconds + jitterMs,
+  );
 }
 
 String? _selectStoryModel(List<String> models) {
