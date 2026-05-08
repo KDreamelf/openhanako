@@ -114,6 +114,44 @@ func TestPH01PublicStoryModelsPreservesPublicTokenLimitOrder(t *testing.T) {
 	require.Equal(t, []string{"login-story-model", "gpt-5.5"}, body.Models)
 }
 
+func TestPH01PublicStoryModelsUsesExplicitPublicTokenLimitsAsSourceOfTruth(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Token{}, &model.PH01Identity{}))
+
+	oldSelfUseModeEnabled := operation_setting.SelfUseModeEnabled
+	operation_setting.SelfUseModeEnabled = false
+	t.Cleanup(func() {
+		operation_setting.SelfUseModeEnabled = oldSelfUseModeEnabled
+	})
+
+	rootUser, _, err := model.FindOrCreateUserFromPH01(1, "root", "beef")
+	require.NoError(t, err)
+	var publicToken model.Token
+	require.NoError(t, db.First(&publicToken, "user_id = ? AND name = ?", rootUser.Id, model.PH01PublicTokenName).Error)
+	require.NoError(t, db.Model(&publicToken).Updates(map[string]any{
+		"group":                "default",
+		"unlimited_quota":      true,
+		"model_limits_enabled": true,
+		"model_limits":         "explicit-story-model",
+	}).Error)
+	require.NoError(t, db.Create(&model.Ability{
+		Group: "default", Model: "different-chat-model", ChannelId: 1, Enabled: true,
+	}).Error)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/public/story/models", nil)
+
+	PH01PublicStoryModels(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body struct {
+		Models []string `json:"models"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, []string{"explicit-story-model"}, body.Models)
+}
+
 func TestPH01PublicStoryModelsAcceptsEncryptedEnvelope(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.Token{}, &model.PH01Identity{}))

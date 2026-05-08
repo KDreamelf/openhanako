@@ -348,7 +348,7 @@ func PH01PublicStoryChat(c *gin.Context) {
 		"carrier_user_id":  carrier.UserId,
 		"carrier_token_id": carrier.Id,
 	})
-	status, responseBody := ph01RelayChat(c, carrier, usingGroup, relayBody)
+	status, responseBody := ph01RelayChat(c, carrier, usingGroup, relayBody, true)
 	if status >= http.StatusBadRequest {
 		logger.LogWarnFields(c.Request.Context(), "ph01_public_story_chat_relay_failure", map[string]any{
 			"layer":                  "gateway_handler",
@@ -463,7 +463,7 @@ func PH01Chat(c *gin.Context) {
 		return
 	}
 
-	status, responseBody := ph01RelayChat(c, carrier, ch.UsingGroup, relayBody)
+	status, responseBody := ph01RelayChat(c, carrier, ch.UsingGroup, relayBody, false)
 	if status >= http.StatusBadRequest {
 		ph01ProtocolError(c, status, ph01ErrInternalError, string(responseBody))
 		return
@@ -489,7 +489,7 @@ func PH01Chat(c *gin.Context) {
 	})
 }
 
-func ph01RelayChat(c *gin.Context, carrier *model.Token, usingGroup string, relayBody []byte) (int, []byte) {
+func ph01RelayChat(c *gin.Context, carrier *model.Token, usingGroup string, relayBody []byte, forceAcceptUnsetRatioModel bool) (int, []byte) {
 	originalWriter := c.Writer
 	originalBody := c.Request.Body
 	originalContentLength := c.Request.ContentLength
@@ -520,6 +520,11 @@ func ph01RelayChat(c *gin.Context, carrier *model.Token, usingGroup string, rela
 		return http.StatusInternalServerError, []byte(err.Error())
 	}
 	userCache.WriteContext(c)
+	if forceAcceptUnsetRatioModel {
+		userSetting := userCache.GetSetting()
+		userSetting.AcceptUnsetRatioModel = true
+		common.SetContextKey(c, constant.ContextKeyUserSetting, userSetting)
+	}
 	if strings.TrimSpace(usingGroup) == "" {
 		usingGroup = userCache.Group
 	}
@@ -539,6 +544,14 @@ func ph01RelayChat(c *gin.Context, carrier *model.Token, usingGroup string, rela
 }
 
 func ph01AllowedModelsForCarrier(userID int, carrier *model.Token) ([]string, string, error) {
+	return ph01AllowedModelsForCarrierWithOptions(userID, carrier, false)
+}
+
+func ph01AllowedPublicStoryModelsForCarrier(userID int, carrier *model.Token) ([]string, string, error) {
+	return ph01AllowedModelsForCarrierWithOptions(userID, carrier, true)
+}
+
+func ph01AllowedModelsForCarrierWithOptions(userID int, carrier *model.Token, explicitModelLimitsAuthoritative bool) ([]string, string, error) {
 	userCache, err := model.GetUserCache(userID)
 	if err != nil {
 		return nil, "", err
@@ -558,6 +571,14 @@ func ph01AllowedModelsForCarrier(userID int, carrier *model.Token) ([]string, st
 		if !ratio_setting.ContainsGroupRatio(usingGroup) {
 			return nil, "", fmt.Errorf("group %s is disabled", usingGroup)
 		}
+	}
+
+	if explicitModelLimitsAuthoritative && carrier.ModelLimitsEnabled {
+		models := ph01CleanModelLimits(carrier.GetModelLimits())
+		if len(models) == 0 {
+			return nil, usingGroup, errors.New("public story model limits are enabled but empty")
+		}
+		return models, usingGroup, nil
 	}
 
 	modelSet := map[string]struct{}{}
@@ -599,6 +620,23 @@ func ph01AllowedModelsForCarrier(userID int, carrier *model.Token) ([]string, st
 	}
 	models = ph01OrderAllowedModels(carrier, models)
 	return models, usingGroup, nil
+}
+
+func ph01CleanModelLimits(limits []string) []string {
+	models := make([]string, 0, len(limits))
+	seen := map[string]struct{}{}
+	for _, raw := range limits {
+		modelName := strings.TrimSpace(raw)
+		if modelName == "" {
+			continue
+		}
+		if _, ok := seen[modelName]; ok {
+			continue
+		}
+		seen[modelName] = struct{}{}
+		models = append(models, modelName)
+	}
+	return models
 }
 
 func ph01OrderAllowedModels(carrier *model.Token, models []string) []string {
@@ -703,13 +741,18 @@ func ph01RequireRootPublicStoryCarrier(c *gin.Context, enforceClientIP bool) (*m
 		ph01ProtocolError(c, http.StatusTooManyRequests, ph01ErrRateLimitExceeded, "")
 		return nil, "", nil, false
 	}
-	allowedModels, usingGroup, err := ph01AllowedModelsForCarrier(carrier.UserId, carrier)
+	allowedModels, usingGroup, err := ph01AllowedPublicStoryModelsForCarrier(carrier.UserId, carrier)
 	if err != nil {
 		ph01ProtocolError(c, http.StatusForbidden, ph01ErrModelNotAllowed, err.Error())
 		return nil, "", nil, false
 	}
 	if len(allowedModels) == 0 {
-		ph01ProtocolError(c, http.StatusForbidden, ph01ErrModelNotAllowed, "no public story model available")
+		ph01ProtocolError(c, http.StatusForbidden, ph01ErrModelNotAllowed, fmt.Sprintf(
+			"no public story model available (group=%s, model_limits_enabled=%t, configured_models=%d)",
+			usingGroup,
+			carrier.ModelLimitsEnabled,
+			len(ph01CleanModelLimits(carrier.GetModelLimits())),
+		))
 		return nil, "", nil, false
 	}
 	return carrier, usingGroup, allowedModels, true
