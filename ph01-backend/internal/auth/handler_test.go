@@ -468,6 +468,170 @@ func TestVerifyPubkeysBatch(t *testing.T) {
 	}
 }
 
+func TestRotatePubkeyRequiresPrivateKeyAndEmail(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	dsn := filepath.Join(tmpDir, "test.db")
+	gormDB, err := db.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	if err := user.AutoMigrate(gormDB); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	t.Cleanup(func() {
+		sqlDB, _ := gormDB.DB()
+		if sqlDB != nil {
+			sqlDB.Close()
+		}
+	})
+
+	store := user.NewStore(gormDB)
+	sender := &fakeEmailSender{}
+	handler := &auth.Handler{
+		UserStore: store,
+		Verifier:  hcrypto.NewSignedRequestVerifier(nil, "nonce:test"),
+		RFA:       auth.NewRFAService(store, newMemoryRFAStore(), sender),
+	}
+	r := gin.New()
+	v1 := r.Group("/api/v1")
+	handler.Register(v1)
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	oldPriv, _ := secp.GeneratePrivateKey()
+	oldPub := hex.EncodeToString(oldPriv.PubKey().SerializeUncompressed())
+	oldHash, _ := hcrypto.PubkeyHash(oldPub)
+	u, err := store.CreateWithPubkey("rotate_alice", "Alice", "alice@example.com", oldPub, oldHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preRotationSignedAt := time.Now().Unix()
+	time.Sleep(1100 * time.Millisecond)
+
+	newPriv, _ := secp.GeneratePrivateKey()
+	newPub := hex.EncodeToString(newPriv.PubKey().SerializeUncompressed())
+	newHash, _ := hcrypto.PubkeyHash(newPub)
+
+	noEmailBody, noEmailStatus := signedPostStatus(srv.URL+"/api/v1/auth/rotate_pubkey", oldPriv, map[string]interface{}{
+		"username":       "rotate_alice",
+		"new_pubkey_hex": newPub,
+	})
+	if noEmailStatus != http.StatusBadRequest {
+		t.Fatalf("expected email verification required, got status=%d body=%s", noEmailStatus, noEmailBody)
+	}
+
+	startBody, err := signedPost(srv.URL+"/api/v1/auth/rotate_pubkey_email/start", oldPriv, map[string]interface{}{
+		"username": "rotate_alice",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var start api.RotatePubkeyEmailStartResponse
+	if err := json.Unmarshal(startBody, &start); err != nil {
+		t.Fatalf("decode rotate email start: %v body=%s", err, startBody)
+	}
+	if start.ChallengeID == "" {
+		t.Fatalf("expected challenge id")
+	}
+	if sender.to != "alice@example.com" || !strings.Contains(sender.subject, "密钥轮换") {
+		t.Fatalf("unexpected rotation email to=%q subject=%q", sender.to, sender.subject)
+	}
+	code := regexp.MustCompile(`\d{6}`).FindString(sender.body)
+	if code == "" {
+		t.Fatalf("verification code not found in email body: %s", sender.body)
+	}
+	wrongCode := "000000"
+	if code == wrongCode {
+		wrongCode = "111111"
+	}
+
+	wrongCodeBody, wrongCodeStatus := signedPostStatus(srv.URL+"/api/v1/auth/rotate_pubkey", oldPriv, map[string]interface{}{
+		"username":           "rotate_alice",
+		"email_challenge_id": start.ChallengeID,
+		"email_code":         wrongCode,
+		"new_pubkey_hex":     newPub,
+	})
+	if wrongCodeStatus != http.StatusUnauthorized {
+		t.Fatalf("expected wrong code to fail, got status=%d body=%s", wrongCodeStatus, wrongCodeBody)
+	}
+	oldLoginBeforeRotate, oldLoginBeforeRotateStatus := signedPostStatus(srv.URL+"/api/v1/auth/login", oldPriv, map[string]interface{}{
+		"username": "rotate_alice",
+	})
+	if oldLoginBeforeRotateStatus != http.StatusOK {
+		t.Fatalf("old key should remain active after wrong code, got status=%d body=%s", oldLoginBeforeRotateStatus, oldLoginBeforeRotate)
+	}
+
+	rotateBody, err := signedPost(srv.URL+"/api/v1/auth/rotate_pubkey", oldPriv, map[string]interface{}{
+		"username":           "rotate_alice",
+		"email_challenge_id": start.ChallengeID,
+		"email_code":         code,
+		"new_pubkey_hex":     newPub,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rotated api.RotatePubkeyResponse
+	if err := json.Unmarshal(rotateBody, &rotated); err != nil {
+		t.Fatalf("decode rotate response: %v body=%s", err, rotateBody)
+	}
+	if rotated.UserID != u.ID || rotated.OldPubkeyHash != oldHash || rotated.NewPubkeyHash != newHash {
+		t.Fatalf("unexpected rotate response: %+v", rotated)
+	}
+	if rotated.RevokedPreviousCount != 1 {
+		t.Fatalf("expected one revoked old key, got %+v", rotated)
+	}
+
+	oldLoginBody, oldLoginStatus := signedPostStatus(srv.URL+"/api/v1/auth/login", oldPriv, map[string]interface{}{
+		"username": "rotate_alice",
+	})
+	if oldLoginStatus != http.StatusUnauthorized {
+		t.Fatalf("old key should be revoked, got status=%d body=%s", oldLoginStatus, oldLoginBody)
+	}
+	newLoginBody, err := signedPost(srv.URL+"/api/v1/auth/login", newPriv, map[string]interface{}{
+		"username": "rotate_alice",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var newLogin api.LoginResponse
+	if err := json.Unmarshal(newLoginBody, &newLogin); err != nil {
+		t.Fatalf("decode new login: %v body=%s", err, newLoginBody)
+	}
+	if newLogin.PubkeyHash != newHash {
+		t.Fatalf("expected new login hash %s, got %+v", newHash, newLogin)
+	}
+
+	currentResp := postVerifyPubkeys(t, srv.URL+"/api/v1/auth/verify_pubkeys", api.VerifyPubkeysRequest{
+		Items: []api.PubkeyBindingCheck{
+			{UserID: u.ID, PubkeyHash: oldHash},
+			{UserID: u.ID, PubkeyHash: newHash},
+		},
+	}, http.StatusOK)
+	if currentResp.OK || len(currentResp.Missing) != 1 || currentResp.Missing[0].PubkeyHash != oldHash {
+		t.Fatalf("expected only old current binding missing, got %+v", currentResp)
+	}
+
+	oldHistoryResp := postVerifyPubkeysAt(t, srv.URL+"/api/v1/auth/verify_pubkeys_at", api.VerifyPubkeysAtRequest{
+		Items: []api.PubkeyBindingAtCheck{{UserID: u.ID, PubkeyHash: oldHash, SignedAt: preRotationSignedAt}},
+	}, http.StatusOK)
+	if !oldHistoryResp.OK {
+		t.Fatalf("old key should validate before rotation, got %+v", oldHistoryResp)
+	}
+	oldAtRotationResp := postVerifyPubkeysAt(t, srv.URL+"/api/v1/auth/verify_pubkeys_at", api.VerifyPubkeysAtRequest{
+		Items: []api.PubkeyBindingAtCheck{{UserID: u.ID, PubkeyHash: oldHash, SignedAt: rotated.EffectiveAt}},
+	}, http.StatusOK)
+	if oldAtRotationResp.OK || len(oldAtRotationResp.Missing) != 1 {
+		t.Fatalf("old key should be invalid at rotation second, got %+v", oldAtRotationResp)
+	}
+	newAtRotationResp := postVerifyPubkeysAt(t, srv.URL+"/api/v1/auth/verify_pubkeys_at", api.VerifyPubkeysAtRequest{
+		Items: []api.PubkeyBindingAtCheck{{UserID: u.ID, PubkeyHash: newHash, SignedAt: rotated.EffectiveAt}},
+	}, http.StatusOK)
+	if !newAtRotationResp.OK {
+		t.Fatalf("new key should validate at rotation second, got %+v", newAtRotationResp)
+	}
+}
+
 // TestRecoveryRFAEmailFlow 测试第二阶段邮箱验证码：发起挑战、错码失败、对码换取 recovery grant。
 func TestRecoveryRFAEmailFlow(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -960,6 +1124,25 @@ func postVerifyPubkeys(t *testing.T, url string, req api.VerifyPubkeysRequest, s
 	var out api.VerifyPubkeysResponse
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		t.Fatalf("decode verify_pubkeys: %v body=%s", err, respBody)
+	}
+	return out
+}
+
+func postVerifyPubkeysAt(t *testing.T, url string, req api.VerifyPubkeysAtRequest, status int) api.VerifyPubkeysAtResponse {
+	t.Helper()
+	body, _ := json.Marshal(req)
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != status {
+		t.Fatalf("expected status=%d got=%d body=%s", status, resp.StatusCode, respBody)
+	}
+	var out api.VerifyPubkeysAtResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		t.Fatalf("decode verify_pubkeys_at: %v body=%s", err, respBody)
 	}
 	return out
 }

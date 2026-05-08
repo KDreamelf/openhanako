@@ -75,6 +75,42 @@ type LoginPayload struct {
 // LoginResponse 是身份确认成功的返回值。结构同 RegisterResponse。
 type LoginResponse = RegisterResponse
 
+// RotatePubkeyEmailStartPayload 是密钥轮换邮箱验证发起请求的 SignedRequest.Payload。
+//
+// 外层 SignedRequest 必须由当前仍有效的旧私钥签名，防止仅凭邮箱验证码发起轮换。
+type RotatePubkeyEmailStartPayload struct {
+	Username string `json:"username"`
+}
+
+// RotatePubkeyEmailStartResponse 返回密钥轮换邮箱验证码挑战。
+type RotatePubkeyEmailStartResponse struct {
+	ChallengeID     string `json:"challenge_id"`
+	Delivery        string `json:"delivery"`
+	ExpiresIn       int    `json:"expires_in"`
+	CooldownSeconds int    `json:"cooldown_seconds"`
+}
+
+// RotatePubkeyPayload 是密钥轮换请求 SignedRequest.Payload 的 JSON 内容。
+//
+// 外层 SignedRequest 必须由当前仍有效的旧私钥签名；payload 中提交新公钥和邮箱验证码。
+type RotatePubkeyPayload struct {
+	Username         string `json:"username"`
+	EmailChallengeID string `json:"email_challenge_id"`
+	EmailCode        string `json:"email_code"`
+	NewPubkeyHex     string `json:"new_pubkey_hex"`
+}
+
+// RotatePubkeyResponse 返回轮换后的新公钥信息。
+type RotatePubkeyResponse struct {
+	UserID               uint64 `json:"user_id"`
+	Username             string `json:"username"`
+	Tier                 string `json:"tier"`
+	OldPubkeyHash        string `json:"old_pubkey_hash"`
+	NewPubkeyHash        string `json:"new_pubkey_hash"`
+	EffectiveAt          int64  `json:"effective_at"`
+	RevokedPreviousCount int64  `json:"revoked_previous_count"`
+}
+
 // ========== §5.2 故事恢复登录 ==========
 
 // RecoveryCandidatesRequest 是子体请求恢复期目标公钥哈希集合的请求。
@@ -243,6 +279,27 @@ type VerifyPubkeysRequest struct {
 type VerifyPubkeysResponse struct {
 	OK      bool                 `json:"ok"`
 	Missing []PubkeyBindingCheck `json:"missing,omitempty"`
+}
+
+// PubkeyBindingAtCheck 校验某个签名时间点上的 user_id + pubkey_hash 绑定。
+//
+// SignedAt 是签名发生时的 Unix 秒时间戳。认证中心按公钥 created_at / revoked_at
+// 判断该时间点是否处于公钥有效期内。
+type PubkeyBindingAtCheck struct {
+	UserID     uint64 `json:"user_id"`
+	PubkeyHash string `json:"pubkey_hash"`
+	SignedAt   int64  `json:"signed_at"`
+}
+
+// VerifyPubkeysAtRequest 支持历史公钥有效性批量查询，预留给经验网络。
+type VerifyPubkeysAtRequest struct {
+	Items []PubkeyBindingAtCheck `json:"items"`
+}
+
+// VerifyPubkeysAtResponse 在全部命中时只需要 OK=true；未命中项单独返回。
+type VerifyPubkeysAtResponse struct {
+	OK      bool                   `json:"ok"`
+	Missing []PubkeyBindingAtCheck `json:"missing,omitempty"`
 }
 
 // ========== 管理后台 API ==========

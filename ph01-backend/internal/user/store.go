@@ -62,6 +62,13 @@ type PubkeyBinding struct {
 	PubkeyHash string
 }
 
+// PubkeyBindingAt 是带签名时间的公钥绑定校验项。
+type PubkeyBindingAt struct {
+	UserID     uint64
+	PubkeyHash string
+	SignedAt   time.Time
+}
+
 // AutoMigrate 创建用户与公钥表（幂等）。
 func AutoMigrate(db *gorm.DB) error {
 	return db.AutoMigrate(&User{}, &Pubkey{})
@@ -82,6 +89,7 @@ func NewStore(db *gorm.DB) *Store {
 // 会因为 commit 时机导致后续 reader 看不到已写入数据。改成顺序 Create + 失败回滚，
 // 重复用户名场景靠 username 的 UNIQUE 约束保证不会有半成品 user 留下。
 func (s *Store) CreateWithPubkey(username, nickname, email, pubkeyHex, pubkeyHash string) (*User, error) {
+	now := time.Now().UTC().Truncate(time.Second)
 	u := User{
 		Username: username,
 		Nickname: nickname,
@@ -96,6 +104,7 @@ func (s *Store) CreateWithPubkey(username, nickname, email, pubkeyHex, pubkeyHas
 		UserID:     u.ID,
 		PubkeyHex:  pubkeyHex,
 		PubkeyHash: pubkeyHash,
+		CreatedAt:  now,
 	}
 	if err := s.DB.Create(&pk).Error; err != nil {
 		// pubkey 失败 → 回滚 user
@@ -164,6 +173,21 @@ func (s *Store) GetByID(id uint64) (*User, error) {
 	return &u, nil
 }
 
+// GetByIDWithAllPubkeys 取用户并加载全部历史公钥。
+//
+// 仅用于管理展示和审计；登录/验签路径应继续使用 GetByID / GetByPubkeyHash，
+// 保证只接受当前有效公钥。
+func (s *Store) GetByIDWithAllPubkeys(id uint64) (*User, error) {
+	var u User
+	err := s.DB.Preload("Pubkeys", func(db *gorm.DB) *gorm.DB {
+		return db.Order("created_at desc, id desc")
+	}).First(&u, id).Error
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
 // GetByUsername 按用户名查（含未撤销公钥）。
 func (s *Store) GetByUsername(username string) (*User, error) {
 	var u User
@@ -198,11 +222,45 @@ func (s *Store) AddPubkey(userID uint64, pubkeyHex, pubkeyHash string) (*Pubkey,
 		UserID:     userID,
 		PubkeyHex:  pubkeyHex,
 		PubkeyHash: pubkeyHash,
+		CreatedAt:  time.Now().UTC().Truncate(time.Second),
 	}
 	if err := s.DB.Create(&pk).Error; err != nil {
 		return nil, err
 	}
 	return &pk, nil
+}
+
+// RotatePubkey 追加新公钥，并把该用户旧的当前有效公钥失效时间置为新公钥生效时间。
+//
+// 旧公钥不会删除。后续历史验证可以根据签名时间戳匹配 created_at / revoked_at。
+func (s *Store) RotatePubkey(userID uint64, pubkeyHex, pubkeyHash string) (*Pubkey, int64, error) {
+	now := time.Now().UTC().Truncate(time.Second)
+	var revokedCount int64
+	var created Pubkey
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		pk := Pubkey{
+			UserID:     userID,
+			PubkeyHex:  pubkeyHex,
+			PubkeyHash: pubkeyHash,
+			CreatedAt:  now,
+		}
+		if err := tx.Create(&pk).Error; err != nil {
+			return err
+		}
+		result := tx.Model(&Pubkey{}).
+			Where("user_id = ? AND id <> ? AND revoked_at IS NULL", userID, pk.ID).
+			Update("revoked_at", now)
+		if result.Error != nil {
+			return result.Error
+		}
+		revokedCount = result.RowsAffected
+		created = pk
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return &created, revokedCount, nil
 }
 
 // RevokePubkey 撤销公钥。
@@ -281,6 +339,43 @@ func (s *Store) VerifyPubkeyBindings(items []PubkeyBinding) ([]PubkeyBinding, er
 	return missing, nil
 }
 
+// VerifyPubkeyBindingsAt 批量校验公钥哈希是否在签名时间点属于指定用户。
+//
+// 该方法保留历史公钥验证能力：签名时间落在
+// [created_at, revoked_at) 的公钥视为有效。revoked_at 为空代表仍然有效。
+// SignedAt 的协议精度是 Unix 秒，因此查询按整秒窗口处理。
+func (s *Store) VerifyPubkeyBindingsAt(items []PubkeyBindingAt) ([]PubkeyBindingAt, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+
+	missing := make([]PubkeyBindingAt, 0)
+	for _, item := range items {
+		hash := strings.ToLower(strings.TrimSpace(item.PubkeyHash))
+		signedAtStart := item.SignedAt.UTC().Truncate(time.Second)
+		signedAtEnd := signedAtStart.Add(time.Second - time.Nanosecond)
+
+		var count int64
+		err := s.DB.Table("pubkeys").
+			Joins("JOIN users ON users.id = pubkeys.user_id").
+			Where("pubkeys.user_id = ? AND pubkeys.pubkey_hash = ? AND users.disabled = ?", item.UserID, hash, false).
+			Where("pubkeys.created_at <= ?", signedAtEnd).
+			Where("(pubkeys.revoked_at IS NULL OR pubkeys.revoked_at > ?)", signedAtStart).
+			Count(&count).Error
+		if err != nil {
+			return nil, err
+		}
+		if count == 0 {
+			missing = append(missing, PubkeyBindingAt{
+				UserID:     item.UserID,
+				PubkeyHash: hash,
+				SignedAt:   signedAtStart,
+			})
+		}
+	}
+	return missing, nil
+}
+
 func bindingKey(userID uint64, pubkeyHash string) string {
 	return strconv.FormatUint(userID, 10) + "\x00" + pubkeyHash
 }
@@ -322,7 +417,9 @@ func (s *Store) List(page, pageSize int) ([]User, int64, error) {
 		return nil, 0, err
 	}
 	var items []User
-	err := s.DB.Preload("Pubkeys", "revoked_at IS NULL").
+	err := s.DB.Preload("Pubkeys", func(db *gorm.DB) *gorm.DB {
+		return db.Order("created_at desc, id desc")
+	}).
 		Order("id desc").
 		Offset((page - 1) * pageSize).
 		Limit(pageSize).

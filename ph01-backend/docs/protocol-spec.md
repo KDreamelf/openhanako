@@ -92,14 +92,18 @@ PH01 不使用传统 `token` / `session` 作为用户登录态。
 | `user_id` | uint64 | 外键 |
 | `pubkey_hex` | string(130) | 65 字节非压缩公钥 hex |
 | `pubkey_hash` | string(64) | SHA-256(公钥) hex |
-| `created_at` | timestamp | 创建时间 |
-| `revoked_at` | timestamp? | 撤销时间，nil 表示有效 |
+| `created_at` | timestamp | 生成时间，也是该公钥的生效时间 |
+| `revoked_at` | timestamp? | 失效时间，nil 表示当前有效 |
 
 轮换语义：
 
 - 用户可拥有多个公钥。
 - 旧公钥不删除，只标记 `revoked_at`。
-- 验签只接受未撤销公钥。
+- 密钥轮换必须同时满足：当前有效旧私钥签名、绑定邮箱验证码通过。
+- 新公钥的 `created_at` 是轮换生效时间。
+- 轮换时，旧的当前有效公钥 `revoked_at` 等于新公钥 `created_at`。
+- 登录和当前网关验签只接受 `revoked_at IS NULL` 的公钥。
+- 历史有效性查询按签名时间戳匹配 `[created_at, revoked_at)`；`revoked_at` 为空表示持续有效。
 
 ---
 
@@ -252,6 +256,70 @@ Retry-After: 42
 
 响应同注册响应。
 
+### 5.4 密钥轮换
+
+密钥轮换不是单因子操作。客户端必须先持有当前有效私钥，再完成绑定邮箱验证码，服务端才允许追加新公钥并失效旧公钥。
+
+**POST `/api/v1/auth/rotate_pubkey_email/start`**
+
+请求是 `SignedRequest`，必须由当前有效旧私钥签名。payload：
+
+```json
+{ "username": "alice" }
+```
+
+服务端：
+
+1. 验证 SignedRequest。
+2. 根据旧公钥哈希查当前有效用户。
+3. 确认公钥属于 `username` 且用户未禁用。
+4. 向该用户已绑定邮箱发送密钥轮换验证码。
+
+响应：
+
+```json
+{
+  "challenge_id": "email-challenge-id",
+  "delivery": "a***e@example.com",
+  "expires_in": 600,
+  "cooldown_seconds": 60
+}
+```
+
+**POST `/api/v1/auth/rotate_pubkey`**
+
+请求同样是 `SignedRequest`，仍然必须由当前有效旧私钥签名。payload：
+
+```json
+{
+  "username": "alice",
+  "email_challenge_id": "email-challenge-id",
+  "email_code": "123456",
+  "new_pubkey_hex": "04dcba..."
+}
+```
+
+服务端：
+
+1. 验证旧私钥签名，并确认旧公钥当前有效。
+2. 校验邮箱验证码属于同一用户，且用途是密钥轮换。
+3. 写入新公钥，设置新公钥 `created_at` 为轮换生效时间。
+4. 将该用户此前所有当前有效公钥的 `revoked_at` 设置为同一时间。
+
+响应：
+
+```json
+{
+  "user_id": 12345,
+  "username": "alice",
+  "tier": "free",
+  "old_pubkey_hash": "abc123...",
+  "new_pubkey_hash": "def456...",
+  "effective_at": 1777632000,
+  "revoked_previous_count": 1
+}
+```
+
 ---
 
 ## 6. 恢复流程
@@ -393,6 +461,31 @@ Retry-After: 42
   ]
 }
 ```
+
+历史公钥有效性查询预留给经验网络等需要验证旧签名的系统。调用方必须提交签名发生时的 Unix 秒时间戳，认证中心按该时间点匹配对应公钥是否处于生效期。
+
+**POST `/api/v1/auth/verify_pubkeys_at`**
+
+请求：
+
+```json
+{
+  "items": [
+    { "user_id": 12345, "pubkey_hash": "abc123...", "signed_at": 1777631999 },
+    { "user_id": 12345, "pubkey_hash": "def456...", "signed_at": 1777632000 }
+  ]
+}
+```
+
+语义：
+
+- 单次最多 1000 项。
+- 用户被禁用时视为未命中。
+- `signed_at` 落在 `[created_at, revoked_at)` 内即命中。
+- 公钥未失效时，`revoked_at` 视为无限未来。
+- 该接口只做公钥归属与时间有效性判断，不替代签名验签。
+
+响应结构与 `/api/v1/auth/verify_pubkeys` 相同；未命中项会保留 `signed_at`。
 
 ### 7.1 AI 网关登录挑战验签
 
@@ -556,3 +649,4 @@ AI 网关调用认证中心内部接口：
 - **v1.3 (2026-05-01)**：新增批量 `user_id + pubkey_hash` 合法性查询，供 AI 网关和 P2P 校验使用。
 - **v1.4 (2026-05-04)**：AI 网关登录码 / 协议登录响应简化为 `user_id + nonce + signature(challenge)`。
 - **v1.5 (2026-05-05)**：注册流程新增邮箱验证码；`/auth/register` 必须携带邮箱、挑战 ID 与验证码。
+- **v1.6 (2026-05-08)**：新增密钥轮换双因子流程与历史公钥时间点校验接口，为经验网络签名有效性查询预留认证中心口子。

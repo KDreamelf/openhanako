@@ -10,6 +10,7 @@ import (
 	"net/mail"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	hcrypto "github.com/hanako/ph01-backend/internal/crypto"
@@ -60,12 +61,15 @@ func (h *Handler) Register(r *gin.RouterGroup) {
 	r.POST("/auth/register_email/start", h.HandleRegistrationEmailStart)
 	r.POST("/auth/register", h.HandleRegister)
 	r.POST("/auth/login", h.HandleLogin)
+	r.POST("/auth/rotate_pubkey_email/start", h.HandleRotatePubkeyEmailStart)
+	r.POST("/auth/rotate_pubkey", h.HandleRotatePubkey)
 	r.POST("/auth/recovery_candidates", h.HandleRecoveryCandidates)
 	r.POST("/auth/recovery_rfa/start", h.HandleRecoveryRFAStart)
 	r.POST("/auth/recovery_rfa/verify", h.HandleRecoveryRFAVerify)
 	r.POST("/auth/verify_signature", h.HandleVerifySignature)
 	r.POST("/auth/verify_challenge_signature", h.HandleVerifyChallengeSignature)
 	r.POST("/auth/verify_pubkeys", h.HandleVerifyPubkeys)
+	r.POST("/auth/verify_pubkeys_at", h.HandleVerifyPubkeysAt)
 }
 
 // HandleRegistrationEmailStart 处理 POST /auth/register_email/start。
@@ -248,6 +252,147 @@ func (h *Handler) HandleLogin(c *gin.Context) {
 		Username:   u.Username,
 		Tier:       u.Tier,
 		PubkeyHash: verified.PubkeyHash,
+	})
+}
+
+// HandleRotatePubkeyEmailStart 处理 POST /auth/rotate_pubkey_email/start。
+//
+// 发起轮换邮箱验证码也必须由当前有效私钥签名，防止仅凭邮箱控制权触发轮换流程。
+func (h *Handler) HandleRotatePubkeyEmailStart(c *gin.Context) {
+	if h.RFA == nil {
+		errorJSON(c, http.StatusServiceUnavailable, api.ErrRFANotAvailable, "rfa service not configured")
+		return
+	}
+	var req api.SignedRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	verified, err := h.Verifier.Verify(c.Request.Context(), &req)
+	if err != nil {
+		errorJSON(c, http.StatusUnauthorized, classifyVerifyErr(err), err.Error())
+		return
+	}
+
+	var payload api.RotatePubkeyEmailStartPayload
+	if err := json.Unmarshal([]byte(verified.Payload), &payload); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	if strings.TrimSpace(payload.Username) == "" {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "username required")
+		return
+	}
+
+	u, _, err := h.UserStore.GetByPubkeyHash(verified.PubkeyHash)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			errorJSON(c, http.StatusUnauthorized, api.ErrPubkeyNotFound, "")
+			return
+		}
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	}
+	if !strings.EqualFold(u.Username, payload.Username) {
+		errorJSON(c, http.StatusUnauthorized, api.ErrPubkeyNotFound, "pubkey does not match username")
+		return
+	}
+	if u.Disabled {
+		errorJSON(c, http.StatusForbidden, api.ErrUserDisabled, "")
+		return
+	}
+
+	resp, err := h.RFA.StartPubkeyRotation(c.Request.Context(), u)
+	if err != nil {
+		rfaErrorJSON(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// HandleRotatePubkey 处理 POST /auth/rotate_pubkey。
+//
+// 外层 SignedRequest 必须由当前有效旧公钥签名，payload 必须携带轮换邮箱验证码。
+// 轮换成功后，旧公钥的失效时间等于新公钥的生效时间；后续登录/网关验签只接受新公钥。
+func (h *Handler) HandleRotatePubkey(c *gin.Context) {
+	if h.RFA == nil {
+		errorJSON(c, http.StatusServiceUnavailable, api.ErrRFANotAvailable, "rfa service not configured")
+		return
+	}
+	var req api.SignedRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	verified, err := h.Verifier.Verify(c.Request.Context(), &req)
+	if err != nil {
+		errorJSON(c, http.StatusUnauthorized, classifyVerifyErr(err), err.Error())
+		return
+	}
+
+	var payload api.RotatePubkeyPayload
+	if err := json.Unmarshal([]byte(verified.Payload), &payload); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	if strings.TrimSpace(payload.Username) == "" {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "username required")
+		return
+	}
+	newPubkeyHex := strings.TrimSpace(payload.NewPubkeyHex)
+	if _, err := hcrypto.ParsePubkey(newPubkeyHex); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "new_pubkey_hex invalid")
+		return
+	}
+	newHash, err := hcrypto.PubkeyHash(newPubkeyHex)
+	if err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "new_pubkey_hex invalid")
+		return
+	}
+	if strings.EqualFold(newHash, verified.PubkeyHash) {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "new pubkey must differ from current pubkey")
+		return
+	}
+
+	u, _, err := h.UserStore.GetByPubkeyHash(verified.PubkeyHash)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			errorJSON(c, http.StatusUnauthorized, api.ErrPubkeyNotFound, "")
+			return
+		}
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	}
+	if !strings.EqualFold(u.Username, payload.Username) {
+		errorJSON(c, http.StatusUnauthorized, api.ErrPubkeyNotFound, "pubkey does not match username")
+		return
+	}
+	if u.Disabled {
+		errorJSON(c, http.StatusForbidden, api.ErrUserDisabled, "")
+		return
+	}
+	if strings.TrimSpace(payload.EmailChallengeID) == "" || strings.TrimSpace(payload.EmailCode) == "" {
+		errorJSON(c, http.StatusBadRequest, api.ErrEmailVerificationRequired, api.ErrEmailVerificationRequired)
+		return
+	}
+	if err := h.RFA.VerifyPubkeyRotation(c.Request.Context(), payload.EmailChallengeID, payload.EmailCode, u.ID, u.Username); err != nil {
+		rfaErrorJSON(c, err)
+		return
+	}
+
+	newPubkey, revokedCount, err := h.UserStore.RotatePubkey(u.ID, newPubkeyHex, newHash)
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, api.RotatePubkeyResponse{
+		UserID:               u.ID,
+		Username:             u.Username,
+		Tier:                 u.Tier,
+		OldPubkeyHash:        verified.PubkeyHash,
+		NewPubkeyHash:        newPubkey.PubkeyHash,
+		EffectiveAt:          newPubkey.CreatedAt.Unix(),
+		RevokedPreviousCount: revokedCount,
 	})
 }
 
@@ -504,6 +649,60 @@ func (h *Handler) HandleVerifyPubkeys(c *gin.Context) {
 			resp.Missing = append(resp.Missing, api.PubkeyBindingCheck{
 				UserID:     item.UserID,
 				PubkeyHash: item.PubkeyHash,
+			})
+		}
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// HandleVerifyPubkeysAt 内部接口：按签名时间批量验证历史公钥绑定关系。
+//
+// 预留给经验网络：调用方带上签名发生时的 Unix 秒时间戳，认证中心按
+// pubkeys.created_at / revoked_at 判断当时哪把公钥有效。
+func (h *Handler) HandleVerifyPubkeysAt(c *gin.Context) {
+	var req api.VerifyPubkeysAtRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	if len(req.Items) == 0 {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "items required")
+		return
+	}
+	if len(req.Items) > maxVerifyPubkeyItems {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "too many items")
+		return
+	}
+
+	items := make([]user.PubkeyBindingAt, 0, len(req.Items))
+	for _, item := range req.Items {
+		hash, err := normalizePubkeyHash(item.PubkeyHash)
+		if err != nil || item.UserID == 0 || item.SignedAt <= 0 {
+			errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "invalid historical pubkey binding item")
+			return
+		}
+		items = append(items, user.PubkeyBindingAt{
+			UserID:     item.UserID,
+			PubkeyHash: hash,
+			SignedAt:   time.Unix(item.SignedAt, 0).UTC(),
+		})
+	}
+
+	missing, err := h.UserStore.VerifyPubkeyBindingsAt(items)
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	}
+	resp := api.VerifyPubkeysAtResponse{
+		OK: len(missing) == 0,
+	}
+	if len(missing) > 0 {
+		resp.Missing = make([]api.PubkeyBindingAtCheck, 0, len(missing))
+		for _, item := range missing {
+			resp.Missing = append(resp.Missing, api.PubkeyBindingAtCheck{
+				UserID:     item.UserID,
+				PubkeyHash: item.PubkeyHash,
+				SignedAt:   item.SignedAt.Unix(),
 			})
 		}
 	}

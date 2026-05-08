@@ -82,6 +82,7 @@ func (s *RegistrationEmailService) Start(ctx context.Context, username, email st
 	now := time.Now().UTC()
 	ch := &RFAChallenge{
 		ID:        challengeID,
+		Purpose:   rfaPurposeRegistration,
 		Username:  username,
 		Email:     email,
 		CodeHash:  hashRFACode(salt, code),
@@ -132,6 +133,9 @@ func (s *RegistrationEmailService) Verify(ctx context.Context, challengeID, user
 	}
 	if ch.Attempts >= s.MaxAttempts {
 		_ = s.Store.DeleteChallenge(ctx, challengeID)
+		return ErrRFAChallengeNotFound
+	}
+	if !challengePurposeMatches(ch.Purpose, rfaPurposeRegistration) {
 		return ErrRFAChallengeNotFound
 	}
 	if !strings.EqualFold(ch.Username, username) || !strings.EqualFold(ch.Email, email) {

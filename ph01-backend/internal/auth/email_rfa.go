@@ -35,7 +35,13 @@ var (
 	ErrRFACodeExpired       = errors.New(api.ErrRFACodeExpired)
 )
 
-const defaultEmailSendCooldown = 60 * time.Second
+const (
+	defaultEmailSendCooldown = 60 * time.Second
+
+	rfaPurposeRegistration   = "registration"
+	rfaPurposeRecovery       = "recovery"
+	rfaPurposePubkeyRotation = "pubkey_rotation"
+)
 
 // EmailSender 发送验证码。生产实现是 SMTP，测试可用内存 fake。
 type EmailSender interface {
@@ -67,6 +73,7 @@ type RFAStore interface {
 // RFAChallenge 是邮箱验证码挑战。CodeHash = SHA256(salt + ":" + code)。
 type RFAChallenge struct {
 	ID        string    `json:"id"`
+	Purpose   string    `json:"purpose,omitempty"`
 	UserID    uint64    `json:"user_id"`
 	Username  string    `json:"username"`
 	Email     string    `json:"email"`
@@ -127,6 +134,68 @@ func (s *RFAService) Start(ctx context.Context, username string) (*api.RecoveryR
 	if err != nil {
 		return nil, err
 	}
+
+	return s.startEmailChallenge(ctx, u, rfaPurposeRecovery, verificationEmailRecovery)
+}
+
+func (s *RFAService) StartPubkeyRotation(ctx context.Context, u *user.User) (*api.RotatePubkeyEmailStartResponse, error) {
+	resp, err := s.startEmailChallenge(ctx, u, rfaPurposePubkeyRotation, verificationEmailRotation)
+	if err != nil {
+		return nil, err
+	}
+	return &api.RotatePubkeyEmailStartResponse{
+		ChallengeID:     resp.ChallengeID,
+		Delivery:        resp.Delivery,
+		ExpiresIn:       resp.ExpiresIn,
+		CooldownSeconds: resp.CooldownSeconds,
+	}, nil
+}
+
+func (s *RFAService) Verify(ctx context.Context, challengeID, code string) (*api.RecoveryRFAVerifyResponse, error) {
+	if !s.available() {
+		return nil, ErrRFANotAvailable
+	}
+	now := time.Now().UTC()
+	ch, err := s.verifyEmailChallenge(ctx, challengeID, code, rfaPurposeRecovery, 0, "")
+	if err != nil {
+		return nil, err
+	}
+	token, err := randomToken(32)
+	if err != nil {
+		return nil, err
+	}
+	grant := &RecoveryGrant{
+		Token:                  token,
+		UserID:                 ch.UserID,
+		Username:               ch.Username,
+		MaxCandidatesPerColumn: s.MaxCandidatesPerColumn,
+		ExpiresAt:              now.Add(s.GrantTTL),
+	}
+	if err := s.Store.SaveGrant(ctx, grant, s.GrantTTL); err != nil {
+		return nil, err
+	}
+	return &api.RecoveryRFAVerifyResponse{
+		RecoveryGrant:          token,
+		ExpiresIn:              int(s.GrantTTL.Seconds()),
+		MaxCandidatesPerColumn: s.MaxCandidatesPerColumn,
+	}, nil
+}
+
+func (s *RFAService) VerifyPubkeyRotation(ctx context.Context, challengeID, code string, userID uint64, username string) error {
+	if !s.available() {
+		return ErrRFANotAvailable
+	}
+	_, err := s.verifyEmailChallenge(ctx, challengeID, code, rfaPurposePubkeyRotation, userID, username)
+	return err
+}
+
+func (s *RFAService) startEmailChallenge(ctx context.Context, u *user.User, purpose string, kind verificationEmailKind) (*api.RecoveryRFAStartResponse, error) {
+	if !s.available() {
+		return nil, ErrRFANotAvailable
+	}
+	if u == nil || strings.TrimSpace(u.Username) == "" {
+		return nil, errors.New(api.ErrInvalidPayload)
+	}
 	if u.Disabled {
 		return nil, errors.New(api.ErrUserDisabled)
 	}
@@ -138,7 +207,7 @@ func (s *RFAService) Start(ctx context.Context, username string) (*api.RecoveryR
 		return nil, ErrEmailNotBound
 	}
 	cooldownSeconds := durationSeconds(s.SendCooldown)
-	releaseCooldown, err := reserveEmailSendCooldown(ctx, s.Store, "recovery", email, s.SendCooldown)
+	releaseCooldown, err := reserveEmailSendCooldown(ctx, s.Store, purpose, email, s.SendCooldown)
 	if err != nil {
 		return nil, err
 	}
@@ -164,6 +233,7 @@ func (s *RFAService) Start(ctx context.Context, username string) (*api.RecoveryR
 	now := time.Now().UTC()
 	ch := &RFAChallenge{
 		ID:        challengeID,
+		Purpose:   purpose,
 		UserID:    u.ID,
 		Username:  u.Username,
 		Email:     email,
@@ -175,7 +245,7 @@ func (s *RFAService) Start(ctx context.Context, username string) (*api.RecoveryR
 		return nil, err
 	}
 
-	msg := buildVerificationEmailMessage(verificationEmailRecovery, code, s.ChallengeTTL)
+	msg := buildVerificationEmailMessage(kind, code, s.ChallengeTTL)
 	if err := sendEmailMessage(ctx, s.Sender, email, msg); err != nil {
 		_ = s.Store.DeleteChallenge(ctx, challengeID)
 		return nil, err
@@ -190,12 +260,10 @@ func (s *RFAService) Start(ctx context.Context, username string) (*api.RecoveryR
 	}, nil
 }
 
-func (s *RFAService) Verify(ctx context.Context, challengeID, code string) (*api.RecoveryRFAVerifyResponse, error) {
-	if !s.available() {
-		return nil, ErrRFANotAvailable
-	}
+func (s *RFAService) verifyEmailChallenge(ctx context.Context, challengeID, code, purpose string, userID uint64, username string) (*RFAChallenge, error) {
 	challengeID = strings.TrimSpace(challengeID)
 	code = strings.TrimSpace(code)
+	username = strings.TrimSpace(username)
 	if challengeID == "" || code == "" {
 		return nil, errors.New(api.ErrInvalidPayload)
 	}
@@ -213,6 +281,15 @@ func (s *RFAService) Verify(ctx context.Context, challengeID, code string) (*api
 		_ = s.Store.DeleteChallenge(ctx, challengeID)
 		return nil, ErrRFAChallengeNotFound
 	}
+	if !challengePurposeMatches(ch.Purpose, purpose) {
+		return nil, ErrRFAChallengeNotFound
+	}
+	if userID != 0 && ch.UserID != userID {
+		return nil, errors.New(api.ErrEmailVerificationRequired)
+	}
+	if username != "" && !strings.EqualFold(ch.Username, username) {
+		return nil, errors.New(api.ErrEmailVerificationRequired)
+	}
 
 	gotHash := hashRFACode(ch.Salt, code)
 	if subtle.ConstantTimeCompare([]byte(gotHash), []byte(ch.CodeHash)) != 1 {
@@ -226,25 +303,17 @@ func (s *RFAService) Verify(ctx context.Context, challengeID, code string) (*api
 	}
 
 	_ = s.Store.DeleteChallenge(ctx, challengeID)
-	token, err := randomToken(32)
-	if err != nil {
-		return nil, err
+	return ch, nil
+}
+
+func challengePurposeMatches(actual, want string) bool {
+	actual = strings.TrimSpace(actual)
+	want = strings.TrimSpace(want)
+	if actual == want {
+		return true
 	}
-	grant := &RecoveryGrant{
-		Token:                  token,
-		UserID:                 ch.UserID,
-		Username:               ch.Username,
-		MaxCandidatesPerColumn: s.MaxCandidatesPerColumn,
-		ExpiresAt:              now.Add(s.GrantTTL),
-	}
-	if err := s.Store.SaveGrant(ctx, grant, s.GrantTTL); err != nil {
-		return nil, err
-	}
-	return &api.RecoveryRFAVerifyResponse{
-		RecoveryGrant:          token,
-		ExpiresIn:              int(s.GrantTTL.Seconds()),
-		MaxCandidatesPerColumn: s.MaxCandidatesPerColumn,
-	}, nil
+	// 老版本挑战没有 purpose 字段。只兼容注册/恢复，轮换必须显式带 purpose。
+	return actual == "" && (want == rfaPurposeRegistration || want == rfaPurposeRecovery)
 }
 
 func hashRFACode(salt, code string) string {

@@ -176,7 +176,7 @@ func (h *Handler) HandleListUsers(c *gin.Context) {
 // HandleGetUser GET /admin/users/:id
 func (h *Handler) HandleGetUser(c *gin.Context) {
 	id := uint64Atoi(c.Param("id"))
-	u, err := h.UserStore.GetByID(id)
+	u, err := h.UserStore.GetByIDWithAllPubkeys(id)
 	if err != nil {
 		errorJSON(c, http.StatusNotFound, api.ErrUserNotFound, "")
 		return

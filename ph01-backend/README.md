@@ -151,12 +151,15 @@ go test ./...
 | `POST` | `/api/v1/auth/register_email/start` | 注册前邮箱验证码；用户名可用后调用 |
 | `POST` | `/api/v1/auth/register` | 注册新用户（SignedRequest，必须带邮箱验证码） |
 | `POST` | `/api/v1/auth/login` | 身份确认（SignedRequest，不签发 token） |
+| `POST` | `/api/v1/auth/rotate_pubkey_email/start` | 密钥轮换前邮箱验证码；必须由当前有效私钥签名 |
+| `POST` | `/api/v1/auth/rotate_pubkey` | 密钥轮换；必须同时通过旧私钥签名和邮箱验证码 |
 | `POST` | `/api/v1/auth/recovery_candidates` | 拉取某用户名的未撤销公钥哈希集合 |
 | `POST` | `/api/v1/auth/recovery_rfa/start` | 第二阶段恢复：发送邮箱验证码 |
 | `POST` | `/api/v1/auth/recovery_rfa/verify` | 第二阶段恢复：验证码换取短期 recovery grant |
 | `POST` | `/api/v1/auth/verify_signature` | 内部验签接口，供 AI 网关调用；可带 `user_id` 约束公钥归属 |
 | `POST` | `/api/v1/auth/verify_challenge_signature` | 内部验签接口，按 `user_id` 验证 `signature(challenge)` |
 | `POST` | `/api/v1/auth/verify_pubkeys` | 批量校验 `user_id + pubkey_hash` 绑定关系 |
+| `POST` | `/api/v1/auth/verify_pubkeys_at` | 按签名时间戳批量校验历史公钥绑定关系 |
 | `POST` | `/admin/session/login` | 管理端签名登录；仅 `root/admin` 角色可用 |
 | `GET` | `/admin/session/self` | 管理端当前会话 |
 | `GET` | `/admin/users` | 管理：用户列表 |

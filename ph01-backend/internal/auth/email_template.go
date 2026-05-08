@@ -11,6 +11,7 @@ type verificationEmailKind string
 const (
 	verificationEmailRegister verificationEmailKind = "register"
 	verificationEmailRecovery verificationEmailKind = "recovery"
+	verificationEmailRotation verificationEmailKind = "rotation"
 )
 
 func buildVerificationEmailMessage(kind verificationEmailKind, code string, ttl time.Duration) EmailMessage {
@@ -27,6 +28,9 @@ func buildVerificationEmailMessage(kind verificationEmailKind, code string, ttl 
 	case verificationEmailRecovery:
 		title = "PH01 恢复验证码"
 		action = "继续账号恢复"
+	case verificationEmailRotation:
+		title = "PH01 密钥轮换验证码"
+		action = "确认密钥轮换"
 	}
 
 	text := fmt.Sprintf(`%s
