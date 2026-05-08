@@ -16,6 +16,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 
 import '../llm/provider.dart';
+import '../shared/diagnostics_log.dart';
 import 'ecdh.dart';
 import 'keypair.dart';
 import 'signed_request.dart';
@@ -24,6 +25,7 @@ class HanakoBackendClient {
   HanakoBackendClient({
     this.authBaseUrl = defaultAuthBaseUrl,
     this.aiBaseUrl = defaultAiBaseUrl,
+    this.publicStoryDiagnosticsLog,
     Dio? dio,
   }) : _dio = dio ?? Dio();
 
@@ -36,6 +38,9 @@ class HanakoBackendClient {
 
   /// ai-gateway 基础 URL。生产默认是 `https://ai.xn--lbtx0e.cn`。
   final String aiBaseUrl;
+
+  /// 公开故事/恢复链路本地 JSONL 诊断日志。
+  final DiagnosticsLog? publicStoryDiagnosticsLog;
 
   final Dio _dio;
 
@@ -304,8 +309,23 @@ class HanakoBackendClient {
   /// 该接口走 AI 网关的 PH01 root public carrier，不依赖当前身份，也不会覆盖
   /// 普通聊天的 ECDH [_channel]。
   Future<GatewayModelList> listPublicStoryModels() async {
+    final startedAt = DateTime.now();
+    final ch = _currentChannelOrNull();
+    final mode = ch == null ? 'plaintext' : 'encrypted';
+    _writePublicStoryTransportLog(
+      'transport_request',
+      operation: 'public_story_models',
+      phase: 'request',
+      status: 'start',
+      method: ch == null ? 'GET' : 'POST',
+      endpoint: '/api/v1/public/story/models',
+      mode: mode,
+      fields: {
+        'has_channel': ch != null,
+        'channel_expires_in_ms': _channelExpiresInMs(ch),
+      },
+    );
     try {
-      final ch = _currentChannelOrNull();
       final Response<Map<String, dynamic>> resp;
       Map<String, dynamic> body;
       if (ch != null) {
@@ -323,12 +343,61 @@ class HanakoBackendClient {
         );
         body = resp.data!;
       }
-      return GatewayModelList(
+      final result = GatewayModelList(
         models: (body['models'] as List?)?.cast<String>() ?? const <String>[],
         tier: body['tier'] as String?,
       );
+      _writePublicStoryTransportLog(
+        'transport_success',
+        operation: 'public_story_models',
+        phase: 'response',
+        status: 'success',
+        method: ch == null ? 'GET' : 'POST',
+        endpoint: '/api/v1/public/story/models',
+        mode: mode,
+        fields: {
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          'status_code': resp.statusCode,
+          'model_count': result.models.length,
+          if (result.tier != null) 'tier': result.tier,
+          'response_keys': _mapKeys(body),
+        },
+      );
+      return result;
     } on DioException catch (e) {
-      throw await HanakoBackendException.fromDio(e, action: '获取公开故事模型列表');
+      final error = await HanakoBackendException.fromDio(
+        e,
+        action: '获取公开故事模型列表',
+      );
+      _writePublicStoryTransportLog(
+        'transport_failure',
+        operation: 'public_story_models',
+        phase: 'response',
+        status: 'failure',
+        method: ch == null ? 'GET' : 'POST',
+        endpoint: '/api/v1/public/story/models',
+        mode: mode,
+        fields: {
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          ..._backendExceptionLogFields(error),
+        },
+      );
+      throw error;
+    } catch (error, stackTrace) {
+      _writePublicStoryTransportLog(
+        'transport_decrypt_failure',
+        operation: 'public_story_models',
+        phase: 'decrypt',
+        status: 'failure',
+        method: ch == null ? 'GET' : 'POST',
+        endpoint: '/api/v1/public/story/models',
+        mode: mode,
+        fields: {
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          ..._objectExceptionLogFields(error),
+        },
+      );
+      Error.throwWithStackTrace(error, stackTrace);
     }
   }
 
@@ -389,32 +458,100 @@ class HanakoBackendClient {
     required List<Map<String, dynamic>> messages,
     Map<String, dynamic>? extra,
   }) async {
+    final startedAt = DateTime.now();
     final payload = _chatPayload(
       model: model,
       messages: messages,
       stream: false,
       extra: extra,
     );
+    final ch = _currentChannelOrNull();
+    final mode = ch == null ? 'plaintext' : 'encrypted';
+    _writePublicStoryTransportLog(
+      'transport_request',
+      operation: 'public_story_chat',
+      phase: 'request',
+      status: 'start',
+      method: 'POST',
+      endpoint: '/api/v1/public/story/chat',
+      mode: mode,
+      fields: {
+        'model': model,
+        'has_channel': ch != null,
+        'channel_expires_in_ms': _channelExpiresInMs(ch),
+        'request_payload_chars': jsonEncode(payload).length,
+        ..._messageStats(messages),
+      },
+    );
     try {
-      final ch = _currentChannelOrNull();
+      final Response<Map<String, dynamic>> resp;
+      Map<String, dynamic> body;
       if (ch != null) {
-        final resp = await _dio.postUri<Map<String, dynamic>>(
+        resp = await _dio.postUri<Map<String, dynamic>>(
           Uri.parse('$aiBaseUrl/api/v1/public/story/chat'),
           data: _encryptedEnvelope(ch, payload),
           options: Options(contentType: Headers.jsonContentType),
         );
-        final body = _decryptEnvelope(ch, resp.data!);
+        body = _decryptEnvelope(ch, resp.data!);
         _extendChannel(ch);
-        return body;
+      } else {
+        resp = await _dio.postUri<Map<String, dynamic>>(
+          Uri.parse('$aiBaseUrl/api/v1/public/story/chat'),
+          data: payload,
+          options: Options(contentType: Headers.jsonContentType),
+        );
+        body = resp.data!;
       }
-      final resp = await _dio.postUri<Map<String, dynamic>>(
-        Uri.parse('$aiBaseUrl/api/v1/public/story/chat'),
-        data: payload,
-        options: Options(contentType: Headers.jsonContentType),
+      _writePublicStoryTransportLog(
+        'transport_success',
+        operation: 'public_story_chat',
+        phase: 'response',
+        status: 'success',
+        method: 'POST',
+        endpoint: '/api/v1/public/story/chat',
+        mode: mode,
+        fields: {
+          'model': model,
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          'status_code': resp.statusCode,
+          'response_keys': _mapKeys(body),
+          'choice_count': _choiceCount(body),
+        },
       );
-      return resp.data!;
+      return body;
     } on DioException catch (e) {
-      throw await HanakoBackendException.fromDio(e, action: '调用公开故事模型');
+      final error = await HanakoBackendException.fromDio(e, action: '调用公开故事模型');
+      _writePublicStoryTransportLog(
+        'transport_failure',
+        operation: 'public_story_chat',
+        phase: 'response',
+        status: 'failure',
+        method: 'POST',
+        endpoint: '/api/v1/public/story/chat',
+        mode: mode,
+        fields: {
+          'model': model,
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          ..._backendExceptionLogFields(error),
+        },
+      );
+      throw error;
+    } catch (error, stackTrace) {
+      _writePublicStoryTransportLog(
+        'transport_decrypt_failure',
+        operation: 'public_story_chat',
+        phase: 'decrypt',
+        status: 'failure',
+        method: 'POST',
+        endpoint: '/api/v1/public/story/chat',
+        mode: mode,
+        fields: {
+          'model': model,
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          ..._objectExceptionLogFields(error),
+        },
+      );
+      Error.throwWithStackTrace(error, stackTrace);
     }
   }
 
@@ -586,6 +723,31 @@ class HanakoBackendClient {
       allowedModels: channel.allowedModels,
     );
   }
+
+  void _writePublicStoryTransportLog(
+    String event, {
+    required String operation,
+    required String phase,
+    required String status,
+    required String method,
+    required String endpoint,
+    required String mode,
+    Map<String, dynamic> fields = const {},
+  }) {
+    publicStoryDiagnosticsLog?.write(
+      event,
+      layer: 'backend_client',
+      fields: {
+        'operation': operation,
+        'phase': phase,
+        'status': status,
+        'method': method,
+        'endpoint': endpoint,
+        'mode': mode,
+        ...fields,
+      },
+    );
+  }
 }
 
 Map<String, dynamic> _chatPayload({
@@ -614,6 +776,97 @@ Map<String, dynamic> _chatPayload({
 Map<String, dynamic>? _optionalExtra(Map<String, dynamic>? extra) {
   if (extra == null) return null;
   return {'extra': extra};
+}
+
+int? _channelExpiresInMs(HanakoChannel? channel) {
+  if (channel == null) return null;
+  return channel.expiresAt.difference(DateTime.now()).inMilliseconds;
+}
+
+Map<String, dynamic> _messageStats(List<Map<String, dynamic>> messages) {
+  var totalChars = 0;
+  var systemChars = 0;
+  var userChars = 0;
+  final roles = <String>[];
+  for (final message in messages) {
+    final role = message['role']?.toString() ?? '';
+    if (role.isNotEmpty) roles.add(role);
+    final chars = _contentChars(message['content']);
+    totalChars += chars;
+    if (role == 'system') {
+      systemChars += chars;
+    } else if (role == 'user') {
+      userChars += chars;
+    }
+  }
+  return {
+    'message_count': messages.length,
+    'message_roles': roles,
+    'message_chars_total': totalChars,
+    'system_prompt_chars': systemChars,
+    'user_prompt_chars': userChars,
+  };
+}
+
+int _contentChars(Object? content) {
+  if (content == null) return 0;
+  if (content is String) return content.length;
+  if (content is Iterable) {
+    var chars = 0;
+    for (final item in content) {
+      if (item is Map) {
+        chars += _contentChars(item['text'] ?? item['content']);
+      } else {
+        chars += _contentChars(item);
+      }
+    }
+    return chars;
+  }
+  return content.toString().length;
+}
+
+List<String> _mapKeys(Map<String, dynamic> body) {
+  final keys = body.keys.map((key) => key.toString()).toList(growable: false);
+  keys.sort();
+  return keys;
+}
+
+int _choiceCount(Map<String, dynamic> body) {
+  final choices = body['choices'];
+  return choices is List ? choices.length : 0;
+}
+
+Map<String, dynamic> _backendExceptionLogFields(HanakoBackendException error) {
+  return {
+    'error_type': error.runtimeType.toString(),
+    'message': error.message,
+    if (error.statusCode != null) 'status_code': error.statusCode,
+    if (error.details != null && error.details!.isNotEmpty)
+      'details': error.details,
+    ..._gatewayErrorLogFieldsFromDetails(error.details),
+  };
+}
+
+Map<String, dynamic> _objectExceptionLogFields(Object error) {
+  if (error is HanakoBackendException) return _backendExceptionLogFields(error);
+  return {'error_type': error.runtimeType.toString(), 'message': '$error'};
+}
+
+Map<String, dynamic> _gatewayErrorLogFieldsFromDetails(String? details) {
+  final body = _serverPlaintextFromDetails(details);
+  final parsed = _gatewayErrorBody(body);
+  return {
+    if (parsed.code.isNotEmpty) 'gateway_error_code': parsed.code,
+    if (parsed.message.isNotEmpty) 'gateway_error_message': parsed.message,
+  };
+}
+
+String _serverPlaintextFromDetails(String? details) {
+  if (details == null || details.isEmpty) return '';
+  const marker = '服务端返回明文：';
+  final index = details.indexOf(marker);
+  if (index < 0) return '';
+  return details.substring(index + marker.length).trim();
 }
 
 String _decodeAiGatewayChallengeNonce(String challenge) {
@@ -659,7 +912,7 @@ class HanakoBackendException implements Exception {
     final body = await _responseBodyText(response?.data);
     final uri = error.requestOptions.uri;
     final method = error.requestOptions.method;
-    final summary = _gatewayErrorSummary(action, status);
+    final summary = _gatewayErrorSummary(action, status, body);
     final details = StringBuffer()
       ..writeln('$action失败')
       ..writeln('HTTP 状态：${status ?? "无响应"}')
@@ -691,15 +944,54 @@ class HanakoBackendException implements Exception {
   String toString() => message;
 }
 
-String _gatewayErrorSummary(String action, int? status) {
+String _gatewayErrorSummary(String action, int? status, String body) {
   if (status == null) return '$action失败：无法连接服务器';
   if (status == 400) return '$action失败：AI 网关拒绝了请求参数';
   if (status == 401) return '$action失败：身份或通信通道已失效';
-  if (status == 403) return '$action失败：当前身份无权使用该模型';
+  if (status == 403) return _gatewayForbiddenSummary(action, body);
   if (status == 404) return '$action失败：服务接口不存在或未部署最新版本';
   if (status == 429) return '$action失败：请求过于频繁';
   if (status >= 500) return '$action失败：AI 网关或上游模型服务异常';
   return '$action失败：服务器返回 HTTP $status';
+}
+
+String _gatewayForbiddenSummary(String action, String body) {
+  final parsed = _gatewayErrorBody(body);
+  final code = parsed.code;
+  final message = parsed.message;
+  final publicStoryAction = action.contains('公开故事');
+  if (publicStoryAction && code == 'model_not_allowed') {
+    if (message.isNotEmpty) {
+      return '$action失败：root 公开故事密钥模型配置不可用：$message';
+    }
+    return '$action失败：root 公开故事密钥未允许该模型';
+  }
+  if (publicStoryAction && code == 'access_denied') {
+    if (message.isNotEmpty) {
+      return '$action失败：root 公开故事密钥 IP 限制拒绝：$message';
+    }
+    return '$action失败：root 公开故事密钥 IP 限制拒绝了当前请求';
+  }
+  if (message.isNotEmpty) return '$action失败：$message';
+  return '$action失败：当前身份无权使用该模型';
+}
+
+({String code, String message}) _gatewayErrorBody(String body) {
+  if (body.trim().isEmpty) return (code: '', message: '');
+  try {
+    final decoded = jsonDecode(body);
+    if (decoded is Map) {
+      final rawCode = decoded['error'] ?? decoded['code'];
+      final rawMessage = decoded['message'] ?? decoded['msg'];
+      return (
+        code: rawCode?.toString().trim() ?? '',
+        message: rawMessage?.toString().trim() ?? '',
+      );
+    }
+  } catch (_) {
+    // 非 JSON 响应保持原有按 HTTP 状态归纳。
+  }
+  return (code: '', message: '');
 }
 
 Future<String> _responseBodyText(Object? data) async {

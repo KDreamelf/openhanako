@@ -2,6 +2,7 @@ package logger
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -85,6 +86,18 @@ func LogError(ctx context.Context, msg string) {
 	logHelper(ctx, loggerError, msg)
 }
 
+func LogInfoFields(ctx context.Context, event string, fields map[string]any) {
+	logFields(ctx, loggerINFO, event, fields)
+}
+
+func LogWarnFields(ctx context.Context, event string, fields map[string]any) {
+	logFields(ctx, loggerWarn, event, fields)
+}
+
+func LogErrorFields(ctx context.Context, event string, fields map[string]any) {
+	logFields(ctx, loggerError, event, fields)
+}
+
 func LogDebug(ctx context.Context, msg string, args ...any) {
 	if common.DebugEnabled {
 		if len(args) > 0 {
@@ -92,6 +105,21 @@ func LogDebug(ctx context.Context, msg string, args ...any) {
 		}
 		logHelper(ctx, loggerDebug, msg)
 	}
+}
+
+func logFields(ctx context.Context, level string, event string, fields map[string]any) {
+	payload := make(map[string]any, len(fields)+2)
+	payload["schema_version"] = 1
+	payload["event"] = event
+	for key, value := range fields {
+		payload[key] = value
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		logHelper(ctx, loggerError, fmt.Sprintf("structured_log_marshal_failed event=%s error=%s", event, err.Error()))
+		return
+	}
+	logHelper(ctx, level, string(raw))
 }
 
 func logHelper(ctx context.Context, level string, msg string) {

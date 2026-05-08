@@ -21,6 +21,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/ph01auth"
@@ -205,6 +206,7 @@ func PH01ListModels(c *gin.Context) {
 }
 
 func PH01PublicStoryModels(c *gin.Context) {
+	startedAt := time.Now()
 	var encryptedChannel *ph01Channel
 	var encryptedAESKey []byte
 	if c.Request.Method == http.MethodPost {
@@ -239,10 +241,20 @@ func PH01PublicStoryModels(c *gin.Context) {
 		encryptedAESKey = aesKey
 	}
 
-	_, _, allowedModels, ok := ph01RequireRootPublicStoryCarrier(c)
+	_, _, allowedModels, ok := ph01RequireRootPublicStoryCarrier(c, encryptedChannel == nil)
 	if !ok {
 		return
 	}
+	logger.LogInfoFields(c.Request.Context(), "ph01_public_story_models_success", map[string]any{
+		"layer":           "gateway_handler",
+		"operation":       "public_story_models",
+		"phase":           "handler",
+		"status":          "success",
+		"mode":            ph01PublicStoryMode(encryptedChannel != nil),
+		"model_count":     len(allowedModels),
+		"enforce_ip_rule": encryptedChannel == nil,
+		"duration_ms":     time.Since(startedAt).Milliseconds(),
+	})
 	body := gin.H{
 		"models": allowedModels,
 		"tier":   "public",
@@ -258,6 +270,7 @@ func PH01PublicStoryModels(c *gin.Context) {
 }
 
 func PH01PublicStoryChat(c *gin.Context) {
+	startedAt := time.Now()
 	rawBody, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		ph01ProtocolError(c, http.StatusBadRequest, ph01ErrInvalidPayload, err.Error())
@@ -307,7 +320,7 @@ func PH01PublicStoryChat(c *gin.Context) {
 		return
 	}
 
-	carrier, usingGroup, allowedModels, ok := ph01RequireRootPublicStoryCarrier(c)
+	carrier, usingGroup, allowedModels, ok := ph01RequireRootPublicStoryCarrier(c, encryptedChannel == nil)
 	if !ok {
 		return
 	}
@@ -320,11 +333,49 @@ func PH01PublicStoryChat(c *gin.Context) {
 		return
 	}
 
+	messageCount, messageChars := ph01PublicStoryMessageStats(chatReq.Messages)
+	logger.LogInfoFields(c.Request.Context(), "ph01_public_story_chat_relay_start", map[string]any{
+		"layer":            "gateway_handler",
+		"operation":        "public_story_chat",
+		"phase":            "relay",
+		"status":           "start",
+		"mode":             ph01PublicStoryMode(encryptedChannel != nil),
+		"model":            chatReq.Model,
+		"message_count":    messageCount,
+		"message_chars":    messageChars,
+		"request_bytes":    len(relayBody),
+		"using_group":      usingGroup,
+		"carrier_user_id":  carrier.UserId,
+		"carrier_token_id": carrier.Id,
+	})
 	status, responseBody := ph01RelayChat(c, carrier, usingGroup, relayBody)
 	if status >= http.StatusBadRequest {
+		logger.LogWarnFields(c.Request.Context(), "ph01_public_story_chat_relay_failure", map[string]any{
+			"layer":                  "gateway_handler",
+			"operation":              "public_story_chat",
+			"phase":                  "relay",
+			"status":                 "failure",
+			"mode":                   ph01PublicStoryMode(encryptedChannel != nil),
+			"model":                  chatReq.Model,
+			"status_code":            status,
+			"upstream_error_preview": ph01LogPreview(string(responseBody), 1200),
+			"response_bytes":         len(responseBody),
+			"duration_ms":            time.Since(startedAt).Milliseconds(),
+		})
 		ph01ProtocolError(c, status, ph01ErrInternalError, string(responseBody))
 		return
 	}
+	logger.LogInfoFields(c.Request.Context(), "ph01_public_story_chat_success", map[string]any{
+		"layer":          "gateway_handler",
+		"operation":      "public_story_chat",
+		"phase":          "handler",
+		"status":         "success",
+		"mode":           ph01PublicStoryMode(encryptedChannel != nil),
+		"model":          chatReq.Model,
+		"status_code":    status,
+		"response_bytes": len(responseBody),
+		"duration_ms":    time.Since(startedAt).Milliseconds(),
+	})
 	if encryptedChannel != nil {
 		if err := ph01TouchChannel(encryptedChannel); err != nil {
 			common.SysLog("failed to touch PH01 channel: " + err.Error())
@@ -634,7 +685,7 @@ func ph01ValidatePublicStoryChatRequest(chatReq ph01ChatRequest) error {
 	return nil
 }
 
-func ph01RequireRootPublicStoryCarrier(c *gin.Context) (*model.Token, string, []string, bool) {
+func ph01RequireRootPublicStoryCarrier(c *gin.Context, enforceClientIP bool) (*model.Token, string, []string, bool) {
 	carrier, err := model.EnsurePH01RootPublicToken()
 	if err != nil {
 		ph01ProtocolError(c, http.StatusServiceUnavailable, ph01ErrInternalError, err.Error())
@@ -644,7 +695,7 @@ func ph01RequireRootPublicStoryCarrier(c *gin.Context) (*model.Token, string, []
 		ph01ProtocolError(c, http.StatusServiceUnavailable, ph01ErrInvalidChannel, "PH01 public carrier key mismatch")
 		return nil, "", nil, false
 	}
-	if !ph01CarrierAllowsClientIP(c, carrier) {
+	if enforceClientIP && !ph01CarrierAllowsClientIP(c, carrier) {
 		ph01ProtocolError(c, http.StatusForbidden, ph01ErrAccessDenied, "client IP is not allowed")
 		return nil, "", nil, false
 	}
@@ -788,10 +839,74 @@ func ph01ParseEncryptedEnvelope(rawBody []byte) (ph01EncryptedEnvelope, bool) {
 }
 
 func ph01ProtocolError(c *gin.Context, status int, code string, message string) {
+	logger.LogWarnFields(c.Request.Context(), "ph01_protocol_error", map[string]any{
+		"layer":       "gateway_handler",
+		"operation":   "ph01_protocol",
+		"phase":       "error_response",
+		"status":      "failure",
+		"status_code": status,
+		"error_code":  code,
+		"message":     ph01LogPreview(message, 1200),
+		"method":      c.Request.Method,
+		"path":        c.Request.URL.Path,
+	})
 	c.JSON(status, gin.H{
 		"error":   code,
 		"message": message,
 	})
+}
+
+func ph01PublicStoryMode(encrypted bool) string {
+	if encrypted {
+		return "encrypted"
+	}
+	return "plaintext"
+}
+
+func ph01PublicStoryMessageStats(messages []map[string]interface{}) (int, int) {
+	chars := 0
+	for _, message := range messages {
+		chars += ph01ContentChars(message["content"])
+	}
+	return len(messages), chars
+}
+
+func ph01ContentChars(value interface{}) int {
+	switch typed := value.(type) {
+	case string:
+		return len([]rune(typed))
+	case []interface{}:
+		total := 0
+		for _, item := range typed {
+			total += ph01ContentChars(item)
+		}
+		return total
+	case map[string]interface{}:
+		if text, ok := typed["text"]; ok {
+			return ph01ContentChars(text)
+		}
+		if content, ok := typed["content"]; ok {
+			return ph01ContentChars(content)
+		}
+		return 0
+	default:
+		if value == nil {
+			return 0
+		}
+		return len([]rune(fmt.Sprint(value)))
+	}
+}
+
+func ph01LogPreview(value string, maxRunes int) string {
+	value = strings.TrimSpace(value)
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes]) + "...(truncated)"
 }
 
 func ph01ParsePubkey(pubkeyHex string) (*secp256k1.PublicKey, error) {

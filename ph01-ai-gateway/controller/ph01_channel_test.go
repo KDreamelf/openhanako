@@ -136,6 +136,7 @@ func TestPH01PublicStoryModelsAcceptsEncryptedEnvelope(t *testing.T) {
 		"unlimited_quota":      true,
 		"model_limits_enabled": true,
 		"model_limits":         "story-model",
+		"allow_ips":            "203.0.113.1/32",
 	}).Error)
 	require.NoError(t, db.Create(&model.Ability{
 		Group: "default", Model: "story-model", ChannelId: 1, Enabled: true,
@@ -169,6 +170,7 @@ func TestPH01PublicStoryModelsAcceptsEncryptedEnvelope(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/public/story/models", strings.NewReader(string(reqBody)))
+	c.Request.RemoteAddr = "198.51.100.2:12345"
 
 	PH01PublicStoryModels(c)
 

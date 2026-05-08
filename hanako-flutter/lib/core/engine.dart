@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:collection';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
 import 'package:path/path.dart' as p;
 
 import '../identity/identity.dart';
+import '../shared/diagnostics_log.dart';
 import '../shared/hana_home.dart';
 import 'agent_manager.dart';
 import 'browser_manager.dart';
@@ -80,10 +80,16 @@ class HanaEngine {
     HanakoBackendClient? backendClient,
   }) async {
     final h = home ?? await HanaHome.resolve();
-    final gateway = backendClient ?? HanakoBackendClient();
+    final publicStoryDiagnostics = DiagnosticsLog(
+      File(p.join(h.logsDir.path, 'public-story-recovery.jsonl')),
+      source: 'hanako-flutter',
+    );
+    final gateway =
+        backendClient ??
+        HanakoBackendClient(publicStoryDiagnosticsLog: publicStoryDiagnostics);
     final publicStoryCaller = _PublicStoryGatewayCaller(
       gateway,
-      logFile: File(p.join(h.logsDir.path, 'public-story-recovery.jsonl')),
+      diagnosticsLog: publicStoryDiagnostics,
     );
     late final IdentityRepository identityRepo;
     late final ModelManager models;
@@ -273,10 +279,10 @@ const Duration _publicStoryRateLimitInitialBackoff = Duration(
 const Duration _publicStoryRateLimitMaxBackoff = Duration(seconds: 30);
 
 class _PublicStoryGatewayCaller {
-  _PublicStoryGatewayCaller(this.gateway, {required this.logFile});
+  _PublicStoryGatewayCaller(this.gateway, {required this.diagnosticsLog});
 
   final HanakoBackendClient gateway;
-  final File logFile;
+  final DiagnosticsLog diagnosticsLog;
   final Queue<_PublicStoryJob> _ready = Queue<_PublicStoryJob>();
   final Random _random = Random();
   Future<String>? _modelFuture;
@@ -450,8 +456,9 @@ class _PublicStoryGatewayCaller {
   }) {
     final now = DateTime.now();
     final payload = <String, dynamic>{
-      'ts': now.toUtc().toIso8601String(),
-      'event': event,
+      'operation': 'public_story_recovery',
+      'phase': event,
+      'status': _publicStoryEventStatus(event),
       'active': _active,
       'ready': _ready.length,
       'sleeping': _sleeping,
@@ -472,17 +479,11 @@ class _PublicStoryGatewayCaller {
       }
     }
     if (fields != null) payload.addAll(fields);
-
-    try {
-      logFile.parent.createSync(recursive: true);
-      logFile.writeAsStringSync(
-        '${jsonEncode(payload)}\n',
-        mode: FileMode.append,
-        flush: true,
-      );
-    } catch (_) {
-      // 诊断日志不能影响登录恢复主流程。
-    }
+    diagnosticsLog.write(
+      event,
+      layer: 'public_story_scheduler',
+      fields: payload,
+    );
   }
 }
 
@@ -551,6 +552,24 @@ Map<String, dynamic> _objectErrorFields(Object error) {
     return _backendErrorFields(error);
   }
   return {'error_type': error.runtimeType.toString(), 'message': '$error'};
+}
+
+String _publicStoryEventStatus(String event) {
+  switch (event) {
+    case 'success':
+    case 'model_list_success':
+      return 'success';
+    case 'failure':
+    case 'model_list_failure':
+      return 'failure';
+    case 'rate_limit_retry':
+    case 'retry_ready':
+      return 'retry';
+    case 'enqueue':
+      return 'queued';
+    default:
+      return 'start';
+  }
 }
 
 bool _isPublicStoryRateLimit(HanakoBackendException error) {
