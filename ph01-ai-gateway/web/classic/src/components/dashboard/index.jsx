@@ -18,7 +18,10 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import React, { useContext, useEffect } from 'react';
+import { Banner, Button } from '@douyinfe/semi-ui';
+import { IconAlertTriangle } from '@douyinfe/semi-icons';
 import { getRelativeTime } from '../../helpers';
+import { API } from '../../helpers';
 import { UserContext } from '../../context/User';
 import { StatusContext } from '../../context/Status';
 
@@ -59,6 +62,8 @@ const Dashboard = () => {
 
   // ========== 主要数据管理 ==========
   const dashboardData = useDashboardData(userState, userDispatch, statusState);
+  const [unconfiguredBillingModels, setUnconfiguredBillingModels] =
+    React.useState([]);
 
   // ========== 图表管理 ==========
   const dashboardCharts = useDashboardCharts(
@@ -150,6 +155,22 @@ const Dashboard = () => {
     initChart();
   }, []);
 
+  useEffect(() => {
+    if (!dashboardData.isAdminUser) {
+      setUnconfiguredBillingModels([]);
+      return;
+    }
+    API.get('/api/models/unconfigured_billing')
+      .then((res) => {
+        if (res.data?.success) {
+          setUnconfiguredBillingModels(res.data.data || []);
+        }
+      })
+      .catch((err) => {
+        console.error(err);
+      });
+  }, [dashboardData.isAdminUser]);
+
   return (
     <div className='h-full'>
       <DashboardHeader
@@ -160,6 +181,50 @@ const Dashboard = () => {
         loading={dashboardData.loading}
         t={dashboardData.t}
       />
+
+      {dashboardData.isAdminUser && unconfiguredBillingModels.length > 0 && (
+        <div className='mb-4'>
+          <Banner
+            type='danger'
+            closeIcon={null}
+            icon={
+              <IconAlertTriangle
+                size='large'
+                style={{ color: 'var(--semi-color-danger)' }}
+              />
+            }
+            description={
+              <div className='flex flex-col gap-2 md:flex-row md:items-center md:justify-between'>
+                <div>
+                  <div className='font-medium'>
+                    {dashboardData.t(
+                      '存在未配置计费的模型，当前正在免费提供服务',
+                    )}
+                  </div>
+                  <div className='text-sm'>
+                    {unconfiguredBillingModels.slice(0, 8).join(', ')}
+                    {unconfiguredBillingModels.length > 8
+                      ? dashboardData.t(' 等 {{count}} 个模型', {
+                          count: unconfiguredBillingModels.length,
+                        })
+                      : ''}
+                  </div>
+                </div>
+                <Button
+                  type='danger'
+                  theme='solid'
+                  size='small'
+                  onClick={() => {
+                    dashboardData.navigate('/console/setting?tab=ratio');
+                  }}
+                >
+                  {dashboardData.t('立即配置')}
+                </Button>
+              </div>
+            }
+          />
+        </div>
+      )}
 
       <SearchModal
         searchModalVisible={dashboardData.searchModalVisible}

@@ -17,21 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func modelPriceNotConfiguredError(modelName string, userId int) error {
-	if model.IsAdmin(userId) {
-		return fmt.Errorf(
-			"模型 %s 的价格未配置。请前往「系统设置 → 运营设置」开启自用模式，或在「系统设置 → 分组与模型定价设置」中为该模型配置价格；"+
-				"Model %s price not configured. Go to System Settings → Operation Settings to enable self-use mode, or configure the model price in System Settings → Group & Model Pricing.",
-			modelName, modelName,
-		)
-	}
-	return fmt.Errorf(
-		"模型 %s 的价格尚未由管理员配置，暂时无法使用，请联系站点管理员开启该模型；"+
-			"Model %s has not been priced by the administrator yet. Please contact the site administrator to enable this model.",
-		modelName, modelName,
-	)
-}
-
 // https://docs.claude.com/en/docs/build-with-claude/prompt-caching#1-hour-cache-duration
 const claudeCacheCreation1hMultiplier = 6 / 3.75
 
@@ -69,9 +54,12 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 
 	groupRatioInfo := HandleGroupRatio(c, info)
 
-	// Check if this model uses tiered_expr billing
+	// Check if this model uses tiered_expr billing. An incomplete tiered
+	// config is treated as unconfigured billing and therefore free.
 	if billing_setting.GetBillingMode(info.OriginModelName) == billing_setting.BillingModeTieredExpr {
-		return modelPriceHelperTiered(c, info, promptTokens, meta, groupRatioInfo)
+		if expr, ok := billing_setting.GetBillingExpr(info.OriginModelName); ok && strings.TrimSpace(expr) != "" {
+			return modelPriceHelperTiered(c, info, promptTokens, meta, groupRatioInfo)
+		}
 	}
 
 	var preConsumedQuota int
@@ -92,25 +80,21 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		}
 		var success bool
 		var matchName string
-		modelRatio, success, matchName = ratio_setting.GetModelRatio(info.OriginModelName)
+		modelRatio, success, matchName = ratio_setting.GetConfiguredModelRatio(info.OriginModelName)
 		if !success {
-			acceptUnsetRatio := false
-			if info.UserSetting.AcceptUnsetRatioModel {
-				acceptUnsetRatio = true
-			}
-			if !acceptUnsetRatio {
-				return types.PriceData{}, modelPriceNotConfiguredError(matchName, info.UserId)
-			}
+			logger.LogWarn(c, fmt.Sprintf("model %s billing config missing, treating as free", matchName))
+			modelRatio = 0
+		} else {
+			completionRatio = ratio_setting.GetCompletionRatio(info.OriginModelName)
+			cacheRatio, _ = ratio_setting.GetCacheRatio(info.OriginModelName)
+			cacheCreationRatio, _ = ratio_setting.GetCreateCacheRatio(info.OriginModelName)
+			cacheCreationRatio5m = cacheCreationRatio
+			// 固定1h和5min缓存写入价格的比例
+			cacheCreationRatio1h = cacheCreationRatio * claudeCacheCreation1hMultiplier
+			imageRatio, _ = ratio_setting.GetImageRatio(info.OriginModelName)
+			audioRatio = ratio_setting.GetAudioRatio(info.OriginModelName)
+			audioCompletionRatio = ratio_setting.GetAudioCompletionRatio(info.OriginModelName)
 		}
-		completionRatio = ratio_setting.GetCompletionRatio(info.OriginModelName)
-		cacheRatio, _ = ratio_setting.GetCacheRatio(info.OriginModelName)
-		cacheCreationRatio, _ = ratio_setting.GetCreateCacheRatio(info.OriginModelName)
-		cacheCreationRatio5m = cacheCreationRatio
-		// 固定1h和5min缓存写入价格的比例
-		cacheCreationRatio1h = cacheCreationRatio * claudeCacheCreation1hMultiplier
-		imageRatio, _ = ratio_setting.GetImageRatio(info.OriginModelName)
-		audioRatio = ratio_setting.GetAudioRatio(info.OriginModelName)
-		audioCompletionRatio = ratio_setting.GetAudioCompletionRatio(info.OriginModelName)
 		ratio := modelRatio * groupRatioInfo.GroupRatio
 		preConsumedQuota = int(float64(preConsumedTokens) * ratio)
 	} else {
@@ -120,23 +104,9 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		preConsumedQuota = int(modelPrice * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
 	}
 
-	// check if free model pre-consume is disabled
-	if !operation_setting.GetQuotaSetting().EnableFreeModelPreConsume {
-		// if model price or ratio is 0, do not pre-consume quota
-		if groupRatioInfo.GroupRatio == 0 {
-			preConsumedQuota = 0
-			freeModel = true
-		} else if usePrice {
-			if modelPrice == 0 {
-				preConsumedQuota = 0
-				freeModel = true
-			}
-		} else {
-			if modelRatio == 0 {
-				preConsumedQuota = 0
-				freeModel = true
-			}
-		}
+	if groupRatioInfo.GroupRatio == 0 || (usePrice && modelPrice == 0) || (!usePrice && modelRatio == 0) {
+		preConsumedQuota = 0
+		freeModel = true
 	}
 
 	priceData := types.PriceData{
@@ -167,7 +137,7 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types.PriceData, error) {
 	groupRatioInfo := HandleGroupRatio(c, info)
 
-	modelPrice, success := ratio_setting.GetModelPrice(info.OriginModelName, true)
+	modelPrice, success := ratio_setting.GetModelPrice(info.OriginModelName, false)
 	usePrice := success
 	var modelRatio float64
 
@@ -179,13 +149,10 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types
 		} else {
 			var ratioSuccess bool
 			var matchName string
-			modelRatio, ratioSuccess, matchName = ratio_setting.GetModelRatio(info.OriginModelName)
-			acceptUnsetRatio := false
-			if info.UserSetting.AcceptUnsetRatioModel {
-				acceptUnsetRatio = true
-			}
-			if !ratioSuccess && !acceptUnsetRatio {
-				return types.PriceData{}, modelPriceNotConfiguredError(matchName, info.UserId)
+			modelRatio, ratioSuccess, matchName = ratio_setting.GetConfiguredModelRatio(info.OriginModelName)
+			if !ratioSuccess {
+				logger.LogWarn(c, fmt.Sprintf("model %s per-call billing config missing, treating as free", matchName))
+				modelRatio = 0
 			}
 		}
 	}
@@ -195,21 +162,17 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types
 
 	if usePrice {
 		quota = int(modelPrice * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
-		if !operation_setting.GetQuotaSetting().EnableFreeModelPreConsume {
-			if groupRatioInfo.GroupRatio == 0 || modelPrice == 0 {
-				quota = 0
-				freeModel = true
-			}
+		if groupRatioInfo.GroupRatio == 0 || modelPrice == 0 {
+			quota = 0
+			freeModel = true
 		}
 	} else {
 		// 按量计费：以模型倍率的一半作为预扣额度
 		quota = int(modelRatio / 2 * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
 		modelPrice = -1
-		if !operation_setting.GetQuotaSetting().EnableFreeModelPreConsume {
-			if groupRatioInfo.GroupRatio == 0 || modelRatio == 0 {
-				quota = 0
-				freeModel = true
-			}
+		if groupRatioInfo.GroupRatio == 0 || modelRatio == 0 {
+			quota = 0
+			freeModel = true
 		}
 	}
 
@@ -225,17 +188,7 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types
 }
 
 func HasModelBillingConfig(modelName string) bool {
-	if _, ok := ratio_setting.GetModelPrice(modelName, false); ok {
-		return true
-	}
-	if _, ok, _ := ratio_setting.GetModelRatio(modelName); ok {
-		return true
-	}
-	if billing_setting.GetBillingMode(modelName) != billing_setting.BillingModeTieredExpr {
-		return false
-	}
-	expr, ok := billing_setting.GetBillingExpr(modelName)
-	return ok && strings.TrimSpace(expr) != ""
+	return model.HasModelBillingConfig(modelName)
 }
 
 func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, promptTokens int, meta *types.TokenCountMeta, groupRatioInfo types.GroupRatioInfo) (types.PriceData, error) {

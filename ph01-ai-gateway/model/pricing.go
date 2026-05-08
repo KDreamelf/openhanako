@@ -309,9 +309,14 @@ func updatePricing() {
 			pricing.ModelPrice = modelPrice
 			pricing.QuotaType = 1
 		} else {
-			modelRatio, _, _ := ratio_setting.GetModelRatio(model)
+			modelRatio, hasRatioConfig, _ := ratio_setting.GetConfiguredModelRatio(model)
+			if !hasRatioConfig {
+				modelRatio = 0
+			}
 			pricing.ModelRatio = modelRatio
-			pricing.CompletionRatio = ratio_setting.GetCompletionRatio(model)
+			if hasRatioConfig {
+				pricing.CompletionRatio = ratio_setting.GetCompletionRatio(model)
+			}
 			pricing.QuotaType = 0
 		}
 		if cacheRatio, ok := ratio_setting.GetCacheRatio(model); ok {

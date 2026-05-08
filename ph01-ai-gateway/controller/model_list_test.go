@@ -189,9 +189,9 @@ func TestListModelsIncludesTieredBillingModel(t *testing.T) {
 
 	ids := decodeListModelsResponse(t, recorder)
 	require.Contains(t, ids, "zz-tiered-visible-model")
-	require.NotContains(t, ids, "zz-tiered-empty-expr-model")
-	require.NotContains(t, ids, "zz-tiered-missing-expr-model")
-	require.NotContains(t, ids, "zz-unpriced-model")
+	require.Contains(t, ids, "zz-tiered-empty-expr-model")
+	require.Contains(t, ids, "zz-tiered-missing-expr-model")
+	require.Contains(t, ids, "zz-unpriced-model")
 
 	pricingByName := pricingByModelName(model.GetPricing())
 	visiblePricing, ok := pricingByName["zz-tiered-visible-model"]
@@ -208,6 +208,11 @@ func TestListModelsIncludesTieredBillingModel(t *testing.T) {
 	require.True(t, ok)
 	require.Empty(t, missingExprPricing.BillingMode)
 	require.Empty(t, missingExprPricing.BillingExpr)
+
+	unpricedPricing, ok := pricingByName["zz-unpriced-model"]
+	require.True(t, ok)
+	require.Zero(t, unpricedPricing.ModelRatio)
+	require.Zero(t, unpricedPricing.CompletionRatio)
 }
 
 func TestListModelsTokenLimitIncludesTieredBillingModel(t *testing.T) {
@@ -236,7 +241,7 @@ func TestListModelsTokenLimitIncludesTieredBillingModel(t *testing.T) {
 
 	ids := decodeListModelsResponse(t, recorder)
 	require.Contains(t, ids, "zz-token-tiered-visible-model")
-	require.NotContains(t, ids, "zz-token-tiered-empty-expr-model")
-	require.NotContains(t, ids, "zz-token-tiered-missing-expr-model")
-	require.NotContains(t, ids, "zz-token-unpriced-model")
+	require.Contains(t, ids, "zz-token-tiered-empty-expr-model")
+	require.Contains(t, ids, "zz-token-tiered-missing-expr-model")
+	require.Contains(t, ids, "zz-token-unpriced-model")
 }

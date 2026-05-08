@@ -338,3 +338,9 @@ export type UpstreamRatiosResponse = {
     test_results: TestResult[]
   }
 }
+
+export type UnconfiguredBillingModelsResponse = {
+  success: boolean
+  message?: string
+  data?: string[]
+}

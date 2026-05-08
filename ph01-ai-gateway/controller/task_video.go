@@ -156,7 +156,7 @@ func updateVideoSingleTask(ctx context.Context, adaptor channel.TaskAdaptor, cha
 			if err := json.Unmarshal(task.Data, &taskData); err == nil {
 				if modelName, ok := taskData["model"].(string); ok && modelName != "" {
 					// 获取模型价格和倍率
-					modelRatio, hasRatioSetting, _ := ratio_setting.GetModelRatio(modelName)
+					modelRatio, hasRatioSetting, _ := ratio_setting.GetConfiguredModelRatio(modelName)
 					// 只有配置了倍率(非固定价格)时才按 token 重新计费
 					if hasRatioSetting && modelRatio > 0 {
 						// 获取用户和组的倍率信息

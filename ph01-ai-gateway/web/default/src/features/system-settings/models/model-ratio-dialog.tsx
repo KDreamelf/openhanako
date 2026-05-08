@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import * as z from 'zod'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { ChevronDown } from 'lucide-react'
+import { ChevronDown, Copy } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import {
@@ -70,6 +70,34 @@ type ModelRatioDialogProps = {
   onOpenChange: (open: boolean) => void
   onSave: (data: ModelRatioData) => void
   editData?: ModelRatioData | null
+  configuredModels?: ModelRatioData[]
+}
+
+type Translate = (key: string, options?: Record<string, unknown>) => string
+
+function seedSimilarSearch(name?: string) {
+  const raw = (name || '').trim()
+  if (!raw) return ''
+  const suffixTrimmed = raw.replace(
+    /[-_](thinking|nothinking|preview|latest|turbo|search|reasoning)([-_].*)?$/i,
+    ''
+  )
+  if (suffixTrimmed && suffixTrimmed !== raw) return suffixTrimmed
+  const lastDash = raw.lastIndexOf('-')
+  return lastDash > 0 ? raw.slice(0, lastDash) : raw
+}
+
+function formatFollowSummary(model: ModelRatioData, t: Translate) {
+  if (model.billingMode === 'tiered_expr') {
+    return t('Tiered billing expression')
+  }
+  if (model.price) {
+    return t('Fixed price: {{price}}', { price: model.price })
+  }
+  return t('Ratio {{ratio}}, completion {{completion}}', {
+    ratio: model.ratio || '-',
+    completion: model.completionRatio || '-',
+  })
 }
 
 export function ModelRatioDialog({
@@ -77,6 +105,7 @@ export function ModelRatioDialog({
   onOpenChange,
   onSave,
   editData,
+  configuredModels = [],
 }: ModelRatioDialogProps) {
   const { t } = useTranslation()
   const [pricingMode, setPricingMode] = useState<PricingMode>('per-token')
@@ -86,6 +115,7 @@ export function ModelRatioDialog({
   const [completionPrice, setCompletionPrice] = useState('')
   const [billingExpr, setBillingExpr] = useState('')
   const [requestRuleExpr, setRequestRuleExpr] = useState('')
+  const [similarSearch, setSimilarSearch] = useState('')
   const isEditMode = !!editData
 
   const form = useForm<ModelDialogFormValues>({
@@ -102,11 +132,11 @@ export function ModelRatioDialog({
       audioCompletionRatio: '',
     },
   })
+  const currentModelName = form.watch('name')
 
   useEffect(() => {
     if (editData) {
       form.reset(editData)
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setBillingExpr(editData.billingExpr || '')
       setRequestRuleExpr(editData.requestRuleExpr || '')
 
@@ -125,6 +155,7 @@ export function ModelRatioDialog({
           }
         }
       }
+      setSimilarSearch(seedSimilarSearch(editData.name))
     } else {
       form.reset({
         name: '',
@@ -144,8 +175,26 @@ export function ModelRatioDialog({
       setBillingExpr('')
       setRequestRuleExpr('')
       setAdvancedOpen(false)
+      setSimilarSearch('')
     }
   }, [editData, form, open])
+
+  const similarModels = useMemo(() => {
+    const query = similarSearch.trim().toLowerCase()
+    if (!query) return []
+    const currentName = currentModelName.toLowerCase()
+    return configuredModels
+      .filter((item) => item.name && item.name !== currentModelName)
+      .filter((item) => {
+        const candidate = item.name.toLowerCase()
+        return (
+          candidate.startsWith(query) ||
+          candidate.includes(query) ||
+          currentName.startsWith(candidate)
+        )
+      })
+      .slice(0, 8)
+  }, [configuredModels, currentModelName, similarSearch])
 
   const handleSubmit = (values: ModelDialogFormValues) => {
     // Always pass through every field. The visual editor decides what to
@@ -207,6 +256,47 @@ export function ModelRatioDialog({
     }
   }
 
+  const applyFollowModel = (source: ModelRatioData) => {
+    setPricingMode(source.billingMode || 'per-token')
+    setBillingExpr(source.billingExpr || '')
+    setRequestRuleExpr(source.requestRuleExpr || '')
+    form.setValue('price', source.price || '', { shouldDirty: true })
+    form.setValue('ratio', source.ratio || '', { shouldDirty: true })
+    form.setValue('cacheRatio', source.cacheRatio || '', { shouldDirty: true })
+    form.setValue('createCacheRatio', source.createCacheRatio || '', {
+      shouldDirty: true,
+    })
+    form.setValue('completionRatio', source.completionRatio || '', {
+      shouldDirty: true,
+    })
+    form.setValue('imageRatio', source.imageRatio || '', { shouldDirty: true })
+    form.setValue('audioRatio', source.audioRatio || '', { shouldDirty: true })
+    form.setValue('audioCompletionRatio', source.audioCompletionRatio || '', {
+      shouldDirty: true,
+    })
+
+    if (source.ratio) {
+      const nextPromptPrice = parseFloat(source.ratio) * 2
+      setPromptPrice(
+        Number.isFinite(nextPromptPrice) ? nextPromptPrice.toString() : ''
+      )
+      if (source.completionRatio && Number.isFinite(nextPromptPrice)) {
+        const nextCompletionPrice =
+          nextPromptPrice * parseFloat(source.completionRatio)
+        setCompletionPrice(
+          Number.isFinite(nextCompletionPrice)
+            ? nextCompletionPrice.toString()
+            : ''
+        )
+      } else {
+        setCompletionPrice('')
+      }
+    } else {
+      setPromptPrice('')
+      setCompletionPrice('')
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-[680px]'>
@@ -245,6 +335,49 @@ export function ModelRatioDialog({
                 </FormItem>
               )}
             />
+
+            {configuredModels.length > 0 && (
+              <div className='rounded-lg border p-3'>
+                <div className='space-y-2'>
+                  <Label>{t('Follow similar model')}</Label>
+                  <Input
+                    value={similarSearch}
+                    onChange={(event) => setSimilarSearch(event.target.value)}
+                    placeholder={t('Search configured models by prefix')}
+                  />
+                  <p className='text-muted-foreground text-xs'>
+                    {t(
+                      'Copy pricing from an existing model when the upstream model only differs by a suffix or parameter.'
+                    )}
+                  </p>
+                </div>
+                {similarModels.length > 0 && (
+                  <div className='mt-3 space-y-2'>
+                    {similarModels.map((model) => (
+                      <button
+                        key={model.name}
+                        type='button'
+                        className='hover:bg-muted flex w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left text-sm'
+                        onClick={() => applyFollowModel(model)}
+                      >
+                        <div className='min-w-0'>
+                          <div className='truncate font-medium'>
+                            {model.name}
+                          </div>
+                          <div className='text-muted-foreground truncate text-xs'>
+                            {formatFollowSummary(model, t)}
+                          </div>
+                        </div>
+                        <span className='text-primary flex shrink-0 items-center gap-1 text-xs font-medium'>
+                          <Copy className='h-3.5 w-3.5' />
+                          {t('Follow')}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className='space-y-4'>
               <Label>{t('Pricing mode')}</Label>

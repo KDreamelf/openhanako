@@ -25,9 +25,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/ph01auth"
-	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -605,17 +603,8 @@ func ph01AllowedModelsForCarrierWithOptions(userID int, carrier *model.Token, ex
 		}
 	}
 
-	acceptUnsetRatioModel := operation_setting.SelfUseModeEnabled
-	if !acceptUnsetRatioModel {
-		if userSettings, err := model.GetUserSetting(userID, false); err == nil && userSettings.AcceptUnsetRatioModel {
-			acceptUnsetRatioModel = true
-		}
-	}
 	models := make([]string, 0, len(modelSet))
 	for modelName := range modelSet {
-		if !acceptUnsetRatioModel && !helper.HasModelBillingConfig(modelName) {
-			continue
-		}
 		models = append(models, modelName)
 	}
 	models = ph01OrderAllowedModels(carrier, models)

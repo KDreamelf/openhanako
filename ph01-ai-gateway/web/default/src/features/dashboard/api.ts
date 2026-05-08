@@ -50,3 +50,12 @@ export async function getUptimeStatus() {
   )
   return res.data
 }
+
+export async function getUnconfiguredBillingModels() {
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: string[]
+  }>('/api/models/unconfigured_billing')
+  return res.data
+}

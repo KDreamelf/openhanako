@@ -4028,6 +4028,21 @@
     "home.cta.bridgeLeft": "Material delivered",
     "home.cta.bridgeGate": "Verification and context",
     "home.cta.bridgeRight": "Judgement inherited",
+    "存在未配置计费的模型，当前正在免费提供服务": "Some models have no billing configuration and are currently being served for free",
+    "{{count}} enabled channel models have no billing configuration.": "{{count}} enabled channel models have no billing configuration.",
+    " and {{count}} more": " and {{count}} more",
+    "+{{count}} more": "+{{count}} more",
+    "Configure now": "Configure now",
+    "Unconfigured billing": "Unconfigured billing",
+    "Unconfigured billing models are currently free": "Unconfigured billing models are currently free",
+    "The following enabled channel models have no billing configuration. They are allowed to run and will be billed as free until configured.": "The following enabled channel models have no billing configuration. They are allowed to run and will be billed as free until configured.",
+    "Follow similar model": "Follow similar model",
+    "Search configured models by prefix": "Search configured models by prefix",
+    "Copy pricing from an existing model when the upstream model only differs by a suffix or parameter.": "Copy pricing from an existing model when the upstream model only differs by a suffix or parameter.",
+    "Follow": "Follow",
+    "Tiered billing expression": "Tiered billing expression",
+    "Fixed price: {{price}}": "Fixed price: {{price}}",
+    "Ratio {{ratio}}, completion {{completion}}": "Ratio {{ratio}}, completion {{completion}}",
     "Zoom": "Zoom"
   }
 }

@@ -11,8 +11,9 @@ import {
   getPaginationRowModel,
   useReactTable,
 } from '@tanstack/react-table'
-import { Pencil, Plus, Trash2 } from 'lucide-react'
+import { AlertTriangle, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Table,
@@ -46,6 +47,7 @@ type ModelRatioVisualEditorProps = {
   audioCompletionRatio: string
   billingMode: string
   billingExpr: string
+  unconfiguredBillingModels: string[]
   onChange: (field: string, value: string) => void
 }
 
@@ -63,6 +65,7 @@ type ModelRow = {
   billingExpr?: string
   requestRuleExpr?: string
   hasConflict: boolean
+  isUnconfigured?: boolean
 }
 
 const STORAGE_KEY = 'model-ratio-column-visibility'
@@ -84,6 +87,7 @@ export const ModelRatioVisualEditor = memo(
     audioCompletionRatio,
     billingMode,
     billingExpr,
+    unconfiguredBillingModels,
     onChange,
   }: ModelRatioVisualEditorProps) {
     const { t } = useTranslation()
@@ -193,6 +197,10 @@ export const ModelRatioVisualEditor = memo(
         ...Object.keys(billingExprMap),
       ])
 
+      for (const name of unconfiguredBillingModels) {
+        modelNames.add(name)
+      }
+
       const modelData: ModelRow[] = Array.from(modelNames).map((name) => {
         const price = priceMap[name]?.toString() || ''
         const ratio = ratioMap[name]?.toString() || ''
@@ -225,6 +233,7 @@ export const ModelRatioVisualEditor = memo(
             audioRatio: audio,
             audioCompletionRatio: audioCompletion,
             hasConflict: false,
+            isUnconfigured: unconfiguredBillingModels.includes(name),
           }
         }
 
@@ -239,6 +248,7 @@ export const ModelRatioVisualEditor = memo(
           audioRatio: audio,
           audioCompletionRatio: audioCompletion,
           billingMode: price !== '' ? 'per-request' : 'per-token',
+          isUnconfigured: unconfiguredBillingModels.includes(name),
           hasConflict:
             price !== '' &&
             (ratio !== '' ||
@@ -263,10 +273,11 @@ export const ModelRatioVisualEditor = memo(
       audioCompletionRatio,
       billingMode,
       billingExpr,
+      unconfiguredBillingModels,
     ])
 
-    const handleEdit = useCallback((model: ModelRow) => {
-      setEditData({
+    const toDialogData = useCallback((model: ModelRow): ModelRatioData => {
+      return {
         name: model.name,
         price: model.price,
         ratio: model.ratio,
@@ -284,6 +295,26 @@ export const ModelRatioVisualEditor = memo(
               : 'per-token',
         billingExpr: model.billingExpr,
         requestRuleExpr: model.requestRuleExpr,
+      }
+    }, [])
+
+    const configuredModels = useMemo(
+      () => models.filter((model) => !model.isUnconfigured).map(toDialogData),
+      [models, toDialogData]
+    )
+
+    const handleEdit = useCallback(
+      (model: ModelRow) => {
+        setEditData(toDialogData(model))
+        setDialogOpen(true)
+      },
+      [toDialogData]
+    )
+
+    const handleConfigureUnconfigured = useCallback((name: string) => {
+      setEditData({
+        name,
+        billingMode: 'per-token',
       })
       setDialogOpen(true)
     }, [])
@@ -414,6 +445,13 @@ export const ModelRatioVisualEditor = memo(
                   copyable={false}
                 />
               )}
+              {row.original.isUnconfigured && (
+                <StatusBadge
+                  label={t('Unconfigured billing')}
+                  variant='danger'
+                  copyable={false}
+                />
+              )}
             </div>
           ),
           enableHiding: false,
@@ -535,6 +573,7 @@ export const ModelRatioVisualEditor = memo(
                 variant='ghost'
                 size='sm'
                 onClick={() => handleDelete(row.original.name)}
+                disabled={row.original.isUnconfigured}
               >
                 <Trash2 className='h-4 w-4' />
               </Button>
@@ -700,6 +739,46 @@ export const ModelRatioVisualEditor = memo(
 
     return (
       <div className='space-y-4'>
+        {unconfiguredBillingModels.length > 0 && (
+          <Alert
+            variant='destructive'
+            className='border-destructive/70 bg-destructive/10'
+          >
+            <AlertTriangle className='h-4 w-4' />
+            <AlertTitle>
+              {t('Unconfigured billing models are currently free')}
+            </AlertTitle>
+            <AlertDescription className='space-y-3'>
+              <p>
+                {t(
+                  'The following enabled channel models have no billing configuration. They are allowed to run and will be billed as free until configured.'
+                )}
+              </p>
+              <div className='flex flex-wrap gap-2'>
+                {unconfiguredBillingModels.slice(0, 20).map((name) => (
+                  <Button
+                    key={name}
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    className='border-destructive/40 bg-background/80 h-8'
+                    onClick={() => handleConfigureUnconfigured(name)}
+                  >
+                    {name}
+                  </Button>
+                ))}
+                {unconfiguredBillingModels.length > 20 && (
+                  <span className='text-muted-foreground self-center text-xs'>
+                    {t('+{{count}} more', {
+                      count: unconfiguredBillingModels.length - 20,
+                    })}
+                  </span>
+                )}
+              </div>
+            </AlertDescription>
+          </Alert>
+        )}
+
         <div className='flex items-center justify-between gap-4'>
           <DataTableToolbar
             table={table}
@@ -763,6 +842,7 @@ export const ModelRatioVisualEditor = memo(
           onOpenChange={setDialogOpen}
           onSave={handleSave}
           editData={editData}
+          configuredModels={configuredModels}
         />
       </div>
     )
@@ -780,6 +860,8 @@ export const ModelRatioVisualEditor = memo(
       prevProps.audioCompletionRatio === nextProps.audioCompletionRatio &&
       prevProps.billingMode === nextProps.billingMode &&
       prevProps.billingExpr === nextProps.billingExpr &&
+      prevProps.unconfiguredBillingModels ===
+        nextProps.unconfiguredBillingModels &&
       prevProps.onChange === nextProps.onChange
     )
   }

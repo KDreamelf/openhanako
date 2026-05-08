@@ -6,10 +6,12 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -59,4 +61,56 @@ func TestModelPriceHelperTieredUsesPreloadedRequestInput(t *testing.T) {
 	require.Equal(t, "stream", info.TieredBillingSnapshot.EstimatedTier)
 	require.Equal(t, billing_setting.BillingModeTieredExpr, info.TieredBillingSnapshot.BillingMode)
 	require.Equal(t, common.QuotaPerUnit, info.TieredBillingSnapshot.QuotaPerUnit)
+}
+
+func TestModelPriceHelperTreatsUnconfiguredModelAsFree(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	saved := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		saved[key] = value
+		return nil
+	}))
+	oldSelfUseMode := operation_setting.SelfUseModeEnabled
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(saved))
+		operation_setting.SelfUseModeEnabled = oldSelfUseMode
+	})
+
+	operation_setting.SelfUseModeEnabled = true
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"ModelPrice":                      `{}`,
+		"ModelRatio":                      `{}`,
+		"CompletionRatio":                 `{}`,
+		"CacheRatio":                      `{}`,
+		"CreateCacheRatio":                `{}`,
+		"ImageRatio":                      `{}`,
+		"AudioRatio":                      `{}`,
+		"AudioCompletionRatio":            `{}`,
+		"billing_setting.billing_mode":    `{}`,
+		"billing_setting.billing_expr":    `{}`,
+		"quota_setting":                   `{"enable_free_model_pre_consume":true}`,
+		"group_ratio_setting.group_ratio": `{"default":1}`,
+	}))
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "zz-unconfigured-free-model",
+		UserId:          123,
+		UserGroup:       "default",
+		UsingGroup:      "default",
+		UserSetting: dto.UserSetting{
+			AcceptUnsetRatioModel: false,
+		},
+	}
+
+	priceData, err := ModelPriceHelper(ctx, info, 1000, &types.TokenCountMeta{})
+	require.NoError(t, err)
+	require.True(t, priceData.FreeModel)
+	require.Zero(t, priceData.ModelRatio)
+	require.Zero(t, priceData.CompletionRatio)
+	require.Zero(t, priceData.QuotaToPreConsume)
 }

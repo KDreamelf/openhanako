@@ -106,8 +106,10 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 	textOutTokens := usage.OutputTokenDetails.TextTokens
 	audioInputTokens := usage.InputTokenDetails.AudioTokens
 	audioOutTokens := usage.OutputTokenDetails.AudioTokens
-	groupRatio := ratio_setting.GetGroupRatio(relayInfo.UsingGroup)
-	modelRatio, _, _ := ratio_setting.GetModelRatio(modelName)
+	groupRatio := relayInfo.PriceData.GroupRatioInfo.GroupRatio
+	modelRatio := relayInfo.PriceData.ModelRatio
+	modelPrice := relayInfo.PriceData.ModelPrice
+	usePrice := relayInfo.PriceData.UsePrice
 
 	autoGroup, exists := common.GetContextKey(ctx, constant.ContextKeyAutoGroup)
 	if exists {
@@ -132,7 +134,8 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 			AudioTokens: audioOutTokens,
 		},
 		ModelName:  modelName,
-		UsePrice:   relayInfo.UsePrice,
+		UsePrice:   usePrice,
+		ModelPrice: modelPrice,
 		ModelRatio: modelRatio,
 		GroupRatio: actualGroupRatio,
 	}

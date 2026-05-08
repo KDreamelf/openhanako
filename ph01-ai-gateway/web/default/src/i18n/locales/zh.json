@@ -4028,6 +4028,21 @@
     "home.cta.bridgeLeft": "资料送达",
     "home.cta.bridgeGate": "验证与上下文",
     "home.cta.bridgeRight": "判断可继承",
+    "存在未配置计费的模型，当前正在免费提供服务": "存在未配置计费的模型，当前正在免费提供服务",
+    "{{count}} enabled channel models have no billing configuration.": "{{count}} 个已启用渠道模型尚未配置计费。",
+    " and {{count}} more": "，另有 {{count}} 个",
+    "+{{count}} more": "另有 {{count}} 个",
+    "Configure now": "立即配置",
+    "Unconfigured billing": "计费未配置",
+    "Unconfigured billing models are currently free": "未配置计费的模型当前按免费处理",
+    "The following enabled channel models have no billing configuration. They are allowed to run and will be billed as free until configured.": "以下已启用渠道模型尚未配置计费。它们可以正常运行，并会在配置前按免费处理。",
+    "Follow similar model": "跟随相似模型",
+    "Search configured models by prefix": "按前缀搜索已配置模型",
+    "Copy pricing from an existing model when the upstream model only differs by a suffix or parameter.": "当上游模型只差后缀或参数时，可复制已有模型的计费配置。",
+    "Follow": "跟随",
+    "Tiered billing expression": "阶梯计费表达式",
+    "Fixed price: {{price}}": "固定价格：{{price}}",
+    "Ratio {{ratio}}, completion {{completion}}": "倍率 {{ratio}}，补全 {{completion}}",
     "Zoom": "缩放"
   }
 }

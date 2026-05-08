@@ -2,12 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import * as z from 'zod'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ConfirmDialog } from '@/components/confirm-dialog'
-import { resetModelRatios } from '../api'
+import { getUnconfiguredBillingModels, resetModelRatios } from '../api'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 import { GroupRatioForm } from './group-ratio-form'
@@ -195,6 +195,10 @@ export function RatioSettingsCard({
   const updateOption = useUpdateOption()
   const queryClient = useQueryClient()
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const { data: unconfiguredBillingModelsResponse } = useQuery({
+    queryKey: ['models', 'unconfigured-billing'],
+    queryFn: getUnconfiguredBillingModels,
+  })
 
   const resetMutation = useMutation({
     mutationFn: resetModelRatios,
@@ -438,6 +442,9 @@ export function RatioSettingsCard({
             onReset={handleResetRatios}
             isSaving={updateOption.isPending}
             isResetting={resetMutation.isPending}
+            unconfiguredBillingModels={
+              unconfiguredBillingModelsResponse?.data || []
+            }
           />
         </TabsContent>
 

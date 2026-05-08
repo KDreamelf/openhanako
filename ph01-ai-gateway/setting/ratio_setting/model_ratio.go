@@ -416,6 +416,21 @@ func GetModelRatio(name string) (float64, bool, string) {
 	return ratio, true, name
 }
 
+func GetConfiguredModelRatio(name string) (float64, bool, string) {
+	name = FormatMatchingModelName(name)
+
+	ratio, ok := modelRatioMap.Get(name)
+	if !ok {
+		if strings.HasSuffix(name, CompactModelSuffix) {
+			if wildcardRatio, ok := modelRatioMap.Get(CompactWildcardModelKey); ok {
+				return wildcardRatio, true, name
+			}
+		}
+		return 0, false, name
+	}
+	return ratio, true, name
+}
+
 func DefaultModelRatio2JSONString() string {
 	jsonBytes, err := common.Marshal(defaultModelRatio)
 	if err != nil {
@@ -747,9 +762,9 @@ func GetModelRatioOrPrice(model string) (float64, bool, bool) { // price or rati
 	if usePrice {
 		return price, true, true
 	}
-	modelRatio, success, _ := GetModelRatio(model)
+	modelRatio, success, _ := GetConfiguredModelRatio(model)
 	if success {
 		return modelRatio, false, true
 	}
-	return 37.5, false, false
+	return 0, false, false
 }

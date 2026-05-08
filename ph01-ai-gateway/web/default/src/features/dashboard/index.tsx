@@ -11,19 +11,20 @@ import {
   CardStaggerItem,
   FadeIn,
 } from '@/components/page-transition'
-import {
-  buildDefaultDashboardFilters,
-  getSavedChartPreferences,
-  saveChartPreferences,
-} from './lib'
 import { ModelsChartPreferences } from './components/models/models-chart-preferences'
 import { ModelsFilter } from './components/models/models-filter-dialog'
 import { AnnouncementsPanel } from './components/overview/announcements-panel'
 import { ApiInfoPanel } from './components/overview/api-info-panel'
 import { FAQPanel } from './components/overview/faq-panel'
 import { SummaryCards } from './components/overview/summary-cards'
+import { UnconfiguredBillingBanner } from './components/overview/unconfigured-billing-banner'
 import { UptimePanel } from './components/overview/uptime-panel'
 import { DEFAULT_TIME_GRANULARITY } from './constants'
+import {
+  buildDefaultDashboardFilters,
+  getSavedChartPreferences,
+  saveChartPreferences,
+} from './lib'
 import {
   type DashboardSectionId,
   DASHBOARD_DEFAULT_SECTION,
@@ -168,7 +169,8 @@ export function Dashboard() {
     },
     [navigate]
   )
-  const showSectionTabs = activeSection !== 'overview' && visibleSections.length > 1
+  const showSectionTabs =
+    activeSection !== 'overview' && visibleSections.length > 1
   const modelActions =
     activeSection === 'models' ? (
       <>
@@ -216,6 +218,7 @@ export function Dashboard() {
           )}
           {activeSection === 'overview' && (
             <>
+              <UnconfiguredBillingBanner enabled={isAdmin} />
               <SummaryCards />
               <CardStaggerContainer className='grid grid-cols-1 gap-3 sm:gap-4 lg:grid-cols-2'>
                 <CardStaggerItem>
