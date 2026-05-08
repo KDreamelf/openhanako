@@ -365,8 +365,9 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       throw StateError('认证中心返回的新公钥指纹与本机新身份不一致');
     }
 
-    String? warning;
+    String? warning = _textValue(result.gatewayRevokeWarning);
     var localPersisted = false;
+    var gatewaySynced = false;
     try {
       await repo.replaceCurrentIdentity(replacement.identity);
       localPersisted = true;
@@ -395,8 +396,11 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     if (localPersisted) {
       try {
         await eng.syncGatewayModels(replacement.identity);
+        gatewaySynced = true;
       } catch (e) {
-        warning = warning == null ? '密钥已轮换，但模型同步失败：$e' : '$warning；模型同步失败：$e';
+        warning = warning == null
+            ? '密钥已轮换，但通信通道和模型同步失败：$e'
+            : '$warning；通信通道和模型同步失败：$e';
       }
     }
 
@@ -404,6 +408,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       registration: replacement,
       result: result,
       localPersisted: localPersisted,
+      gatewaySynced: gatewaySynced,
       warning: warning,
     );
   }
@@ -2018,12 +2023,14 @@ class _PubkeyRotationOutcome {
     required this.registration,
     required this.result,
     required this.localPersisted,
+    required this.gatewaySynced,
     this.warning,
   });
 
   final IdentityRegistration registration;
   final PubkeyRotationResult result;
   final bool localPersisted;
+  final bool gatewaySynced;
   final String? warning;
 }
 
@@ -2244,7 +2251,11 @@ class _PubkeyRotationDialogState extends State<_PubkeyRotationDialog> {
             ),
           ),
           child: Text(
-            outcome.localPersisted ? '轮换完成：本机身份已切换到新密钥。' : '云端已完成轮换，但本机写入未完成。',
+            outcome.localPersisted
+                ? (outcome.gatewaySynced
+                      ? '轮换完成：本机身份已切换到新密钥，并已刷新通信通道。'
+                      : '轮换完成：本机身份已切换到新密钥，通信通道待重连。')
+                : '云端已完成轮换，但本机写入未完成。',
             style: theme.textTheme.bodyMedium?.copyWith(
               color: outcome.localPersisted ? c.onPrimaryContainer : c.error,
             ),

@@ -109,6 +109,7 @@ type RotatePubkeyResponse struct {
 	NewPubkeyHash        string `json:"new_pubkey_hash"`
 	EffectiveAt          int64  `json:"effective_at"`
 	RevokedPreviousCount int64  `json:"revoked_previous_count"`
+	GatewayRevokeWarning string `json:"gateway_revoke_warning,omitempty"`
 }
 
 // ========== §5.2 故事恢复登录 ==========

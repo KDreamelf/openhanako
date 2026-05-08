@@ -56,6 +56,7 @@ func SetApiRouter(router *gin.Engine) {
 			ph01Route.POST("/auth/protocol/complete", middleware.CriticalRateLimit(), controller.PH01ProtocolComplete)
 			ph01Route.POST("/auth/pubkeys/verify", middleware.AdminAuth(), controller.PH01VerifyPubkeys)
 			ph01Route.POST("/internal/users/sync", controller.PH01InternalSyncUser)
+			ph01Route.POST("/internal/channels/revoke", controller.PH01InternalRevokeChannels)
 		}
 
 		// OAuth routes - specific routes must come before :provider wildcard

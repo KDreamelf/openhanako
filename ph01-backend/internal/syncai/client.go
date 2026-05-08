@@ -34,6 +34,14 @@ func NewClient(baseURL, internalToken string, timeout time.Duration) *Client {
 }
 
 func (c *Client) SyncUser(ctx context.Context, in auth.GatewayUserSyncRequest) error {
+	return c.postJSON(ctx, "/api/ph01/internal/users/sync", in)
+}
+
+func (c *Client) RevokePH01Channels(ctx context.Context, in auth.GatewayChannelRevokeRequest) error {
+	return c.postJSON(ctx, "/api/ph01/internal/channels/revoke", in)
+}
+
+func (c *Client) postJSON(ctx context.Context, path string, in any) error {
 	if c == nil || strings.TrimSpace(c.BaseURL) == "" {
 		return fmt.Errorf("ai gateway sync base_url is empty")
 	}
@@ -41,7 +49,7 @@ func (c *Client) SyncUser(ctx context.Context, in auth.GatewayUserSyncRequest) e
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/ph01/internal/users/sync", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

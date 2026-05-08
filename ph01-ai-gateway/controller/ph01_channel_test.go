@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -27,6 +28,96 @@ func TestPH01ListModelsRequiresChannelID(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), ph01ErrInvalidPayload)
+}
+
+func TestPH01RevokeChannelsForUserClearsOnlyTargetUser(t *testing.T) {
+	oldChannels := ph01Channels
+	oldRedisEnabled := common.RedisEnabled
+	ph01Channels = sync.Map{}
+	common.RedisEnabled = false
+	t.Cleanup(func() {
+		ph01Channels = oldChannels
+		common.RedisEnabled = oldRedisEnabled
+	})
+
+	require.NoError(t, ph01StoreChannel(&ph01Channel{
+		ID:            "target-1",
+		GatewayUserID: 10,
+		PH01UserID:    42,
+		AESKeyHex:     strings.Repeat("0", 64),
+		ExpiresAt:     time.Now().Add(time.Minute),
+	}))
+	require.NoError(t, ph01StoreChannel(&ph01Channel{
+		ID:            "target-2",
+		GatewayUserID: 10,
+		PH01UserID:    42,
+		AESKeyHex:     strings.Repeat("1", 64),
+		ExpiresAt:     time.Now().Add(time.Minute),
+	}))
+	require.NoError(t, ph01StoreChannel(&ph01Channel{
+		ID:            "other",
+		GatewayUserID: 11,
+		PH01UserID:    43,
+		AESKeyHex:     strings.Repeat("2", 64),
+		ExpiresAt:     time.Now().Add(time.Minute),
+	}))
+
+	revoked, err := ph01RevokeChannelsForUser(42)
+	require.NoError(t, err)
+	require.Equal(t, 2, revoked)
+	target1, err := ph01GetChannel("target-1")
+	require.NoError(t, err)
+	require.Nil(t, target1)
+	target2, err := ph01GetChannel("target-2")
+	require.NoError(t, err)
+	require.Nil(t, target2)
+	other, err := ph01GetChannel("other")
+	require.NoError(t, err)
+	require.NotNil(t, other)
+}
+
+func TestPH01InternalRevokeChannelsEndpoint(t *testing.T) {
+	oldChannels := ph01Channels
+	oldRedisEnabled := common.RedisEnabled
+	ph01Channels = sync.Map{}
+	common.RedisEnabled = false
+	t.Cleanup(func() {
+		ph01Channels = oldChannels
+		common.RedisEnabled = oldRedisEnabled
+	})
+
+	t.Setenv("PH01_AUTH_INTERNAL_TOKEN", "sync-secret")
+	require.NoError(t, ph01StoreChannel(&ph01Channel{
+		ID:            "target",
+		GatewayUserID: 10,
+		PH01UserID:    42,
+		AESKeyHex:     strings.Repeat("0", 64),
+		ExpiresAt:     time.Now().Add(time.Minute),
+	}))
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/revoke", PH01InternalRevokeChannels)
+	body := []byte(`{"ph01_user_id":42,"reason":"pubkey_rotation"}`)
+	req := httptest.NewRequest(http.MethodPost, "/revoke", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sync-secret")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			RevokedCount int `json:"revoked_count"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.True(t, resp.Success)
+	require.Equal(t, 1, resp.Data.RevokedCount)
+	ch, err := ph01GetChannel("target")
+	require.NoError(t, err)
+	require.Nil(t, ch)
 }
 
 func TestPH01PublicStoryModelsUsesRootPublicTokenLimits(t *testing.T) {

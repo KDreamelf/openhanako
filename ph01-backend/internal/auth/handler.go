@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/mail"
 	"strconv"
@@ -46,8 +47,18 @@ type GatewayUserSyncRequest struct {
 	PubkeyHash string `json:"pubkey_hash"`
 }
 
+type GatewayChannelRevokeRequest struct {
+	PH01UserID    uint64 `json:"ph01_user_id"`
+	Username      string `json:"username,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+	OldPubkeyHash string `json:"old_pubkey_hash,omitempty"`
+	NewPubkeyHash string `json:"new_pubkey_hash,omitempty"`
+	EffectiveAt   int64  `json:"effective_at,omitempty"`
+}
+
 type GatewayUserSyncer interface {
 	SyncUser(ctx context.Context, req GatewayUserSyncRequest) error
+	RevokePH01Channels(ctx context.Context, req GatewayChannelRevokeRequest) error
 }
 
 // RecoveryLimiter 抽象：检查 username 在 IP 上的恢复请求频率。
@@ -380,10 +391,31 @@ func (h *Handler) HandleRotatePubkey(c *gin.Context) {
 		return
 	}
 
+	revocationWarning := h.revokeGatewayChannels(c.Request.Context(), GatewayChannelRevokeRequest{
+		PH01UserID:    u.ID,
+		Username:      u.Username,
+		Reason:        "pubkey_rotation_before_commit",
+		OldPubkeyHash: verified.PubkeyHash,
+	})
+
 	newPubkey, revokedCount, err := h.UserStore.RotatePubkey(u.ID, newPubkeyHex, newHash)
 	if err != nil {
 		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
 		return
+	}
+	if warning := h.revokeGatewayChannels(c.Request.Context(), GatewayChannelRevokeRequest{
+		PH01UserID:    u.ID,
+		Username:      u.Username,
+		Reason:        "pubkey_rotation_after_commit",
+		OldPubkeyHash: verified.PubkeyHash,
+		NewPubkeyHash: newPubkey.PubkeyHash,
+		EffectiveAt:   newPubkey.CreatedAt.Unix(),
+	}); warning != "" {
+		if revocationWarning != "" {
+			revocationWarning += "; " + warning
+		} else {
+			revocationWarning = warning
+		}
 	}
 	c.JSON(http.StatusOK, api.RotatePubkeyResponse{
 		UserID:               u.ID,
@@ -393,7 +425,20 @@ func (h *Handler) HandleRotatePubkey(c *gin.Context) {
 		NewPubkeyHash:        newPubkey.PubkeyHash,
 		EffectiveAt:          newPubkey.CreatedAt.Unix(),
 		RevokedPreviousCount: revokedCount,
+		GatewayRevokeWarning: revocationWarning,
 	})
+}
+
+func (h *Handler) revokeGatewayChannels(ctx context.Context, req GatewayChannelRevokeRequest) string {
+	if h.GatewaySyncer == nil || req.PH01UserID == 0 {
+		return ""
+	}
+	if err := h.GatewaySyncer.RevokePH01Channels(ctx, req); err != nil {
+		msg := "ai gateway channel revoke failed: " + err.Error()
+		log.Printf("[warn] ph01 pubkey rotation channel revoke failed user_id=%d reason=%s err=%v", req.PH01UserID, req.Reason, err)
+		return msg
+	}
+	return ""
 }
 
 // HandleRecoveryCandidates 处理 POST /auth/recovery_candidates

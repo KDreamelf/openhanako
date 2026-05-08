@@ -303,8 +303,10 @@ Retry-After: 42
 
 1. 验证旧私钥签名，并确认旧公钥当前有效。
 2. 校验邮箱验证码属于同一用户，且用途是密钥轮换。
-3. 写入新公钥，设置新公钥 `created_at` 为轮换生效时间。
-4. 将该用户此前所有当前有效公钥的 `revoked_at` 设置为同一时间。
+3. 通过内部接口通知 AI 网关注销该用户现有短期通道。
+4. 写入新公钥，设置新公钥 `created_at` 为轮换生效时间。
+5. 将该用户此前所有当前有效公钥的 `revoked_at` 设置为同一时间。
+6. 再次通知 AI 网关注销该用户短期通道，覆盖轮换提交前后的竞态窗口。
 
 响应：
 
@@ -316,9 +318,12 @@ Retry-After: 42
   "old_pubkey_hash": "abc123...",
   "new_pubkey_hash": "def456...",
   "effective_at": 1777632000,
-  "revoked_previous_count": 1
+  "revoked_previous_count": 1,
+  "gateway_revoke_warning": ""
 }
 ```
+
+`gateway_revoke_warning` 仅在网关注销通知失败时返回。即使该字段存在，认证中心仍已完成公钥轮换，客户端必须切换到新私钥并立即重新握手。
 
 ---
 

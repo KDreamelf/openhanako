@@ -176,6 +176,40 @@
 - `root` 属于预置账号，不走注册同步生成；登录时绑定网关 root 用户
 - `root` 绑定后还会生成 `PH01 Public Key`，用于注册/登录期故事生成与还原的公共流程
 
+## 密钥轮换实时注销
+
+认证中心完成密钥轮换时必须主动调用 AI 网关内部接口，注销该 PH01 用户当前已建立的短期通信通道：
+
+`POST /api/ph01/internal/channels/revoke`
+
+请求必须携带 `Authorization: Bearer <PH01_AUTH_INTERNAL_TOKEN>`。请求体：
+
+```json
+{
+  "ph01_user_id": 123,
+  "username": "alice",
+  "reason": "pubkey_rotation_after_commit",
+  "old_pubkey_hash": "...",
+  "new_pubkey_hash": "...",
+  "effective_at": 1777632000
+}
+```
+
+响应：
+
+```json
+{
+  "success": true,
+  "data": {
+    "ph01_user_id": 123,
+    "revoked_count": 2,
+    "reason": "pubkey_rotation_after_commit"
+  }
+}
+```
+
+注销范围是该 `ph01_user_id` 对应的所有 `channel_id`，无论通道存在于 Redis 还是进程内存。认证中心会在轮换提交前后各调用一次，避免旧密钥对应的已建立通道继续使用。
+
 ## 子体 AI 通道
 
 AI 网关直接承载子体协议路由：
@@ -191,6 +225,7 @@ AI 网关直接承载子体协议路由：
 - 网关生成服务端临时 ECDH 密钥，并把短期通道写入 Redis；Redis 不可用时退回进程内存储
 - `PH01 Default Key` 只作为配置承载点读取分组、模型限制和额度，不对外作为 API credential 使用
 - 返回的 `allowed_models` 来自该承载点的有效分组与模型限制
+- 密钥轮换后，认证中心会调用内部注销接口删除该用户旧短期通道；子体客户端必须用新私钥立即重新握手，刷新 `channel_id` 和 `allowed_models`
 
 聊天规则：
 

@@ -3,6 +3,7 @@ package controller
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -840,6 +841,70 @@ func ph01DeleteChannel(id string) {
 		return
 	}
 	ph01Channels.Delete(id)
+}
+
+func ph01RevokeChannelsForUser(ph01UserID uint64) (int, error) {
+	if ph01UserID == 0 {
+		return 0, errors.New("ph01 user id is empty")
+	}
+	if common.RedisEnabled && common.RDB != nil {
+		return ph01RevokeRedisChannelsForUser(ph01UserID)
+	}
+	revoked := 0
+	ph01Channels.Range(func(key, value any) bool {
+		raw, ok := value.(string)
+		if !ok {
+			ph01Channels.Delete(key)
+			return true
+		}
+		var ch ph01Channel
+		if err := json.Unmarshal([]byte(raw), &ch); err != nil {
+			ph01Channels.Delete(key)
+			return true
+		}
+		if ch.PH01UserID == ph01UserID {
+			ph01Channels.Delete(key)
+			revoked++
+		}
+		return true
+	})
+	return revoked, nil
+}
+
+func ph01RevokeRedisChannelsForUser(ph01UserID uint64) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var cursor uint64
+	revoked := 0
+	for {
+		keys, next, err := common.RDB.Scan(ctx, cursor, ph01ChannelPrefix+"*", 100).Result()
+		if err != nil {
+			return revoked, err
+		}
+		for _, key := range keys {
+			raw, err := common.RDB.Get(ctx, key).Result()
+			if err != nil {
+				continue
+			}
+			var ch ph01Channel
+			if err := json.Unmarshal([]byte(raw), &ch); err != nil {
+				_ = common.RDB.Del(ctx, key).Err()
+				continue
+			}
+			if ch.PH01UserID == ph01UserID {
+				if err := common.RDB.Del(ctx, key).Err(); err != nil {
+					return revoked, err
+				}
+				revoked++
+			}
+		}
+		if next == 0 {
+			break
+		}
+		cursor = next
+	}
+	return revoked, nil
 }
 
 func ph01ModelAllowed(models []string, requested string) bool {

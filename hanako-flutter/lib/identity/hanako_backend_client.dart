@@ -262,6 +262,7 @@ class HanakoBackendClient {
         newPubkeyHash: body['new_pubkey_hash'] as String,
         effectiveAt: (body['effective_at'] as num).toInt(),
         revokedPreviousCount: (body['revoked_previous_count'] as num).toInt(),
+        gatewayRevokeWarning: body['gateway_revoke_warning'] as String?,
       );
       _writeBackendTransportLog(
         'transport_success',
@@ -1406,6 +1407,7 @@ class PubkeyRotationResult {
     required this.newPubkeyHash,
     required this.effectiveAt,
     required this.revokedPreviousCount,
+    this.gatewayRevokeWarning,
   });
 
   final int userId;
@@ -1415,6 +1417,7 @@ class PubkeyRotationResult {
   final String newPubkeyHash;
   final int effectiveAt;
   final int revokedPreviousCount;
+  final String? gatewayRevokeWarning;
 }
 
 /// 邮箱 RFA 挑战。

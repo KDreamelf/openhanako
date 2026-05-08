@@ -59,6 +59,15 @@ type PH01InternalUserSyncRequest struct {
 	PubkeyHash string `json:"pubkey_hash"`
 }
 
+type PH01InternalChannelRevokeRequest struct {
+	PH01UserID    uint64 `json:"ph01_user_id"`
+	Username      string `json:"username,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+	OldPubkeyHash string `json:"old_pubkey_hash,omitempty"`
+	NewPubkeyHash string `json:"new_pubkey_hash,omitempty"`
+	EffectiveAt   int64  `json:"effective_at,omitempty"`
+}
+
 type ph01PendingChallenge struct {
 	mu              sync.Mutex
 	Challenge       PH01LoginChallenge
@@ -234,6 +243,34 @@ func PH01InternalSyncUser(c *gin.Context) {
 		"username":      gatewayUser.Username,
 		"ph01_user_id":  identity.PH01UserID,
 		"ph01_username": identity.PH01Username,
+	})
+}
+
+func PH01InternalRevokeChannels(c *gin.Context) {
+	if !verifyPH01InternalToken(c) {
+		return
+	}
+	var req PH01InternalChannelRevokeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	if req.PH01UserID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "ph01_user_id required"})
+		return
+	}
+	revoked, err := ph01RevokeChannelsForUser(req.PH01UserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	common.ApiSuccess(c, gin.H{
+		"ph01_user_id":    req.PH01UserID,
+		"revoked_count":   revoked,
+		"reason":          strings.TrimSpace(req.Reason),
+		"effective_at":    req.EffectiveAt,
+		"old_pubkey_hash": strings.ToLower(strings.TrimSpace(req.OldPubkeyHash)),
+		"new_pubkey_hash": strings.ToLower(strings.TrimSpace(req.NewPubkeyHash)),
 	})
 }
 

@@ -489,9 +489,10 @@ func TestRotatePubkeyRequiresPrivateKeyAndEmail(t *testing.T) {
 	store := user.NewStore(gormDB)
 	sender := &fakeEmailSender{}
 	handler := &auth.Handler{
-		UserStore: store,
-		Verifier:  hcrypto.NewSignedRequestVerifier(nil, "nonce:test"),
-		RFA:       auth.NewRFAService(store, newMemoryRFAStore(), sender),
+		UserStore:     store,
+		Verifier:      hcrypto.NewSignedRequestVerifier(nil, "nonce:test"),
+		RFA:           auth.NewRFAService(store, newMemoryRFAStore(), sender),
+		GatewaySyncer: &fakeGatewaySyncer{},
 	}
 	r := gin.New()
 	v1 := r.Group("/api/v1")
@@ -580,6 +581,19 @@ func TestRotatePubkeyRequiresPrivateKeyAndEmail(t *testing.T) {
 	}
 	if rotated.RevokedPreviousCount != 1 {
 		t.Fatalf("expected one revoked old key, got %+v", rotated)
+	}
+	syncer := handler.GatewaySyncer.(*fakeGatewaySyncer)
+	if len(syncer.revocations) != 2 {
+		t.Fatalf("expected pre/post gateway channel revocation, got %+v", syncer.revocations)
+	}
+	if syncer.revocations[0].PH01UserID != u.ID || syncer.revocations[0].Reason != "pubkey_rotation_before_commit" {
+		t.Fatalf("unexpected pre-rotation revoke request: %+v", syncer.revocations[0])
+	}
+	if syncer.revocations[1].PH01UserID != u.ID ||
+		syncer.revocations[1].Reason != "pubkey_rotation_after_commit" ||
+		syncer.revocations[1].OldPubkeyHash != oldHash ||
+		syncer.revocations[1].NewPubkeyHash != newHash {
+		t.Fatalf("unexpected post-rotation revoke request: %+v", syncer.revocations[1])
 	}
 
 	oldLoginBody, oldLoginStatus := signedPostStatus(srv.URL+"/api/v1/auth/login", oldPriv, map[string]interface{}{
@@ -987,11 +1001,17 @@ type fakeEmailSender struct {
 }
 
 type fakeGatewaySyncer struct {
-	last auth.GatewayUserSyncRequest
+	last        auth.GatewayUserSyncRequest
+	revocations []auth.GatewayChannelRevokeRequest
 }
 
 func (f *fakeGatewaySyncer) SyncUser(_ context.Context, req auth.GatewayUserSyncRequest) error {
 	f.last = req
+	return nil
+}
+
+func (f *fakeGatewaySyncer) RevokePH01Channels(_ context.Context, req auth.GatewayChannelRevokeRequest) error {
+	f.revocations = append(f.revocations, req)
 	return nil
 }
 
