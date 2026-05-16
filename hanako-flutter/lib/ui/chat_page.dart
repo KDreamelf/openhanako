@@ -1,21 +1,29 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../app/providers.dart';
 import '../app/window_factory.dart';
+import '../core/agent_runtime.dart';
+import '../core/codex_agent_runtime.dart';
 import '../core/engine.dart';
 import '../core/runtime_session_store.dart';
+import '../experience/experience.dart';
 import '../llm/provider.dart';
+import '../windows_ops/windows_ops.dart';
 import 'desk/desk_page.dart';
 import 'memory/memory_page.dart';
 import 'onboarding/onboarding_page.dart';
 import 'perf/perf_hud.dart';
 import 'skills/skills_page.dart';
 import 'widgets/session_drawer.dart';
+import 'widgets/status_cluster.dart';
 import 'widgets/streaming_message.dart';
 
 // =====================================================================
@@ -147,6 +155,10 @@ class ChatNotifier extends StateNotifier<ChatState> {
   }
 
   Future<void> send(String text) async {
+    await sendBlocks(<RuntimeContentBlock>[RuntimeTextBlock(text)]);
+  }
+
+  Future<void> sendBlocks(List<RuntimeContentBlock> blocks) async {
     if (state.streaming) return;
     if (!_restored) {
       await restoreLastSession();
@@ -173,7 +185,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
     final committedMessages = [...state.history];
     final inFlightMessages = [
       ...committedMessages,
-      RuntimeDisplayMessage.userText(text),
+      RuntimeDisplayMessage.userBlocks(blocks),
     ];
     final generation = ++_sendGeneration;
     _stopRetrying = false;
@@ -181,7 +193,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
     state = ChatState(history: inFlightMessages, streaming: true);
 
     await _sendWithRetries(
-      text,
+      blocks,
       committedMessages: committedMessages,
       inFlightMessages: inFlightMessages,
       generation: generation,
@@ -189,13 +201,18 @@ class ChatNotifier extends StateNotifier<ChatState> {
   }
 
   Future<void> interruptWith(String text) async {
+    await interruptWithBlocks(<RuntimeContentBlock>[RuntimeTextBlock(text)]);
+  }
+
+  Future<void> interruptWithBlocks(List<RuntimeContentBlock> blocks) async {
+    final text = _blocksVisibleText(blocks);
     final trimmed = text.trim();
-    if (trimmed.isEmpty) {
+    if (trimmed.isEmpty && !_blocksHaveImage(blocks)) {
       stopRetrying();
       return;
     }
     if (!state.streaming) {
-      await send(trimmed);
+      await sendBlocks(blocks);
       return;
     }
 
@@ -206,7 +223,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
     final committedMessages = eng.sessionCoordinator.currentDisplayMessages();
     final inFlightMessages = [
       ...committedMessages,
-      RuntimeDisplayMessage.userText(trimmed),
+      RuntimeDisplayMessage.userBlocks(blocks),
     ];
     final generation = ++_sendGeneration;
     _cancelActiveTurn('用户插话');
@@ -214,7 +231,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
     state = ChatState(history: inFlightMessages, streaming: true);
 
     await _sendWithRetries(
-      trimmed,
+      blocks,
       committedMessages: committedMessages,
       inFlightMessages: inFlightMessages,
       generation: generation,
@@ -284,7 +301,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
   }
 
   Future<void> _sendWithRetries(
-    String text, {
+    List<RuntimeContentBlock> blocks, {
     required List<RuntimeDisplayMessage> committedMessages,
     required List<RuntimeDisplayMessage> inFlightMessages,
     required int generation,
@@ -310,7 +327,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
           ? _ref
                 .read(engineProvider)
                 .sessionCoordinator
-                .prompt(text, cancelToken: token)
+                .promptBlocks(blocks, cancelToken: token)
           : _ref
                 .read(engineProvider)
                 .sessionCoordinator
@@ -680,6 +697,251 @@ String? selectedChatModelId(HanaEngine engine) {
   return engine.modelManager.currentModelId;
 }
 
+String _prettyJson(Object? value) {
+  try {
+    return const JsonEncoder.withIndent('  ').convert(value);
+  } catch (_) {
+    return value.toString();
+  }
+}
+
+String _blocksVisibleText(List<RuntimeContentBlock> blocks) {
+  return blocks
+      .whereType<RuntimeTextBlock>()
+      .map((block) => block.text)
+      .join()
+      .trim();
+}
+
+bool _blocksHaveImage(List<RuntimeContentBlock> blocks) =>
+    blocks.any((block) => block is RuntimeImageBlock);
+
+class ComposerImageAttachment {
+  const ComposerImageAttachment({
+    required this.dataUrl,
+    required this.mimeType,
+    required this.label,
+    this.path,
+  });
+
+  final String dataUrl;
+  final String mimeType;
+  final String label;
+  final String? path;
+
+  RuntimeImageBlock toRuntimeBlock() => RuntimeImageBlock(
+    dataUrl: dataUrl,
+    mimeType: mimeType,
+    label: label,
+    path: path,
+  );
+}
+
+class ImageComposerController extends TextEditingController {
+  static const imageToken = '\uFFFC';
+  final _images = <ComposerImageAttachment>[];
+
+  bool get hasComposedContent =>
+      text.replaceAll(imageToken, '').trim().isNotEmpty || _images.isNotEmpty;
+
+  void insertImage(ComposerImageAttachment image) {
+    final current = value;
+    final selection = current.selection;
+    final start = selection.start < 0 ? current.text.length : selection.start;
+    final end = selection.end < 0 ? current.text.length : selection.end;
+    final imageIndex = _imageIndexBeforeOffset(current.text, start);
+    _images.insert(imageIndex.clamp(0, _images.length), image);
+    final nextText = current.text.replaceRange(start, end, imageToken);
+    final caret = start + imageToken.length;
+    value = current.copyWith(
+      text: nextText,
+      selection: TextSelection.collapsed(offset: caret),
+      composing: TextRange.empty,
+    );
+  }
+
+  List<RuntimeContentBlock> toRuntimeBlocks() {
+    final blocks = <RuntimeContentBlock>[];
+    final buffer = StringBuffer();
+    var imageIndex = 0;
+
+    void flushText() {
+      if (buffer.isEmpty) return;
+      blocks.add(RuntimeTextBlock(buffer.toString()));
+      buffer.clear();
+    }
+
+    for (var i = 0; i < text.length; i++) {
+      final char = text[i];
+      if (char == imageToken) {
+        flushText();
+        if (imageIndex < _images.length) {
+          blocks.add(_images[imageIndex].toRuntimeBlock());
+        }
+        imageIndex++;
+      } else {
+        buffer.write(char);
+      }
+    }
+    flushText();
+    return blocks;
+  }
+
+  void clearComposed() {
+    clear();
+    _images.clear();
+  }
+
+  @override
+  set value(TextEditingValue newValue) {
+    super.value = newValue;
+    _syncImagesToText();
+  }
+
+  @override
+  TextSpan buildTextSpan({
+    required BuildContext context,
+    TextStyle? style,
+    required bool withComposing,
+  }) {
+    final spans = <InlineSpan>[];
+    final buffer = StringBuffer();
+    var imageIndex = 0;
+
+    void flushText() {
+      if (buffer.isEmpty) return;
+      spans.add(TextSpan(text: buffer.toString(), style: style));
+      buffer.clear();
+    }
+
+    for (var i = 0; i < text.length; i++) {
+      final char = text[i];
+      if (char == imageToken) {
+        flushText();
+        final image = imageIndex < _images.length ? _images[imageIndex] : null;
+        spans.add(
+          WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: _ComposerImageChip(label: image?.label ?? '图片'),
+          ),
+        );
+        imageIndex++;
+      } else {
+        buffer.write(char);
+      }
+    }
+    flushText();
+    return TextSpan(style: style, children: spans);
+  }
+
+  void _syncImagesToText() {
+    final count = _imageTokenCount(text);
+    while (_images.length > count) {
+      _images.removeLast();
+    }
+  }
+}
+
+class _ComposerImageChip extends StatelessWidget {
+  const _ComposerImageChip({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: c.secondaryContainer,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: c.outlineVariant),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.image_outlined, size: 14, color: c.onSecondaryContainer),
+          const SizedBox(width: 4),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 160),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(
+                context,
+              ).textTheme.labelSmall?.copyWith(color: c.onSecondaryContainer),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+int _imageTokenCount(String text) => imageTokenMatches(text).length;
+
+Iterable<RegExpMatch> imageTokenMatches(String text) =>
+    RegExp(ImageComposerController.imageToken).allMatches(text);
+
+int _imageIndexBeforeOffset(String text, int offset) {
+  final safeOffset = offset.clamp(0, text.length);
+  return _imageTokenCount(text.substring(0, safeOffset));
+}
+
+Future<ComposerImageAttachment?> _readClipboardImage() async {
+  if (!Platform.isWindows) return null;
+  final tempDir = await Directory.systemTemp.createTemp('ph01_clipboard_');
+  final imagePath =
+      '${tempDir.path}${Platform.pathSeparator}clipboard_${DateTime.now().millisecondsSinceEpoch}.png';
+  final escapedPath = imagePath.replaceAll("'", "''");
+  final script =
+      '''
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
+  \$image = [System.Windows.Forms.Clipboard]::GetImage()
+  \$image.Save('$escapedPath', [System.Drawing.Imaging.ImageFormat]::Png)
+  Write-Output '$escapedPath'
+}
+''';
+  try {
+    final result = await Process.run('powershell.exe', [
+      '-NoProfile',
+      '-STA',
+      '-Command',
+      script,
+    ], runInShell: false).timeout(const Duration(seconds: 2));
+    if (result.exitCode != 0) return null;
+    final file = File(imagePath);
+    if (!await file.exists()) return null;
+    final bytes = await file.readAsBytes();
+    return ComposerImageAttachment(
+      dataUrl: 'data:image/png;base64,${base64Encode(bytes)}',
+      mimeType: 'image/png',
+      label: '剪贴板图片',
+      path: imagePath,
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+String _mimeTypeForPath(String path) {
+  final lower = path.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  return 'image/png';
+}
+
+String _fileName(String path) {
+  final normalized = path.replaceAll('\\', '/');
+  final index = normalized.lastIndexOf('/');
+  return index < 0 ? normalized : normalized.substring(index + 1);
+}
+
 // =====================================================================
 // UI
 // =====================================================================
@@ -692,7 +954,7 @@ class ChatPage extends ConsumerStatefulWidget {
 }
 
 class _ChatPageState extends ConsumerState<ChatPage> {
-  final _input = TextEditingController();
+  final _input = ImageComposerController();
   final _scroll = ScrollController();
   bool _onboardingShown = false;
 
@@ -701,12 +963,22 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      ref
+          .read(engineProvider)
+          .sessionCoordinator
+          .setCodexPermissionPrompt(_showCodexPermissionDialog);
+      ref
+          .read(engineProvider)
+          .sessionCoordinator
+          .setCodexUserInputPrompt(_showCodexUserInputDialog);
       unawaited(ref.read(chatProvider.notifier).restoreLastSession());
     });
   }
 
   @override
   void dispose() {
+    ref.read(engineProvider).sessionCoordinator.setCodexPermissionPrompt(null);
+    ref.read(engineProvider).sessionCoordinator.setCodexUserInputPrompt(null);
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -732,12 +1004,209 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     }
   }
 
+  Future<CodexPermissionDecision?> _showCodexPermissionDialog(
+    CodexPermissionRequest request,
+  ) async {
+    if (!mounted) return null;
+    return showDialog<CodexPermissionDecision>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        final colorScheme = Theme.of(ctx).colorScheme;
+        final permissionsText = _prettyJson(request.permissions);
+        return AlertDialog(
+          title: const Text('Codex 工具授权'),
+          content: SizedBox(
+            width: 520,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  request.reason?.trim().isNotEmpty == true
+                      ? request.reason!.trim()
+                      : '模型请求临时提升本地工具权限。',
+                ),
+                const SizedBox(height: 12),
+                Text('请求权限', style: Theme.of(ctx).textTheme.labelLarge),
+                const SizedBox(height: 6),
+                Container(
+                  constraints: const BoxConstraints(maxHeight: 220),
+                  decoration: BoxDecoration(
+                    color: colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  padding: const EdgeInsets.all(12),
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      permissionsText,
+                      style: Theme.of(
+                        ctx,
+                      ).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  '可以在设置页把 Codex 权限模式改为“完全授权”，后续将自动批准。',
+                  style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(
+                const CodexPermissionDecision(
+                  approved: false,
+                  scope: 'none',
+                  message: '用户拒绝授权。',
+                ),
+              ),
+              child: const Text('拒绝'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(
+                CodexPermissionDecision(
+                  approved: true,
+                  scope: 'turn',
+                  permissions: request.permissions,
+                  message: '用户批准本次授权。',
+                ),
+              ),
+              child: const Text('允许本次'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<CodexUserInputResponse?> _showCodexUserInputDialog(
+    CodexUserInputRequest request,
+  ) async {
+    if (!mounted) return null;
+    final selections = <String, String>{
+      for (final question in request.questions)
+        question.id: question.options.first.label,
+    };
+    final otherControllers = <String, TextEditingController>{
+      for (final question in request.questions)
+        question.id: TextEditingController(),
+    };
+    try {
+      return await showDialog<CodexUserInputResponse>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              title: const Text('需要你的选择'),
+              content: SizedBox(
+                width: 560,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (final question in request.questions) ...[
+                        Text(
+                          question.header,
+                          style: Theme.of(ctx).textTheme.labelLarge,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(question.question),
+                        const SizedBox(height: 8),
+                        for (final option in question.options)
+                          _ChoiceRow(
+                            selected: selections[question.id] == option.label,
+                            title: option.label,
+                            subtitle: option.description,
+                            onTap: () => setDialogState(
+                              () => selections[question.id] = option.label,
+                            ),
+                          ),
+                        _ChoiceRow(
+                          selected: selections[question.id] == '__other__',
+                          title: '其他',
+                          onTap: () => setDialogState(
+                            () => selections[question.id] = '__other__',
+                          ),
+                        ),
+                        if (selections[question.id] == '__other__')
+                          TextField(
+                            controller: otherControllers[question.id],
+                            autofocus: true,
+                            decoration: const InputDecoration(
+                              labelText: '输入自定义答案',
+                            ),
+                          ),
+                        const SizedBox(height: 14),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(
+                    const CodexUserInputResponse(
+                      answers: <String, String>{},
+                      cancelled: true,
+                    ),
+                  ),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final answers = <String, String>{};
+                    for (final question in request.questions) {
+                      final selected = selections[question.id];
+                      if (selected == '__other__') {
+                        answers[question.id] =
+                            otherControllers[question.id]?.text.trim() ?? '';
+                      } else if (selected != null) {
+                        answers[question.id] = selected;
+                      }
+                    }
+                    Navigator.of(
+                      ctx,
+                    ).pop(CodexUserInputResponse(answers: answers));
+                  },
+                  child: const Text('确定'),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+    } finally {
+      for (final controller in otherControllers.values) {
+        controller.dispose();
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(chatProvider);
     final activeAgent = ref.watch(activeAgentIdProvider);
     final eng = ref.watch(engineProvider);
     final identity = ref.watch(currentIdentityProvider);
+    final networkStatusValue = ref.watch(experienceNetworkStatusProvider);
+    final networkStatus = networkStatusValue.asData?.value;
+    final networkStatusError = networkStatusValue.maybeWhen(
+      error: (error, _) => '$error',
+      orElse: () => null,
+    );
+    final windowsOpsStatusValue = ref.watch(windowsOpsStatusProvider);
+    final windowsOpsStatus = windowsOpsStatusValue.asData?.value;
+    final windowsOpsStatusError = windowsOpsStatusValue.maybeWhen(
+      error: (error, _) => '$error',
+      orElse: () => null,
+    );
     final selectedModel = selectedChatModelId(eng);
 
     ref.listen<ChatState>(chatProvider, (_, _) {
@@ -770,6 +1239,12 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                   activeAgent: activeAgent,
                   identityReady: identity != null,
                   selectedModel: selectedModel,
+                  networkStatus: networkStatus,
+                  networkStatusLoading: networkStatusValue.isLoading,
+                  networkStatusError: networkStatusError,
+                  windowsOpsStatus: windowsOpsStatus,
+                  windowsOpsStatusLoading: windowsOpsStatusValue.isLoading,
+                  windowsOpsStatusError: windowsOpsStatusError,
                   messageCount: state.history.length,
                   streaming: state.streaming,
                   canClear: state.history.isNotEmpty && !state.streaming,
@@ -857,15 +1332,17 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   }
 
   void _send() {
-    final text = _input.text.trim();
-    if (text.isEmpty) return;
-    _input.clear();
-    final notifier = ref.read(chatProvider.notifier);
-    if (ref.read(chatProvider).streaming) {
-      unawaited(notifier.interruptWith(text));
+    final blocks = _input.toRuntimeBlocks();
+    if (!_blocksHaveImage(blocks) && _blocksVisibleText(blocks).isEmpty) {
       return;
     }
-    unawaited(notifier.send(text));
+    _input.clearComposed();
+    final notifier = ref.read(chatProvider.notifier);
+    if (ref.read(chatProvider).streaming) {
+      unawaited(notifier.interruptWithBlocks(blocks));
+      return;
+    }
+    unawaited(notifier.sendBlocks(blocks));
   }
 
   Future<void> _unlockIdentity() async {
@@ -948,11 +1425,79 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   }
 }
 
+class _ChoiceRow extends StatelessWidget {
+  const _ChoiceRow({
+    required this.selected,
+    required this.title,
+    required this.onTap,
+    this.subtitle,
+  });
+
+  final bool selected;
+  final String title;
+  final String? subtitle;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Material(
+      color: selected
+          ? colorScheme.primaryContainer.withValues(alpha: 0.55)
+          : Colors.transparent,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                selected
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_unchecked,
+                size: 18,
+                color: selected ? colorScheme.primary : colorScheme.outline,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title),
+                    if (subtitle?.trim().isNotEmpty == true)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          subtitle!.trim(),
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: colorScheme.onSurfaceVariant),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ChatHeader extends StatelessWidget {
   const _ChatHeader({
     required this.activeAgent,
     required this.identityReady,
     required this.selectedModel,
+    required this.networkStatus,
+    required this.networkStatusLoading,
+    required this.networkStatusError,
+    required this.windowsOpsStatus,
+    required this.windowsOpsStatusLoading,
+    required this.windowsOpsStatusError,
     required this.messageCount,
     required this.streaming,
     required this.canClear,
@@ -969,6 +1514,12 @@ class _ChatHeader extends StatelessWidget {
   final String? activeAgent;
   final bool identityReady;
   final String? selectedModel;
+  final ExperienceNetworkStatus? networkStatus;
+  final bool networkStatusLoading;
+  final String? networkStatusError;
+  final WindowsOpsCapabilities? windowsOpsStatus;
+  final bool windowsOpsStatusLoading;
+  final String? windowsOpsStatusError;
   final int messageCount;
   final bool streaming;
   final bool canClear;
@@ -1062,28 +1613,66 @@ class _ChatHeader extends StatelessWidget {
                   ),
                 ],
               );
-              final status = Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  _StatusPill(
-                    icon: Icons.account_tree_outlined,
-                    label: activeAgent == null ? '未选 Agent' : 'Agent 已连接',
-                    color: activeAgent == null ? c.error : c.primary,
+              final statusItems = <StatusClusterItem>[
+                StatusClusterItem(
+                  icon: Icons.account_tree_outlined,
+                  label: activeAgent == null ? '未选 Agent' : 'Agent 已连接',
+                  color: activeAgent == null ? c.error : c.primary,
+                ),
+                StatusClusterItem(
+                  icon: Icons.key_outlined,
+                  label: identityReady ? '身份已解锁' : '身份未解锁',
+                  color: identityReady ? c.primary : c.error,
+                  tooltip: identityReady ? null : '尝试解锁本机身份',
+                  onPressed: onUnlockIdentity,
+                ),
+                StatusClusterItem(
+                  icon: Icons.lan_outlined,
+                  label: _networkStatusLabel(
+                    networkStatus,
+                    loading: networkStatusLoading,
+                    error: networkStatusError,
                   ),
-                  _StatusPill(
-                    icon: Icons.key_outlined,
-                    label: identityReady ? '身份已解锁' : '身份未解锁',
-                    color: identityReady ? c.primary : c.error,
-                    tooltip: identityReady ? null : '尝试解锁本机身份',
-                    onPressed: onUnlockIdentity,
+                  color: _networkStatusColor(
+                    c,
+                    networkStatus,
+                    loading: networkStatusLoading,
+                    error: networkStatusError,
                   ),
-                  _StatusPill(
-                    icon: Icons.memory_outlined,
-                    label: selectedModel == null ? '未选模型' : '模型已选择',
-                    color: selectedModel == null ? c.tertiary : c.primary,
+                  tooltip: _networkStatusTooltip(
+                    networkStatus,
+                    loading: networkStatusLoading,
+                    error: networkStatusError,
                   ),
-                ],
+                ),
+                StatusClusterItem(
+                  icon: Icons.ads_click_outlined,
+                  label: _windowsOpsStatusLabel(
+                    windowsOpsStatus,
+                    loading: windowsOpsStatusLoading,
+                    error: windowsOpsStatusError,
+                  ),
+                  color: _windowsOpsStatusColor(
+                    c,
+                    windowsOpsStatus,
+                    loading: windowsOpsStatusLoading,
+                    error: windowsOpsStatusError,
+                  ),
+                  tooltip: _windowsOpsStatusTooltip(
+                    windowsOpsStatus,
+                    loading: windowsOpsStatusLoading,
+                    error: windowsOpsStatusError,
+                  ),
+                ),
+                StatusClusterItem(
+                  icon: Icons.memory_outlined,
+                  label: selectedModel == null ? '未选模型' : '模型已选择',
+                  color: selectedModel == null ? c.tertiary : c.primary,
+                ),
+              ];
+              final status = StatusCluster(
+                items: statusItems,
+                expandLeft: !compact,
               );
 
               if (compact) {
@@ -1118,7 +1707,12 @@ class _ChatHeader extends StatelessWidget {
                   ),
                   const SizedBox(width: 12),
                   Expanded(child: title),
-                  status,
+                  Flexible(
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: status,
+                    ),
+                  ),
                   const SizedBox(width: 16),
                   actions,
                 ],
@@ -1129,6 +1723,148 @@ class _ChatHeader extends StatelessWidget {
       ),
     );
   }
+}
+
+String _networkStatusLabel(
+  ExperienceNetworkStatus? status, {
+  required bool loading,
+  String? error,
+}) {
+  if (status == null) {
+    return loading ? 'DHT 探测中' : 'DHT 未连接';
+  }
+  final parts = <String>[
+    'DHT ${status.connectedDhtCount}/${status.configuredDhtCount}',
+  ];
+  if (status.ipv6Status == ExperienceNetworkPathStatus.direct) {
+    parts.add('IPv6 可以直连');
+  }
+  if (status.ipv4Status == ExperienceNetworkPathStatus.holePunchable) {
+    parts.add('IPv4 打洞成功');
+  } else if (status.ipv4Status == ExperienceNetworkPathStatus.notPunchable) {
+    parts.add('IPv4 不可打洞');
+  }
+  if (parts.length == 1) {
+    parts.add(status.bestModeLabel);
+  }
+  return parts.join(' · ');
+}
+
+Color _networkStatusColor(
+  ColorScheme c,
+  ExperienceNetworkStatus? status, {
+  required bool loading,
+  String? error,
+}) {
+  if (status == null) return loading ? c.secondary : c.error;
+  if (error != null || status.error != null || status.connectedDhtCount == 0) {
+    return c.error;
+  }
+  if (status.ipv6Status == ExperienceNetworkPathStatus.direct) {
+    return Colors.green.shade700;
+  }
+  if (status.ipv4Status == ExperienceNetworkPathStatus.holePunchable) {
+    return c.primary;
+  }
+  if (status.ipv4Status == ExperienceNetworkPathStatus.notPunchable) {
+    return c.tertiary;
+  }
+  return c.error;
+}
+
+String _networkStatusTooltip(
+  ExperienceNetworkStatus? status, {
+  required bool loading,
+  String? error,
+}) {
+  if (status == null) {
+    return error == null || error.isEmpty ? '正在探测经验网络 DHT' : error;
+  }
+  final lines = <String>[
+    '已连接 DHT：${status.connectedDhtCount}/${status.configuredDhtCount}',
+    '公开 DHT：${status.publicDhtCount}',
+    'IPv6：${status.ipv6Status.label}',
+    'IPv4：${status.ipv4Status.label}',
+    '当前模式：${status.bestModeLabel}',
+  ];
+  if (status.managerBaseUrl.trim().isNotEmpty) {
+    lines.add('官方经验管理端：${status.managerBaseUrl}');
+  }
+  for (final connection in status.connections.take(5)) {
+    final state = connection.connected ? '已连接' : '未连接';
+    final reason = connection.error == null ? '' : ' · ${connection.error}';
+    lines.add('${connection.node.nodeId}：$state$reason');
+  }
+  if (error != null && error.isNotEmpty) lines.add(error);
+  if (status.error != null && status.error!.isNotEmpty) {
+    lines.add(status.error!);
+  }
+  return lines.join('\n');
+}
+
+String _windowsOpsStatusLabel(
+  WindowsOpsCapabilities? status, {
+  required bool loading,
+  String? error,
+}) {
+  if (status == null) {
+    return loading ? '界面模型加载中' : '界面操作未就绪';
+  }
+  if (!status.sidecar) return '界面操作不可用';
+  final ready = <String>[];
+  if (status.inputMouse && status.inputKeyboard) ready.add('输入');
+  if (status.uiParsing) ready.add('界面模型');
+  if (status.ocr) ready.add('OCR');
+  if (ready.isEmpty) return error == null ? '界面操作待准备' : '界面操作异常';
+  return ready.join(' · ');
+}
+
+Color _windowsOpsStatusColor(
+  ColorScheme c,
+  WindowsOpsCapabilities? status, {
+  required bool loading,
+  String? error,
+}) {
+  if (status == null) return loading ? c.secondary : c.error;
+  if (error != null || !status.sidecar) return c.error;
+  if (status.inputMouse &&
+      status.inputKeyboard &&
+      status.uiParsing &&
+      status.ocr) {
+    return Colors.green.shade700;
+  }
+  if (status.inputMouse || status.inputKeyboard || status.uiaTree) {
+    return c.primary;
+  }
+  return c.tertiary;
+}
+
+String _windowsOpsStatusTooltip(
+  WindowsOpsCapabilities? status, {
+  required bool loading,
+  String? error,
+}) {
+  if (status == null) {
+    return error == null || error.isEmpty ? '正在检查 Windows 操作链' : error;
+  }
+  final lines = <String>[
+    'Windows 操作链',
+    '边车：${status.sidecar ? "已启动" : "不可用"}',
+    '截图：${status.screenCapture ? "可用" : "不可用"}',
+    '鼠标输入：${status.inputMouse ? "可用" : "不可用"}',
+    '键盘输入：${status.inputKeyboard ? "可用" : "不可用"}',
+    'UIA 控件树：${status.uiaTree ? "可用" : "不可用"}',
+    'UIA Invoke：${status.uiaInvoke ? "可用" : "不可用"}',
+    'OCR：${status.ocr ? "可用" : "不可用"}',
+    '界面识别模型：${status.uiParsing ? "可用" : "不可用"}',
+  ];
+  if (error != null && error.isNotEmpty) lines.add(error);
+  if (status.unavailableReasons.isNotEmpty) {
+    for (final entry in status.unavailableReasons.entries.take(6)) {
+      lines.add('${entry.key}：${entry.value}');
+    }
+  }
+  return lines.join('\n');
 }
 
 class _HeaderAction extends StatelessWidget {
@@ -1156,65 +1892,6 @@ class _HeaderAction extends StatelessWidget {
   }
 }
 
-class _StatusPill extends StatelessWidget {
-  const _StatusPill({
-    required this.icon,
-    required this.label,
-    required this.color,
-    this.tooltip,
-    this.onPressed,
-  });
-
-  final IconData icon;
-  final String label;
-  final Color color;
-  final String? tooltip;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final child = Container(
-      height: 34,
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 15, color: color),
-          const SizedBox(width: 6),
-          Text(
-            label,
-            style: TextStyle(
-              color: color,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
-    final pill = Material(
-      color: color.withAlpha(28),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-        side: BorderSide(color: color.withAlpha(72)),
-      ),
-      child: onPressed == null
-          ? child
-          : InkWell(
-              onTap: onPressed,
-              borderRadius: BorderRadius.circular(8),
-              child: child,
-            ),
-    );
-    final wrapped = onPressed == null
-        ? pill
-        : MouseRegion(cursor: SystemMouseCursors.click, child: pill);
-    final text = tooltip;
-    if (text == null || text.isEmpty) return wrapped;
-    return Tooltip(message: text, child: wrapped);
-  }
-}
-
 class _ComposerPanel extends StatefulWidget {
   const _ComposerPanel({
     required this.controller,
@@ -1227,7 +1904,7 @@ class _ComposerPanel extends StatefulWidget {
     required this.streaming,
   });
 
-  final TextEditingController controller;
+  final ImageComposerController controller;
   final bool canSend;
   final bool streaming;
   final String? activeAgent;
@@ -1278,9 +1955,9 @@ class _ComposerPanelState extends State<_ComposerPanel> {
         : widget.streaming
         ? '输入插话，或留空停止当前回复'
         : '输入消息，Enter 发送，Shift+Enter 换行';
-    final hasText = widget.controller.text.trim().isNotEmpty;
-    final stopOnly = widget.streaming && !hasText;
-    final buttonEnabled = widget.canSend && (hasText || stopOnly);
+    final hasContent = widget.controller.hasComposedContent;
+    final stopOnly = widget.streaming && !hasContent;
+    final buttonEnabled = widget.canSend && (hasContent || stopOnly);
     final buttonIcon = stopOnly ? Icons.stop : Icons.send;
     final buttonLabel = stopOnly ? '停止' : '发送';
     final buttonAction = stopOnly ? widget.onStop : widget.onSend;
@@ -1301,6 +1978,16 @@ class _ComposerPanelState extends State<_ComposerPanel> {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
+                  SizedBox(
+                    height: 50,
+                    width: 44,
+                    child: IconButton(
+                      onPressed: widget.canSend ? _pickImageFile : null,
+                      icon: const Icon(Icons.image_outlined, size: 20),
+                      tooltip: '添加图片',
+                    ),
+                  ),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: Container(
                       decoration: BoxDecoration(
@@ -1359,6 +2046,14 @@ class _ComposerPanelState extends State<_ComposerPanel> {
       return KeyEventResult.ignored;
     }
     final key = event.logicalKey;
+    final isPaste =
+        key == LogicalKeyboardKey.keyV &&
+        (HardwareKeyboard.instance.isControlPressed ||
+            HardwareKeyboard.instance.isMetaPressed);
+    if (isPaste) {
+      unawaited(_pasteFromClipboard());
+      return KeyEventResult.handled;
+    }
     final isEnter =
         key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.numpadEnter;
@@ -1374,22 +2069,73 @@ class _ComposerPanelState extends State<_ComposerPanel> {
     return KeyEventResult.handled;
   }
 
+  Future<void> _pickImageFile() async {
+    final file = await openFile(
+      acceptedTypeGroups: const [
+        XTypeGroup(
+          label: '图片',
+          extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'],
+        ),
+      ],
+    );
+    if (file == null) return;
+    final bytes = await file.readAsBytes();
+    _insertImageBytes(
+      bytes,
+      label: _fileName(file.path),
+      path: file.path,
+      mimeType: _mimeTypeForPath(file.path),
+    );
+  }
+
+  Future<void> _pasteFromClipboard() async {
+    final image = await _readClipboardImage();
+    if (image != null) {
+      widget.controller.insertImage(image);
+      return;
+    }
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text == null || text.isEmpty) return;
+    _insertText(text);
+  }
+
   void _onTextChanged() {
     if (mounted) setState(() {});
   }
 
   void _insertNewline() {
+    _insertText('\n');
+  }
+
+  void _insertText(String inserted) {
     final value = widget.controller.value;
     final text = value.text;
     final selection = value.selection;
     final start = selection.start < 0 ? text.length : selection.start;
     final end = selection.end < 0 ? text.length : selection.end;
-    final nextText = text.replaceRange(start, end, '\n');
-    final caret = start + 1;
+    final nextText = text.replaceRange(start, end, inserted);
+    final caret = start + inserted.length;
     widget.controller.value = value.copyWith(
       text: nextText,
       selection: TextSelection.collapsed(offset: caret),
       composing: TextRange.empty,
+    );
+  }
+
+  void _insertImageBytes(
+    Uint8List bytes, {
+    required String label,
+    required String mimeType,
+    String? path,
+  }) {
+    widget.controller.insertImage(
+      ComposerImageAttachment(
+        dataUrl: 'data:$mimeType;base64,${base64Encode(bytes)}',
+        mimeType: mimeType,
+        label: label,
+        path: path,
+      ),
     );
   }
 }
@@ -1459,24 +2205,71 @@ class _EmptyHint extends StatelessWidget {
               spacing: 8,
               runSpacing: 8,
               children: [
-                _StatusPill(
+                _HintStatusPill(
                   icon: Icons.account_tree_outlined,
                   label: activeAgent == null
                       ? '等待 Agent'
                       : 'Agent: $activeAgent',
                   color: activeAgent == null ? c.error : c.primary,
                 ),
-                _StatusPill(
+                _HintStatusPill(
                   icon: Icons.key_outlined,
                   label: identityReady ? '身份可用' : '身份待解锁',
                   color: identityReady ? c.primary : c.error,
                 ),
-                _StatusPill(
+                _HintStatusPill(
                   icon: Icons.memory_outlined,
                   label: selectedModel == null ? '模型待选择' : '模型可用',
                   color: selectedModel == null ? c.tertiary : c.primary,
                 ),
               ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HintStatusPill extends StatelessWidget {
+  const _HintStatusPill({
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: color.withAlpha(28),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(999),
+        side: BorderSide(color: color.withAlpha(72)),
+      ),
+      child: Container(
+        height: 30,
+        constraints: const BoxConstraints(maxWidth: 240),
+        padding: const EdgeInsets.symmetric(horizontal: 9),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: color),
+            const SizedBox(width: 5),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
           ],
         ),
@@ -1827,16 +2620,7 @@ class _MessageBubbleState extends ConsumerState<_MessageBubble> {
                     color: isUser ? c.primary.withAlpha(64) : c.outlineVariant,
                   ),
                 ),
-                child: isUser
-                    ? SelectableText(
-                        widget.message.visibleText,
-                        style: TextStyle(
-                          color: c.onPrimaryContainer,
-                          fontSize: 16,
-                          height: 1.6,
-                        ),
-                      )
-                    : MessageBlocksView(blocks: widget.message.blocks),
+                child: MessageBlocksView(blocks: widget.message.blocks),
               ),
               AnimatedOpacity(
                 opacity: _hover ? 1 : 0,

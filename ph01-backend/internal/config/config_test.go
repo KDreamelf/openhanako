@@ -22,6 +22,7 @@ redis "auth" {
 server "auth_gateway" {
   listen       = ":8080"
   admin_token  = "auth-admin"
+  public_base_url = "https://auth.example"
   cors_origins = ["https://app.example"]
 }
 
@@ -55,6 +56,13 @@ ai_gateway_sync "default" {
   internal_token = "sync-secret"
   timeout_ms     = 7000
 }
+
+user_pow "default" {
+  difficulty_bits = 4
+  memory_kib      = 1048576
+  round_count     = 2
+  ttl_seconds     = 600
+}
 `), 0o600)
 	if err != nil {
 		t.Fatal(err)
@@ -73,6 +81,9 @@ ai_gateway_sync "default" {
 	if got := cfg.Servers["auth_gateway"].CORSOrigins[0]; got != "https://app.example" {
 		t.Fatalf("server auth_gateway cors = %q", got)
 	}
+	if got := cfg.Servers["auth_gateway"].PublicBase; got != "https://auth.example" {
+		t.Fatalf("server auth_gateway public_base_url = %q", got)
+	}
 	if got := cfg.Servers["auth_gateway_mtls"].TLS.CertFile; got != "/etc/ph01/certs/auth-center.pem" {
 		t.Fatalf("server auth_gateway_mtls tls cert_file = %q", got)
 	}
@@ -90,6 +101,18 @@ ai_gateway_sync "default" {
 	}
 	if got := cfg.AIGatewaySync["default"].TimeoutMS; got != 7000 {
 		t.Fatalf("ai gateway sync timeout_ms = %d", got)
+	}
+	if got := cfg.UserPow["default"].DifficultyBits; got != 4 {
+		t.Fatalf("user pow difficulty_bits = %d", got)
+	}
+	if got := cfg.UserPow["default"].MemoryKiB; got != 1048576 {
+		t.Fatalf("user pow memory_kib = %d", got)
+	}
+	if got := cfg.UserPow["default"].RoundCount; got != 2 {
+		t.Fatalf("user pow round_count = %d", got)
+	}
+	if got := cfg.UserPow["default"].TTLSeconds; got != 600 {
+		t.Fatalf("user pow ttl_seconds = %d", got)
 	}
 }
 

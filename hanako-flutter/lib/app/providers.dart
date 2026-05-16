@@ -1,9 +1,14 @@
+import 'dart:async';
+
+import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/agent.dart';
 import '../core/engine.dart';
 import '../core/session_coordinator.dart';
+import '../experience/experience.dart';
 import '../identity/identity.dart';
+import '../windows_ops/windows_ops.dart';
 
 /// Riverpod providers 集中。
 ///
@@ -79,3 +84,75 @@ enum AppThemeMode {
 
 /// 侧栏（session drawer）展开状态。
 final sidebarOpenProvider = StateProvider<bool>((_) => true);
+
+/// 经验网络 DHT 状态。
+///
+/// 主窗口顶部状态栏使用它显示公共/私有 DHT 可连接数量，以及当前 IPv6/IPv4
+/// 网络能力评分。探测只做管理端 DHT 列表读取和 DHT `/healthz` 轻量检查。
+final experienceNetworkStatusProvider = StreamProvider<ExperienceNetworkStatus>(
+  (ref) async* {
+    final eng = ref.watch(engineProvider);
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 2),
+        receiveTimeout: const Duration(seconds: 2),
+        sendTimeout: const Duration(seconds: 2),
+      ),
+    );
+    ref.onDispose(() => dio.close());
+    while (true) {
+      final cfg = eng.config.read();
+      final dhtConfig = ExperienceDhtClientConfig.fromJson(
+        _stringKeyMap(_stringKeyMap(cfg['experience'])['dht_client']),
+      );
+      const managerBaseUrl =
+          ExperienceNetworkManagerClient.defaultManagerBaseUrl;
+      try {
+        yield await ExperienceNetworkStatusProbe(
+          config: dhtConfig,
+          fallbackManagerBaseUrl: managerBaseUrl,
+          dio: dio,
+        ).probe();
+      } catch (e) {
+        yield ExperienceNetworkStatus.unavailable(
+          managerBaseUrl: managerBaseUrl,
+          error: '$e',
+        );
+      }
+      await _waitForExperienceNetworkRefresh(eng);
+    }
+  },
+);
+
+/// Windows 操作链状态。
+///
+/// 顶部状态栏用它展示 sidecar、截图、鼠标/键盘输入、OCR 和本地界面识别
+/// 模型是否已经就绪。探测会触发 sidecar 能力检查；未就绪能力不会注册给 AI。
+final windowsOpsStatusProvider = FutureProvider<WindowsOpsCapabilities>((
+  ref,
+) async {
+  final eng = ref.watch(engineProvider);
+  return eng.sessionCoordinator.resolveWindowsOpsCapabilities();
+});
+
+Future<void> _waitForExperienceNetworkRefresh(HanaEngine eng) {
+  final completer = Completer<void>();
+  Timer? timer;
+  StreamSubscription<Map<String, dynamic>>? subscription;
+
+  void complete() {
+    if (completer.isCompleted) return;
+    timer?.cancel();
+    subscription?.cancel();
+    completer.complete();
+  }
+
+  timer = Timer(const Duration(seconds: 30), complete);
+  subscription = eng.config.onChanged.listen((_) => complete());
+  return completer.future;
+}
+
+Map<String, dynamic> _stringKeyMap(Object? value) {
+  if (value is! Map) return const {};
+  return value.map((key, dynamic value) => MapEntry('$key', value));
+}

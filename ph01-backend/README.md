@@ -84,11 +84,12 @@ ai_gateway_sync "default" {
 server "auth_gateway" {
   listen       = ":8080"
   admin_token  = "CHANGE_ME_ADMIN_TOKEN_FOR_AUTH_GATEWAY"
+  public_base_url = "https://auth.xn--lbtx0e.cn"
   cors_origins = ["*"]
 }
 ```
 
-正式部署使用 `ph01-deploy/production/config/auth-center.hcl` 预置文件，并在部署脚本首次运行时落到 `data/production/config/auth-center.hcl`。
+正式部署使用 `ph01-deploy/production/config/auth-center.hcl` 预置文件，并在部署脚本首次运行时落到 `data/production/config/auth-center.hcl`。`public_base_url` 是管理端协议登录回调的公网根地址，可用环境变量 `PH01_AUTH_PUBLIC_BASE_URL` 临时覆盖。
 
 ## 启动
 
@@ -110,6 +111,7 @@ cd ph01-backend
 
 管理后台：
 
+- `http://localhost:8080/`
 - `http://localhost:8080/admin-ui/auth.html`
 
 ## 本地 Docker 依赖
@@ -160,7 +162,11 @@ go test ./...
 | `POST` | `/api/v1/auth/verify_challenge_signature` | 内部验签接口，按 `user_id` 验证 `signature(challenge)` |
 | `POST` | `/api/v1/auth/verify_pubkeys` | 批量校验 `user_id + pubkey_hash` 绑定关系 |
 | `POST` | `/api/v1/auth/verify_pubkeys_at` | 按签名时间戳批量校验历史公钥绑定关系 |
-| `POST` | `/admin/session/login` | 管理端签名登录；仅 `root/admin` 角色可用 |
+| `GET` | `/admin/session/challenge` | 管理端 PH01 登录挑战码；用于网页登录码和 `ph01://login` |
+| `GET` | `/admin/session/challenge/:id/status` | 管理端协议登录轮询；完成后返回后台 session |
+| `POST` | `/admin/session/login_code` | 管理端网页登录码登录；仅 `root/admin` 角色可用 |
+| `POST` | `/admin/session/protocol/complete` | 子体协议登录回调；仅 `root/admin` 角色可用 |
+| `POST` | `/admin/session/login` | 管理端旧 SignedRequest 登录；仅 `root/admin` 角色可用 |
 | `GET` | `/admin/session/self` | 管理端当前会话 |
 | `GET` | `/admin/users` | 管理：用户列表 |
 | `PATCH` | `/admin/users/:id` | 管理：修改 tier / disabled / email / role |

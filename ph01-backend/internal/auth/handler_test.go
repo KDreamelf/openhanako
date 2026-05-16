@@ -224,6 +224,170 @@ func TestEndToEndRegisterAndLogin(t *testing.T) {
 	// === 6. 不签发 JWT；身份由私钥签名证明 ===
 }
 
+func TestUserPowChallengeVerifyAndStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	gormDB, err := db.Open("sqlite", filepath.Join(tmpDir, "pow.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := user.AutoMigrate(gormDB); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		sqlDB, _ := gormDB.DB()
+		if sqlDB != nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	priv, _ := secp.GeneratePrivateKey()
+	pubHex := hex.EncodeToString(priv.PubKey().SerializeUncompressed())
+	pubHash, err := hcrypto.PubkeyHash(pubHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userStore := user.NewStore(gormDB)
+	if _, err := userStore.CreateWithPubkey("pow-user", "pow", "pow@example.com", pubHex, pubHash); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := &auth.Handler{
+		UserStore: userStore,
+		Verifier:  hcrypto.NewSignedRequestVerifier(nil, "nonce:test"),
+		Pow: &auth.UserPowService{
+			DifficultyBits: 4,
+			MemoryKiB:      16,
+			RoundCount:     1,
+			TTL:            time.Minute,
+		},
+	}
+	r := gin.New()
+	handler.Register(r.Group("/api/v1"))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	var challenge api.UserPowChallengeResponse
+	postJSONDecode(t, srv.URL+"/api/v1/auth/pow/challenge", api.UserPowChallengeRequest{PubkeyHash: pubHash}, &challenge)
+	nonce, ok := auth.SolveUserPoW(challenge, 1<<20)
+	if !ok {
+		t.Fatal("pow solution not found")
+	}
+	verifyBody := buildSignedRequest(priv, map[string]interface{}{
+		"challenge_id":   challenge.ChallengeID,
+		"pubkey_hash":    pubHash,
+		"solution_nonce": nonce,
+	})
+	var status api.UserPubkeyStatus
+	postRawDecode(t, srv.URL+"/api/v1/auth/pow/verify", verifyBody, &status)
+	if !status.Valid || !status.PowVerified || status.PowScore != 4 {
+		t.Fatalf("unexpected pow status: %+v", status)
+	}
+
+	var batch api.PubkeyStatusResponse
+	postJSONDecode(t, srv.URL+"/api/v1/auth/pubkeys/status", api.PubkeyStatusRequest{PubkeyHashes: []string{pubHash}}, &batch)
+	if len(batch.Items) != 1 || !batch.Items[0].PowVerified {
+		t.Fatalf("unexpected batch status: %+v", batch)
+	}
+}
+
+func TestDelegatedPowChallengeVerifyAndStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	gormDB, err := db.Open("sqlite", filepath.Join(tmpDir, "experience-pow.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := user.AutoMigrate(gormDB); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		sqlDB, _ := gormDB.DB()
+		if sqlDB != nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	priv, _ := secp.GeneratePrivateKey()
+	pubHex := hex.EncodeToString(priv.PubKey().SerializeUncompressed())
+	pubHash, err := hcrypto.PubkeyHash(pubHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userStore := user.NewStore(gormDB)
+	if _, err := userStore.CreateWithPubkey("experience-pow-user", "pow", "pow@example.com", pubHex, pubHash); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := &auth.Handler{
+		UserStore: userStore,
+		Verifier:  hcrypto.NewSignedRequestVerifier(nil, "nonce:test"),
+		DelegatedPow: &auth.DelegatedPowService{
+			DifficultyBits: 4,
+			MemoryKiB:      16,
+			RoundCount:     1,
+			TTL:            time.Minute,
+		},
+	}
+	r := gin.New()
+	handler.Register(r.Group("/api/v1"))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	purpose := "ph01.test.delegated_pow.v1"
+	subjectHash := strings.Repeat("a", 64)
+	var challenge api.DelegatedPowChallengeResponse
+	postJSONDecode(t, srv.URL+"/api/v1/auth/pow/delegated/challenge", api.DelegatedPowChallengeRequest{
+		Purpose:     purpose,
+		SubjectHash: subjectHash,
+		PubkeyHash:  pubHash,
+	}, &challenge)
+	if challenge.ChallengeID == "" || challenge.Purpose != purpose || challenge.SubjectHash != subjectHash || challenge.PubkeyHash != pubHash {
+		t.Fatalf("unexpected delegated pow challenge: %+v", challenge)
+	}
+	var fetched api.DelegatedPowChallengeResponse
+	getJSONDecode(t, srv.URL+"/api/v1/auth/pow/delegated/challenge/"+challenge.ChallengeID, &fetched)
+	if fetched.ChallengeID != challenge.ChallengeID || fetched.SubjectHash != subjectHash {
+		t.Fatalf("unexpected delegated pow challenge detail: %+v", fetched)
+	}
+	nonce, ok := auth.SolveUserPoW(api.UserPowChallengeResponse{
+		ChallengeID:    challenge.ChallengeID,
+		PubkeyHash:     challenge.SubjectHash,
+		Algorithm:      challenge.Algorithm,
+		DifficultyBits: challenge.DifficultyBits,
+		MemoryKiB:      challenge.MemoryKiB,
+		RoundCount:     challenge.RoundCount,
+		Seed:           challenge.Seed,
+		ExpiresAt:      challenge.ExpiresAt,
+	}, 1<<20)
+	if !ok {
+		t.Fatal("delegated pow solution not found")
+	}
+	verifyBody := buildSignedRequest(priv, map[string]interface{}{
+		"challenge_id":   challenge.ChallengeID,
+		"purpose":        purpose,
+		"subject_hash":   subjectHash,
+		"pubkey_hash":    pubHash,
+		"solution_nonce": nonce,
+	})
+	var verified api.DelegatedPowStatusResponse
+	postRawDecode(t, srv.URL+"/api/v1/auth/pow/delegated/verify", verifyBody, &verified)
+	if !verified.Verified || verified.Score != 4 || verified.ChallengeID != challenge.ChallengeID {
+		t.Fatalf("unexpected delegated pow status: %+v", verified)
+	}
+
+	var status api.DelegatedPowStatusResponse
+	postJSONDecode(t, srv.URL+"/api/v1/auth/pow/delegated/status", api.DelegatedPowStatusRequest{
+		ChallengeID: challenge.ChallengeID,
+		Purpose:     purpose,
+		SubjectHash: subjectHash,
+		PubkeyHash:  pubHash,
+	}, &status)
+	if !status.Verified || status.ChallengeID != challenge.ChallengeID {
+		t.Fatalf("unexpected cached delegated pow status: %+v", status)
+	}
+}
+
 func TestRegisterRequiresEmailVerification(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tmpDir := t.TempDir()
@@ -913,6 +1077,67 @@ func TestRegistrationEmailStartCooldown(t *testing.T) {
 	}
 }
 
+func TestRegistrationEmailStartRejectsTakenEmail(t *testing.T) {
+	srv, store, sender := newRegistrationAuthTestServer(t)
+	createUserWithEmail(t, store, "email_owner", "taken@example.com")
+
+	body, _ := json.Marshal(api.RegistrationEmailStartRequest{
+		Username: "new_email_user",
+		Email:    "taken@example.com",
+	})
+	resp, err := http.Post(srv.URL+"/api/v1/auth/register_email/start", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%s", resp.StatusCode, respBody)
+	}
+	var er api.ErrorResponse
+	if err := json.Unmarshal(respBody, &er); err != nil {
+		t.Fatalf("decode error: %v body=%s", err, respBody)
+	}
+	if er.Error != api.ErrEmailTaken {
+		t.Fatalf("expected email_taken, got %+v", er)
+	}
+	if sender.count != 0 {
+		t.Fatalf("expected no email to be sent, got %d", sender.count)
+	}
+}
+
+func TestRegisterRejectsTakenEmailAfterChallenge(t *testing.T) {
+	srv, store, sender := newRegistrationAuthTestServer(t)
+	emailStart := startRegistrationEmail(t, srv.URL, "race_user", "race@example.com")
+	code := regexp.MustCompile(`\d{6}`).FindString(sender.body)
+	if code == "" {
+		t.Fatalf("verification code not found in email body: %s", sender.body)
+	}
+	createUserWithEmail(t, store, "race_owner", "race@example.com")
+
+	priv, _ := secp.GeneratePrivateKey()
+	pubHex := hex.EncodeToString(priv.PubKey().SerializeUncompressed())
+	respBody, status := signedPostStatus(srv.URL+"/api/v1/auth/register", priv,
+		map[string]interface{}{
+			"username":           "race_user",
+			"nickname":           "Race User",
+			"email":              "race@example.com",
+			"email_challenge_id": emailStart.ChallengeID,
+			"email_code":         code,
+			"pubkey_hex":         pubHex,
+		})
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409, got %d body=%s", status, respBody)
+	}
+	var er api.ErrorResponse
+	if err := json.Unmarshal(respBody, &er); err != nil {
+		t.Fatalf("decode error: %v body=%s", err, respBody)
+	}
+	if er.Error != api.ErrEmailTaken {
+		t.Fatalf("expected email_taken, got %+v", er)
+	}
+}
+
 func TestRecoveryRFAStartCooldown(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tmpDir := t.TempDir()
@@ -992,6 +1217,57 @@ func TestRecoveryRFAStartCooldown(t *testing.T) {
 }
 
 // === helpers ===
+
+func newRegistrationAuthTestServer(t *testing.T) (*httptest.Server, *user.Store, *fakeEmailSender) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	dsn := filepath.Join(tmpDir, "test.db")
+	gormDB, err := db.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	if err := user.AutoMigrate(gormDB); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	t.Cleanup(func() {
+		sqlDB, _ := gormDB.DB()
+		if sqlDB != nil {
+			sqlDB.Close()
+		}
+	})
+
+	store := user.NewStore(gormDB)
+	sender := &fakeEmailSender{}
+	handler := &auth.Handler{
+		UserStore: store,
+		Verifier:  hcrypto.NewSignedRequestVerifier(nil, "nonce:test"),
+		RegistrationEmail: auth.NewRegistrationEmailService(
+			store,
+			newMemoryRFAStore(),
+			sender,
+		),
+	}
+	r := gin.New()
+	v1 := r.Group("/api/v1")
+	handler.Register(v1)
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+	return srv, store, sender
+}
+
+func createUserWithEmail(t *testing.T, store *user.Store, username, email string) {
+	t.Helper()
+	priv, _ := secp.GeneratePrivateKey()
+	pub := hex.EncodeToString(priv.PubKey().SerializeUncompressed())
+	hash, err := hcrypto.PubkeyHash(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateWithPubkey(username, username, email, pub, hash); err != nil {
+		t.Fatalf("create user %s: %v", username, err)
+	}
+}
 
 type fakeEmailSender struct {
 	to      string
@@ -1284,6 +1560,47 @@ func buildSignedRequestWithTimestamp(priv *secp.PrivateKey, payload map[string]i
 	}
 	body, _ := json.Marshal(req)
 	return body
+}
+
+func postJSONDecode(t *testing.T, url string, payload any, out any) {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postRawDecode(t, url, body, out)
+}
+
+func postRawDecode(t *testing.T, url string, body []byte, out any) {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST %s status=%d body=%s", url, resp.StatusCode, string(data))
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, string(data))
+	}
+}
+
+func getJSONDecode(t *testing.T, url string, out any) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status=%d body=%s", url, resp.StatusCode, string(data))
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, string(data))
+	}
 }
 
 // 让 import 工作

@@ -5,6 +5,7 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   desktop_multi_window
   desktop_webview_window
+  file_selector_windows
   hotkey_manager_windows
   screen_retriever_windows
   sqlite3_flutter_libs

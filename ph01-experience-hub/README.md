@@ -4,6 +4,8 @@
 
 同一进程还承载经验网络治理能力：主脑发现评价链异常时，可以请求管理端签发否决块。线上只持有 Root 公钥签发的主控证书与主控私钥；Root 私钥离线冷保存，不进部署环境。
 
+它不负责单独运行 DHT 节点、打洞 socket 或 relay 搬运；这些职责由独立的 `experience-dht` 服务承担。管理端只负责公共 DHT 列表、节点注册、健康检查和治理入口。
+
 协议草案见：[docs/experience-package-spec.md](../docs/experience-package-spec.md)。
 
 ## 当前能力
@@ -50,6 +52,20 @@ cp config.example.json config.json
   "admin_token": "CHANGE_ME_EXPERIENCE_HUB_TOKEN",
   "cors_origins": ["*"],
   "max_upload_bytes": 536870912,
+  "review": {
+    "trust_admin_uploads": false
+  },
+  "review_chain_scheduler": {
+    "enabled": false,
+    "interval_seconds": 60,
+    "poll_delay_seconds": 2,
+    "limit": 1,
+    "dht_fanout_limit": 3
+  },
+  "auth_center": {
+    "base_url": "http://localhost:8080",
+    "audience": "ph01-experience-hub"
+  },
   "governance": {
     "enabled": true,
     "root_certificate_path": "../certs/public/experience-network/root-certificate.json",
@@ -63,6 +79,17 @@ cp config.example.json config.json
 
 - `storage_root` 指向大容量磁盘或挂载卷。
 - `admin_token` 通过环境变量或部署系统注入。
+- 上传接口会把非 hub admin token 的 Bearer 转给认证中心 `/admin/session/self`
+  验证。`review.trust_admin_uploads=false` 时认证中心管理员上传进入 inbox；
+  `true` 时只有 `root/admin` 才自动审核入网。
+- 上传前客户端先向管理端申请包级 PoW challenge id，管理端通过认证中心
+  `/api/v1/auth/pow/delegated/challenge` 创建通用委托 PoW。上传接口要求每个
+  经验包携带已完成的 challenge id，并通过
+  `/api/v1/auth/pow/delegated/status` 查询状态；管理端不在本进程内计算 PoW，
+  该校验发生在可信管理员免审判断之前。
+- `review_chain_scheduler.enabled=true` 后，管理端会按当前网络包存量生成评价链刷新需求，
+  投递到已注册且健康的公共 DHT，并把更长的评价链归档为候选链；该功能依赖
+  `governance.enabled=true`，因为 DHT 写入需要 PH01 签名。
 - 反向代理层启用 HTTPS。
 
 ## 启动服务端
@@ -106,7 +133,7 @@ ph01-expctl fetch exp_demo ./exp_demo.hxp
 
 ## HTTP API
 
-所有 `/api/v1/*` 接口都需要：
+除公开治理证书、DHT 服务发现接口、普通用户 SignedRequest 上传外，`/api/v1/*` 接口都需要：
 
 ```http
 Authorization: Bearer <admin_token>
@@ -115,18 +142,94 @@ Authorization: Bearer <admin_token>
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/healthz` | 健康检查 |
-| `POST` | `/api/v1/experiences?status=inbox` | 上传 `.hxp` |
+| `POST` | `/api/v1/experiences?status=inbox` | 管理端 Bearer 上传 raw `.hxp` |
+| `POST` | `/api/v1/experiences` | 普通用户 SignedRequest 上传 `.hxp`，固定进入 `inbox` |
 | `GET` | `/api/v1/experiences` | 列表，可按 `status` / `keyword` / `q` 过滤 |
 | `GET` | `/api/v1/search?q=text&status=network&limit=50` | 搜索 `content/` 下文本文件，返回路径、行号和片段 |
 | `GET` | `/api/v1/experiences/{id}` | 查看索引详情 |
 | `GET` | `/api/v1/experiences/{id}/file` | 读取默认原始记录入口 |
 | `GET` | `/api/v1/experiences/{id}/file?path=content/raw/conversation.md` | 读取包内 Markdown 文件 |
-| `GET` | `/api/v1/experiences/{id}/package` | 下载原始 `.hxp` |
-| `POST` | `/api/v1/experiences/{id}/review` | 更新审核状态 |
+| `GET` | `/api/v1/experiences/{id}/package` | 下载 `.hxp`；network 状态会附加 `review-materials.json` |
+| `GET` | `/api/v1/experiences/{id}/review-materials` | 审核通过后单独取回签名/证书材料 |
+| `POST` | `/api/v1/experiences/{id}/review` | 更新审核状态；配置治理服务后 network 审核会签发审核材料 |
 | `GET` | `/api/v1/vfs/index` | 输出主脑可读 Markdown 虚拟索引 |
 | `GET` | `/api/v1/governance/root/certificate` | 公开 Root 公钥证书 |
 | `GET` | `/api/v1/governance/master/certificate` | 公开主控证书 |
 | `POST` | `/api/v1/governance/veto_blocks/sign` | 主脑风控决策后签发否决块 |
+| `GET` | `/api/v1/dht/nodes` | 公开 DHT 节点列表，自动隐藏过期或 unhealthy 节点 |
+| `POST` | `/api/v1/dht/nodes/register` | 公开 DHT 节点自注册；用户节点需携带 `owner_peer_id` 对应公钥的 `admin_signed_request` |
+| `DELETE` | `/api/v1/dht/nodes/{node_id}` | 注销公开 DHT 节点；请求体携带同一 owner 公钥的 SignedRequest |
+
+对 DHT 来说，“公共”是行为状态：节点主动向管理端注册并持续响应健康检查，就会作为公共 DHT 候选展示；关闭公开时应注销节点或停止心跳。协议不使用单独的可见性字段。
+
+DHT 节点描述字段与客户端保持一致：
+
+```json
+{
+  "schema_version": "ph01.experience.dht_node.v1",
+  "node_id": "dht_01",
+  "owner_kind": "user",
+  "endpoints": [
+    {
+      "network": "https",
+      "host": "dht.example.com",
+      "port": 443
+    },
+    {
+      "network": "udp",
+      "host": "203.0.113.10",
+      "port": 41001
+    }
+  ],
+  "capabilities": {
+    "relay": true,
+    "hole_punch": true
+  },
+  "relay_policy": "public",
+  "region": "cn-east",
+  "load": {
+    "relay_active_sessions": 0,
+    "relay_capacity": 100
+  },
+  "health_status": "healthy",
+  "last_health_check_at": "2026-05-09T09:55:00Z",
+  "expires_at": "2026-05-09T10:00:00Z"
+}
+```
+
+审核通过的网络包会携带 `review-materials.json`。原作者也可以只请求
+`GET /api/v1/experiences/{id}/review-materials`，客户端会重新校验本地
+`package.zip` hash；一致时附加材料，不一致时应重新下载完整包。
+
+## DHT 独立部署口径
+
+DHT 不内置到经验管理端，也不要求通过 `ph01-deploy` 才能部署。源码目录和部署包分开：
+`experience-dht/deployment-package/` 是可单独扩散的部署包目录，只携带运行资产和预编译二进制，不携带源码。
+
+经验管理端只负责：
+
+- 维护公共 DHT 列表。
+- 接收 DHT 自注册和注销。
+- 做健康检查和过期隐藏。
+- 作为 P2P 不可达时的稳定下载源。
+
+部署 DHT 节点请使用：
+
+```bash
+cd ../experience-dht/deployment-package
+./deploy.sh init
+./deploy.sh up
+```
+
+当 `review.trust_admin_uploads=true` 且请求 Bearer 是认证中心 `root/admin`
+管理端 session 时，`POST /api/v1/experiences` 会自动导入为 `network`，并在
+`review/local-review.json` 中记录 `review_mode=trusted_admin_upload`、
+`reviewed_by` 和 `reviewed_role`。该路径仍会校验包结构、`package.zip` hash、
+发布者签名，并生成 `review-materials.json`。
+
+普通用户可使用 PH01 `SignedRequest` 上传，业务 payload 使用
+`ph01.experience.upload.v1`，包含 `package_base64` 与可选 `package_sha256`。
+服务端验签后只导入 `inbox`，不会因为 query 指定 `status=network` 而免审。
 
 ## 原始转储目录示例
 

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -101,6 +102,26 @@ func main() {
 		gatewaySyncer = syncai.NewClient(syncCfg.BaseURL, syncCfg.InternalToken, time.Duration(syncCfg.TimeoutMS)*time.Millisecond)
 		log.Printf("[info] ai gateway user sync enabled: %s", syncCfg.BaseURL)
 	}
+	powService := auth.NewUserPowService()
+	delegatedPowService := auth.NewDelegatedPowService()
+	if powCfg := cfg.UserPow["default"]; powCfg != nil {
+		if powCfg.DifficultyBits > 0 {
+			powService.DifficultyBits = powCfg.DifficultyBits
+			delegatedPowService.DifficultyBits = powCfg.DifficultyBits
+		}
+		if powCfg.MemoryKiB > 0 {
+			powService.MemoryKiB = powCfg.MemoryKiB
+			delegatedPowService.MemoryKiB = powCfg.MemoryKiB
+		}
+		if powCfg.RoundCount > 0 {
+			powService.RoundCount = powCfg.RoundCount
+			delegatedPowService.RoundCount = powCfg.RoundCount
+		}
+		if powCfg.TTLSeconds > 0 {
+			powService.TTL = time.Duration(powCfg.TTLSeconds) * time.Second
+			delegatedPowService.TTL = time.Duration(powCfg.TTLSeconds) * time.Second
+		}
+	}
 	authHandler := &auth.Handler{
 		UserStore:         userStore,
 		Verifier:          verifier,
@@ -108,12 +129,15 @@ func main() {
 		RFA:               rfaService,
 		RegistrationEmail: registrationEmail,
 		GatewaySyncer:     gatewaySyncer,
+		Pow:               powService,
+		DelegatedPow:      delegatedPowService,
 	}
 	adminHandler := &admin.Handler{
 		UserStore:   userStore,
 		SystemStore: systemStore,
 		Verifier:    verifier,
 		AdminToken:  serverCfg.AdminToken,
+		PublicBase:  authPublicBaseURL(serverCfg),
 	}
 
 	r := gin.Default()
@@ -130,6 +154,9 @@ func main() {
 
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "service": "auth-gateway"})
+	})
+	r.GET("/", func(c *gin.Context) {
+		c.Redirect(http.StatusFound, "/admin-ui/auth.html")
 	})
 
 	v1 := r.Group("/api/v1")
@@ -176,6 +203,13 @@ func main() {
 	for _, server := range servers {
 		_ = server.Shutdown(ctx)
 	}
+}
+
+func authPublicBaseURL(serverCfg *config.Server) string {
+	if value := strings.TrimSpace(os.Getenv("PH01_AUTH_PUBLIC_BASE_URL")); value != "" {
+		return value
+	}
+	return serverCfg.PublicBase
 }
 
 func startHTTPServer(name string, srv *http.Server, errCh chan<- error) {

@@ -118,6 +118,38 @@ type VetoSignResponse struct {
 	MasterCertificate json.RawMessage `json:"master_certificate"`
 }
 
+type ReviewSignRequest struct {
+	ExperienceID    string `json:"experience_id"`
+	PackageHash     string `json:"package_hash"`
+	PublisherPubkey string `json:"publisher_pubkey"`
+	ReviewMode      string `json:"review_mode"`
+	ReviewedAt      string `json:"reviewed_at,omitempty"`
+}
+
+type ReviewSignaturePayload struct {
+	SchemaVersion        string `json:"schema_version"`
+	ExperienceID         string `json:"experience_id"`
+	PackageHashAlgorithm string `json:"package_hash_algorithm"`
+	PackageHash          string `json:"package_hash"`
+	PublisherPubkey      string `json:"publisher_pubkey"`
+	ReviewStatus         string `json:"review_status"`
+	ReviewMode           string `json:"review_mode"`
+	ReviewedAt           string `json:"reviewed_at"`
+	CertificateID        string `json:"certificate_id"`
+	SignerRole           string `json:"signer_role"`
+	SignatureAlgorithm   string `json:"signature_algorithm"`
+}
+
+type ReviewMaterials struct {
+	SchemaVersion          string          `json:"schema_version"`
+	RootKeyID              string          `json:"root_key_id"`
+	SignatureAlgorithm     string          `json:"signature_algorithm"`
+	SignaturePayloadSHA256 string          `json:"signature_payload_sha256"`
+	ManagerReviewSignature string          `json:"manager_review_signature"`
+	SignaturePayload       json.RawMessage `json:"signature_payload"`
+	ManagerCertificate     json.RawMessage `json:"manager_certificate"`
+}
+
 func Load(cfg Config) (*Service, error) {
 	rootRaw, err := os.ReadFile(cfg.RootCertificatePath)
 	if err != nil {
@@ -147,6 +179,61 @@ func Load(cfg Config) (*Service, error) {
 		RootCertificateRaw:   append(json.RawMessage(nil), rootRaw...),
 		MasterCertificateRaw: append(json.RawMessage(nil), masterRaw...),
 		Master:               master,
+	}, nil
+}
+
+func (s *Service) SignReview(req ReviewSignRequest) (ReviewMaterials, error) {
+	if s == nil || s.Master == nil {
+		return ReviewMaterials{}, fmt.Errorf("governance service is not configured")
+	}
+	if strings.TrimSpace(req.ExperienceID) == "" {
+		return ReviewMaterials{}, fmt.Errorf("experience_id is required")
+	}
+	if strings.TrimSpace(req.PackageHash) == "" {
+		return ReviewMaterials{}, fmt.Errorf("package_hash is required")
+	}
+	if strings.TrimSpace(req.PublisherPubkey) == "" {
+		return ReviewMaterials{}, fmt.Errorf("publisher_pubkey is required")
+	}
+	reviewMode := strings.TrimSpace(req.ReviewMode)
+	if reviewMode == "" {
+		reviewMode = "manual_review"
+	}
+	reviewedAt := strings.TrimSpace(req.ReviewedAt)
+	if reviewedAt == "" {
+		reviewedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	cert := s.Master.Certificate.Certificate
+	payload := ReviewSignaturePayload{
+		SchemaVersion:        "ph01.experience.review_payload.v1",
+		ExperienceID:         strings.TrimSpace(req.ExperienceID),
+		PackageHashAlgorithm: "sha256",
+		PackageHash:          strings.TrimSpace(req.PackageHash),
+		PublisherPubkey:      strings.TrimSpace(req.PublisherPubkey),
+		ReviewStatus:         "network",
+		ReviewMode:           reviewMode,
+		ReviewedAt:           reviewedAt,
+		CertificateID:        cert.CertificateID,
+		SignerRole:           cert.Role,
+		SignatureAlgorithm:   Algorithm,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return ReviewMaterials{}, err
+	}
+	signature, err := Sign(s.Master.PrivateKey, payloadBytes)
+	if err != nil {
+		return ReviewMaterials{}, err
+	}
+	return ReviewMaterials{
+		SchemaVersion:          "ph01.experience.review_materials.v1",
+		RootKeyID:              cert.IssuerRootKeyID,
+		SignatureAlgorithm:     Algorithm,
+		SignaturePayloadSHA256: sha256Hex(payloadBytes),
+		ManagerReviewSignature: signature,
+		SignaturePayload:       json.RawMessage(payloadBytes),
+		ManagerCertificate:     s.MasterCertificateRaw,
 	}, nil
 }
 

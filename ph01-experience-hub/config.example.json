@@ -4,6 +4,20 @@
   "admin_token": "CHANGE_ME_EXPERIENCE_HUB_TOKEN",
   "cors_origins": ["*"],
   "max_upload_bytes": 536870912,
+  "review": {
+    "trust_admin_uploads": false
+  },
+  "review_chain_scheduler": {
+    "enabled": false,
+    "interval_seconds": 60,
+    "poll_delay_seconds": 2,
+    "limit": 1,
+    "dht_fanout_limit": 3
+  },
+  "auth_center": {
+    "base_url": "http://localhost:8080",
+    "audience": "ph01-experience-hub"
+  },
   "governance": {
     "enabled": false,
     "root_certificate_path": "../certs/public/experience-network/root-certificate.json",

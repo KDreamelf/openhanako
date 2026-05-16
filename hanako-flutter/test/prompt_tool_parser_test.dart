@@ -44,12 +44,12 @@ void main() {
     final parser = PromptToolStreamParser();
 
     final events = parser.push(
-      '<tool_call>{"name":"local_environment","arguments":{}}</tool_call>',
+      '<tool_call>{"name":"exec_command","arguments":{"cmd":"pwd"}}</tool_call>',
     );
 
     expect(events, hasLength(1));
     final call = events.single as PromptToolCallParsed;
-    expect(call.name, 'local_environment');
-    expect(call.argumentsJson, '{}');
+    expect(call.name, 'exec_command');
+    expect(call.argumentsJson, '{"cmd":"pwd"}');
   });
 }

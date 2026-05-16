@@ -55,6 +55,11 @@ func (s *RegistrationEmailService) Start(ctx context.Context, username, email st
 	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
+	if taken, err := s.UserStore.EmailExists(email); err != nil {
+		return nil, err
+	} else if taken {
+		return nil, errors.New(api.ErrEmailTaken)
+	}
 	cooldownSeconds := durationSeconds(s.SendCooldown)
 	releaseCooldown, err := reserveEmailSendCooldown(ctx, s.Store, "registration", email, s.SendCooldown)
 	if err != nil {

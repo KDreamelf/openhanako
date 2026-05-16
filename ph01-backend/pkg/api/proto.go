@@ -215,6 +215,7 @@ const (
 	ErrUserDisabled              = "user_disabled"
 	ErrUserNotFound              = "user_not_found"
 	ErrUsernameTaken             = "username_taken"
+	ErrEmailTaken                = "email_taken"
 	ErrModelNotAllowed           = "model_not_allowed"
 	ErrRateLimitExceeded         = "rate_limit_exceeded"
 	ErrChannelExpired            = "channel_expired"
@@ -249,12 +250,16 @@ type VerifySignatureRequest struct {
 
 // VerifySignatureResponse 返回验签结果。
 type VerifySignatureResponse struct {
-	Valid      bool   `json:"valid"`
-	UserID     uint64 `json:"user_id,omitempty"`
-	Username   string `json:"username,omitempty"`
-	Tier       string `json:"tier,omitempty"`
-	PubkeyHash string `json:"pubkey_hash,omitempty"`
-	Error      string `json:"error,omitempty"`
+	Valid         bool   `json:"valid"`
+	UserID        uint64 `json:"user_id,omitempty"`
+	Username      string `json:"username,omitempty"`
+	Tier          string `json:"tier,omitempty"`
+	PubkeyHash    string `json:"pubkey_hash,omitempty"`
+	PowVerified   bool   `json:"pow_verified,omitempty"`
+	PowAlgorithm  string `json:"pow_algorithm,omitempty"`
+	PowScore      int    `json:"pow_score,omitempty"`
+	PowVerifiedAt int64  `json:"pow_verified_at,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 // VerifyChallengeSignatureRequest 是 ai-gateway 登录码 / 协议登录专用内部请求：
@@ -303,6 +308,113 @@ type VerifyPubkeysAtResponse struct {
 	Missing []PubkeyBindingAtCheck `json:"missing,omitempty"`
 }
 
+// ========== §11 用户工作量证明 ==========
+
+// UserPowChallengeRequest 发起用户 PoW 挑战。该接口不影响注册/登录。
+type UserPowChallengeRequest struct {
+	PubkeyHash string `json:"pubkey_hash"`
+	Purpose    string `json:"purpose,omitempty"`
+}
+
+// UserPowChallengeResponse 返回短期挑战。挑战值只用于一次 PoW 验证。
+type UserPowChallengeResponse struct {
+	ChallengeID    string `json:"challenge_id"`
+	PubkeyHash     string `json:"pubkey_hash"`
+	Algorithm      string `json:"algorithm"`
+	DifficultyBits int    `json:"difficulty_bits"`
+	MemoryKiB      int    `json:"memory_kib"`
+	RoundCount     int    `json:"round_count"`
+	Seed           string `json:"seed"`
+	ExpiresAt      int64  `json:"expires_at"`
+}
+
+// UserPowVerifyPayload 是 /auth/pow/verify 的 SignedRequest.Payload。
+type UserPowVerifyPayload struct {
+	ChallengeID   string `json:"challenge_id"`
+	PubkeyHash    string `json:"pubkey_hash"`
+	SolutionNonce string `json:"solution_nonce"`
+}
+
+// DelegatedPowChallengeRequest 为外部系统申请短期委托 PoW 挑战。
+type DelegatedPowChallengeRequest struct {
+	Purpose     string `json:"purpose"`
+	SubjectHash string `json:"subject_hash"`
+	PubkeyHash  string `json:"pubkey_hash,omitempty"`
+}
+
+// DelegatedPowChallengeResponse 返回认证中心管理的通用委托 PoW 挑战。
+type DelegatedPowChallengeResponse struct {
+	ChallengeID    string `json:"challenge_id"`
+	Purpose        string `json:"purpose"`
+	SubjectHash    string `json:"subject_hash"`
+	PubkeyHash     string `json:"pubkey_hash,omitempty"`
+	Algorithm      string `json:"algorithm"`
+	DifficultyBits int    `json:"difficulty_bits"`
+	MemoryKiB      int    `json:"memory_kib"`
+	RoundCount     int    `json:"round_count"`
+	Seed           string `json:"seed"`
+	ExpiresAt      int64  `json:"expires_at"`
+}
+
+// DelegatedPowVerifyPayload 是 /auth/pow/delegated/verify 的 SignedRequest.Payload。
+type DelegatedPowVerifyPayload struct {
+	ChallengeID   string `json:"challenge_id"`
+	Purpose       string `json:"purpose"`
+	SubjectHash   string `json:"subject_hash"`
+	PubkeyHash    string `json:"pubkey_hash,omitempty"`
+	SolutionNonce string `json:"solution_nonce"`
+}
+
+// DelegatedPowStatusRequest 查询某个委托 PoW 是否已经完成。
+type DelegatedPowStatusRequest struct {
+	ChallengeID string `json:"challenge_id"`
+	Purpose     string `json:"purpose,omitempty"`
+	SubjectHash string `json:"subject_hash,omitempty"`
+	PubkeyHash  string `json:"pubkey_hash,omitempty"`
+}
+
+type DelegatedPowStatusResponse struct {
+	ChallengeID string `json:"challenge_id"`
+	Purpose     string `json:"purpose,omitempty"`
+	SubjectHash string `json:"subject_hash,omitempty"`
+	PubkeyHash  string `json:"pubkey_hash,omitempty"`
+	Verified    bool   `json:"verified"`
+	Algorithm   string `json:"algorithm,omitempty"`
+	Score       int    `json:"score,omitempty"`
+	VerifiedAt  int64  `json:"verified_at,omitempty"`
+	ExpiresAt   int64  `json:"expires_at,omitempty"`
+}
+
+// UserPubkeyStatus 是认证中心对公钥状态的公开/内部查询结果。
+type UserPubkeyStatus struct {
+	Valid         bool   `json:"valid"`
+	UserID        uint64 `json:"user_id,omitempty"`
+	Username      string `json:"username,omitempty"`
+	Tier          string `json:"tier,omitempty"`
+	Disabled      bool   `json:"disabled,omitempty"`
+	PubkeyHash    string `json:"pubkey_hash"`
+	PowVerified   bool   `json:"pow_verified"`
+	PowAlgorithm  string `json:"pow_algorithm,omitempty"`
+	PowScore      int    `json:"pow_score,omitempty"`
+	PowVerifiedAt int64  `json:"pow_verified_at,omitempty"`
+	UpdatedAt     int64  `json:"updated_at,omitempty"`
+}
+
+// PubkeyStatusRequest 批量查询公钥状态。经验网络握手最多需要查 100 个散花用户。
+type PubkeyStatusRequest struct {
+	PubkeyHashes []string `json:"pubkey_hashes"`
+}
+
+type PubkeyStatusResponse struct {
+	Items []UserPubkeyStatus `json:"items"`
+}
+
+// UserStateChangesResponse 供 AI 网关按时间戳拉取认证中心用户状态增量。
+type UserStateChangesResponse struct {
+	Items     []UserPubkeyStatus `json:"items"`
+	NextSince int64              `json:"next_since"`
+}
+
 // ========== 管理后台 API ==========
 
 // AdminUserListResponse 列出系统所有用户（分页）。
@@ -325,16 +437,21 @@ type AdminUser struct {
 }
 
 type AdminPubkey struct {
-	ID         uint64  `json:"id"`
-	PubkeyHash string  `json:"pubkey_hash"`
-	PubkeyHex  string  `json:"pubkey_hex,omitempty"`
-	CreatedAt  string  `json:"created_at"`
-	RevokedAt  *string `json:"revoked_at,omitempty"`
+	ID            uint64  `json:"id"`
+	PubkeyHash    string  `json:"pubkey_hash"`
+	PubkeyHex     string  `json:"pubkey_hex,omitempty"`
+	PowVerified   bool    `json:"pow_verified"`
+	PowAlgorithm  string  `json:"pow_algorithm,omitempty"`
+	PowScore      int     `json:"pow_score,omitempty"`
+	PowVerifiedAt int64   `json:"pow_verified_at,omitempty"`
+	CreatedAt     string  `json:"created_at"`
+	RevokedAt     *string `json:"revoked_at,omitempty"`
 }
 
-// AdminUpdateUserRequest 管理员修改用户 tier / disable。
+// AdminUpdateUserRequest 管理员修改用户基础资料、tier、角色和禁用状态。
 type AdminUpdateUserRequest struct {
 	Tier     *string `json:"tier,omitempty"`
+	Nickname *string `json:"nickname,omitempty"`
 	Disabled *bool   `json:"disabled,omitempty"`
 	Email    *string `json:"email,omitempty"`
 	Role     *string `json:"role,omitempty"`
@@ -345,6 +462,38 @@ type AdminSessionUser struct {
 	Username string `json:"username"`
 	Nickname string `json:"nickname"`
 	Role     string `json:"role"`
+}
+
+// AdminLoginChallenge 是认证中心管理端 PH01 登录挑战明细。
+type AdminLoginChallenge struct {
+	Version     int    `json:"version"`
+	Purpose     string `json:"purpose"`
+	ChallengeID string `json:"challenge_id"`
+	Nonce       string `json:"nonce"`
+	IP          string `json:"ip"`
+	IPLocation  string `json:"ip_location"`
+	UserAgent   string `json:"ua"`
+	IssuedAt    int64  `json:"issued_at"`
+	ExpiresAt   int64  `json:"expires_at"`
+}
+
+// AdminLoginChallengeResponse 返回网页展示和 ph01:// 协议登录需要的挑战码。
+type AdminLoginChallengeResponse struct {
+	Challenge   string              `json:"challenge"`
+	ChallengeID string              `json:"challenge_id"`
+	Nonce       string              `json:"nonce"`
+	ExpiresAt   int64               `json:"expires_at"`
+	Detail      AdminLoginChallenge `json:"detail"`
+	ProtocolURL string              `json:"protocol_url"`
+}
+
+// AdminSignedLoginRequest 是子体针对管理端 challenge 生成的授权 JSON。
+type AdminSignedLoginRequest struct {
+	UserID       uint64 `json:"user_id"`
+	Nonce        string `json:"nonce"`
+	Challenge    string `json:"challenge,omitempty"`
+	Signature    string `json:"signature"`
+	SignatureHex string `json:"signature_hex,omitempty"`
 }
 
 type AdminLoginResponse struct {

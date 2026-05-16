@@ -5,7 +5,7 @@ import 'package:dio/dio.dart';
 import 'provider.dart';
 
 /// 简化的 utility-style LLM 调用：拼 system + user message，等流结束返完整 text。
-/// 用于 memory compile / session summary / channel triage / deep memory 等"非交互"
+/// 用于 memory compile / session summary / deep memory 等"非交互"
 /// 场景，规避手动管理 Stream<LlmEvent>。
 ///
 /// 与 legacy lib/llm/provider-client.js 的 `callProviderText` 对齐。

@@ -1,0 +1,6 @@
+data/
+dist/
+release/
+bin/
+*.test
+*.log

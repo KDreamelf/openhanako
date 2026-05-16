@@ -20,6 +20,18 @@ import type {
   PH01SignedLoginRequest,
 } from '@/features/auth/types'
 
+const PH01_PROTOCOL_OPEN_CHECK_MS = 2500
+const PH01_STATUS_INITIAL_DELAY_MS = 900
+const PH01_STATUS_MAX_POLL_MS = 60_000
+const PH01_STATUS_MAX_INTERVAL_MS = 5000
+
+type HttpLikeError = {
+  response?: {
+    status?: number
+    headers?: Record<string, string | number | undefined>
+  }
+}
+
 function parseSignedLogin(raw: string): PH01SignedLoginRequest | null {
   try {
     const parsed = JSON.parse(raw.trim()) as PH01SignedLoginRequest
@@ -32,6 +44,22 @@ function parseSignedLogin(raw: string): PH01SignedLoginRequest | null {
   }
 }
 
+function nextStatusPollDelay(attempt: number) {
+  return Math.min(1500 + attempt * 500, PH01_STATUS_MAX_INTERVAL_MS)
+}
+
+function httpStatus(error: unknown) {
+  return (error as HttpLikeError | undefined)?.response?.status
+}
+
+function retryAfterMs(error: unknown) {
+  const headers = (error as HttpLikeError | undefined)?.response?.headers
+  const raw = headers?.['retry-after'] ?? headers?.['Retry-After']
+  const seconds =
+    typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : 0
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0
+}
+
 export function UserAuthForm({
   className,
   redirectTo,
@@ -40,35 +68,50 @@ export function UserAuthForm({
   const { t } = useTranslation()
   const { status } = useStatus()
   const { handleLoginSuccess } = useAuthRedirect()
-  const [challenge, setChallenge] = useState<PH01ChallengeResponse | null>(
-    null
-  )
+  const [challenge, setChallenge] = useState<PH01ChallengeResponse | null>(null)
   const [authorizationText, setAuthorizationText] = useState('')
   const [agreedToLegal, setAgreedToLegal] = useState(false)
   const [isChallengeLoading, setIsChallengeLoading] = useState(false)
   const [isProtocolLoading, setIsProtocolLoading] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [protocolHelp, setProtocolHelp] = useState('')
   const pollTimerRef = useRef<number | null>(null)
+  const protocolOpenCheckTimerRef = useRef<number | null>(null)
+  const protocolLaunchCleanupRef = useRef<(() => void) | null>(null)
+  const protocolWindowLeftRef = useRef(false)
+  const pollStartedAtRef = useRef(0)
+  const pollAttemptRef = useRef(0)
+  const pollChallengeStatusRef = useRef<(challengeId: string) => void>(() => {})
   const legalConsentErrorMessage = t('Please agree to the legal terms first')
 
   const hasUserAgreement = Boolean(status?.user_agreement_enabled)
   const hasPrivacyPolicy = Boolean(status?.privacy_policy_enabled)
   const requiresLegalConsent = hasUserAgreement || hasPrivacyPolicy
+  const legalConsentReady = !requiresLegalConsent || agreedToLegal
 
-  useEffect(() => {
-    setAgreedToLegal(!requiresLegalConsent)
-  }, [requiresLegalConsent])
+  const clearProtocolOpenCheck = useCallback(() => {
+    if (protocolOpenCheckTimerRef.current) {
+      window.clearTimeout(protocolOpenCheckTimerRef.current)
+      protocolOpenCheckTimerRef.current = null
+    }
+    protocolLaunchCleanupRef.current?.()
+    protocolLaunchCleanupRef.current = null
+  }, [])
 
   const stopPolling = useCallback(() => {
     if (pollTimerRef.current) {
       window.clearTimeout(pollTimerRef.current)
       pollTimerRef.current = null
     }
+    clearProtocolOpenCheck()
+    pollStartedAtRef.current = 0
+    pollAttemptRef.current = 0
     setIsProtocolLoading(false)
-  }, [])
+  }, [clearProtocolOpenCheck])
 
   const refreshChallenge = useCallback(async () => {
     stopPolling()
+    setProtocolHelp('')
     setIsChallengeLoading(true)
     try {
       const res = await createPH01Challenge()
@@ -84,13 +127,74 @@ export function UserAuthForm({
     }
   }, [stopPolling, t])
 
+  const showManualLoginHint = useCallback(
+    (message: string) => {
+      stopPolling()
+      setProtocolHelp(message)
+      toast.info(message)
+    },
+    [stopPolling]
+  )
+
   useEffect(() => {
-    refreshChallenge()
-    return stopPolling
+    const timer = window.setTimeout(() => {
+      void refreshChallenge()
+    }, 0)
+    return () => {
+      window.clearTimeout(timer)
+      stopPolling()
+    }
   }, [refreshChallenge, stopPolling])
+
+  const startProtocolOpenCheck = useCallback(() => {
+    clearProtocolOpenCheck()
+    protocolWindowLeftRef.current = false
+    const markWindowLeft = () => {
+      protocolWindowLeftRef.current = true
+    }
+    const markVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') markWindowLeft()
+    }
+    window.addEventListener('blur', markWindowLeft)
+    document.addEventListener('visibilitychange', markVisibilityChange)
+    protocolLaunchCleanupRef.current = () => {
+      window.removeEventListener('blur', markWindowLeft)
+      document.removeEventListener('visibilitychange', markVisibilityChange)
+    }
+    protocolOpenCheckTimerRef.current = window.setTimeout(() => {
+      clearProtocolOpenCheck()
+      if (!protocolWindowLeftRef.current) {
+        showManualLoginHint(
+          t(
+            'PH01 client was not opened. Copy the challenge code, authorize it in the client, then paste the login code below.'
+          )
+        )
+      }
+    }, PH01_PROTOCOL_OPEN_CHECK_MS)
+  }, [clearProtocolOpenCheck, showManualLoginHint, t])
 
   const pollChallengeStatus = useCallback(
     async (challengeId: string) => {
+      if (!pollStartedAtRef.current) {
+        pollStartedAtRef.current = Date.now()
+      }
+      if (Date.now() - pollStartedAtRef.current >= PH01_STATUS_MAX_POLL_MS) {
+        showManualLoginHint(
+          t(
+            'PH01 authorization timed out. Copy the challenge code and paste the login code below.'
+          )
+        )
+        return
+      }
+      const scheduleNextPoll = (delayMs?: number) => {
+        const attempt = pollAttemptRef.current
+        pollAttemptRef.current += 1
+        const delay = delayMs ?? nextStatusPollDelay(attempt)
+        pollTimerRef.current = window.setTimeout(
+          () => pollChallengeStatusRef.current(challengeId),
+          delay
+        )
+      }
       try {
         const res = await getPH01ChallengeStatus(challengeId)
         if (res.success && res.data?.id) {
@@ -100,26 +204,39 @@ export function UserAuthForm({
           return
         }
         if (res.success && res.data?.status === 'pending') {
-          pollTimerRef.current = window.setTimeout(
-            () => pollChallengeStatus(challengeId),
-            1500
-          )
+          scheduleNextPoll()
           return
         }
         stopPolling()
         toast.error(res.message || t('Login failed'))
-      } catch {
-        pollTimerRef.current = window.setTimeout(
-          () => pollChallengeStatus(challengeId),
-          1500
-        )
+      } catch (error) {
+        const status = httpStatus(error)
+        if (status === 400 || status === 404) {
+          showManualLoginHint(
+            t(
+              'PH01 login challenge expired. Refresh the challenge or use login code.'
+            )
+          )
+          return
+        }
+        if (status === 429) {
+          scheduleNextPoll(
+            Math.max(retryAfterMs(error), PH01_STATUS_MAX_INTERVAL_MS)
+          )
+          return
+        }
+        scheduleNextPoll(PH01_STATUS_MAX_INTERVAL_MS)
       }
     },
-    [handleLoginSuccess, redirectTo, stopPolling, t]
+    [handleLoginSuccess, redirectTo, showManualLoginHint, stopPolling, t]
   )
 
+  useEffect(() => {
+    pollChallengeStatusRef.current = pollChallengeStatus
+  }, [pollChallengeStatus])
+
   const handleProtocolLogin = async () => {
-    if (requiresLegalConsent && !agreedToLegal) {
+    if (!legalConsentReady) {
       toast.error(legalConsentErrorMessage)
       return
     }
@@ -129,8 +246,15 @@ export function UserAuthForm({
     }
 
     setIsProtocolLoading(true)
+    setProtocolHelp(t('Waiting for PH01 client authorization...'))
+    pollStartedAtRef.current = Date.now()
+    pollAttemptRef.current = 0
+    startProtocolOpenCheck()
     window.location.href = challenge.protocol_url
-    pollChallengeStatus(challenge.challenge_id)
+    pollTimerRef.current = window.setTimeout(
+      () => pollChallengeStatusRef.current(challenge.challenge_id),
+      PH01_STATUS_INITIAL_DELAY_MS
+    )
   }
 
   const handleCopyChallenge = async () => {
@@ -144,7 +268,7 @@ export function UserAuthForm({
   }
 
   const handleSubmitAuthorization = async () => {
-    if (requiresLegalConsent && !agreedToLegal) {
+    if (!legalConsentReady) {
       toast.error(legalConsentErrorMessage)
       return
     }
@@ -218,7 +342,7 @@ export function UserAuthForm({
           isProtocolLoading ||
           isChallengeLoading ||
           !challenge ||
-          (requiresLegalConsent && !agreedToLegal)
+          !legalConsentReady
         }
         className='h-11 w-full justify-center gap-2'
       >
@@ -229,6 +353,9 @@ export function UserAuthForm({
         )}
         {t('Authorize with PH01 Client')}
       </Button>
+      {protocolHelp ? (
+        <p className='text-muted-foreground text-sm'>{protocolHelp}</p>
+      ) : null}
 
       <div className='grid gap-2'>
         <Label htmlFor='ph01-login-code'>{t('Login Code')}</Label>
@@ -243,9 +370,7 @@ export function UserAuthForm({
           variant='secondary'
           onClick={handleSubmitAuthorization}
           disabled={
-            isSubmitting ||
-            !authorizationText.trim() ||
-            (requiresLegalConsent && !agreedToLegal)
+            isSubmitting || !authorizationText.trim() || !legalConsentReady
           }
           className='w-full justify-center gap-2'
         >
@@ -260,7 +385,7 @@ export function UserAuthForm({
 
       <LegalConsent
         status={status}
-        checked={agreedToLegal}
+        checked={legalConsentReady}
         onCheckedChange={setAgreedToLegal}
         className='mt-1'
       />

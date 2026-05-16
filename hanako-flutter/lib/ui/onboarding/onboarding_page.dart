@@ -10,10 +10,10 @@
 //
 // 步骤：
 //   step 0: 欢迎，介绍子体定位
-//   step 1: 子体名字 + 用户名（沿用原项目 Hanako/User 默认值）
+//   step 1: 账户昵称 + 用户名（沿用原项目 Hanako/User 默认值）
 //   step 2: 新账号验证邮箱 / 既有账号恢复登录
 //   step 3: 生成账号——展示 12 个中文名词 + 占位故事，要求用户保存
-//   step 4: 用户勾选"已保存"→ 落地写入身份与 agent，完成
+//   step 4: 用户勾选"已保存"→ 创建 agent，完成
 //
 // 规避 BUG-5：每一步右上角永远显示「跳过」。跳过后不创建身份，
 // 仅创建匿名 agent；用户可在设置里再走"创建账号"流程。
@@ -151,6 +151,11 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
       _busy = true;
       _error = null;
       _clearLoginRecoveryProgress();
+      _emailChallenge = null;
+      _emailCode = '';
+      _registration = null;
+      _authResult = null;
+      _confirmedSaved = false;
     });
     try {
       final eng = ref.read(engineProvider);
@@ -187,6 +192,9 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
       _busy = true;
       _error = null;
       _emailChallenge = null;
+      _registration = null;
+      _authResult = null;
+      _confirmedSaved = false;
     });
     try {
       final eng = ref.read(engineProvider);
@@ -221,6 +229,9 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
       _email = value;
       _emailChallenge = null;
       _emailCode = '';
+      _registration = null;
+      _authResult = null;
+      _confirmedSaved = false;
     });
   }
 
@@ -253,7 +264,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     }
   }
 
-  /// step 2：生成密钥 + 助记词 + 故事，并携邮箱验证码提交注册。
+  /// step 2：生成未落盘身份，并携邮箱验证码提交注册；成功后再写本机 vault。
   Future<void> _generateIdentityAndRegister() async {
     if (_busy || !_canNext()) return;
     setState(() {
@@ -261,10 +272,9 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
       _error = null;
     });
     final repo = ref.read(identityRepositoryProvider);
-    IdentityRegistration? reg;
     try {
       final eng = ref.read(engineProvider);
-      reg = await repo.registerNew();
+      final reg = await repo.generateRegistrationPreview();
       final auth = await eng.backendClient.register(
         keyPair: reg.identity.keyPair,
         username: _userName.trim(),
@@ -273,6 +283,7 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
         emailChallengeId: _emailChallenge!.challengeId,
         emailCode: _emailCode.trim(),
       );
+      await repo.replaceCurrentIdentity(reg.identity);
       if (!mounted) return;
       setState(() {
         _registration = reg;
@@ -281,13 +292,11 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
         _busy = false;
       });
     } catch (e) {
-      if (reg != null) {
-        try {
-          await repo.logout();
-        } catch (_) {}
-      }
       if (!mounted) return;
       setState(() {
+        _registration = null;
+        _authResult = null;
+        _confirmedSaved = false;
         _error = '生成账号失败：${_formatBackendError(e)}';
         _busy = false;
       });
@@ -460,21 +469,27 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
         }
         return '操作太频繁，请稍后再试。';
       }
-      if (status == 409) {
-        return '用户名已被占用，请返回上一步重新核验或更换用户名。';
-      }
-      if (status == 401) {
-        return '身份验证失败，请确认用户名与助记词是否匹配。';
-      }
       if (data is Map) {
         final message = data['message'];
         final code = data['error'];
+        if (code == 'email_taken') {
+          return '该邮箱已绑定其他账号，请更换邮箱或登录原账号。';
+        }
+        if (code == 'username_taken') {
+          return '用户名已被占用，请返回上一步重新核验或更换用户名。';
+        }
         if (message is String && message.trim().isNotEmpty) {
           return message;
         }
         if (code is String && code.trim().isNotEmpty) {
           return code;
         }
+      }
+      if (status == 409) {
+        return '用户名或邮箱已被占用，请返回上一步检查后重试。';
+      }
+      if (status == 401) {
+        return '身份验证失败，请确认用户名与助记词是否匹配。';
       }
       if (status != null) return '认证中心返回 HTTP $status';
       return '无法连接认证中心';
@@ -756,13 +771,13 @@ class _StepNames extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('你和你的子体', style: Theme.of(context).textTheme.titleLarge),
+        Text('你的账号', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 16),
         TextFormField(
           initialValue: agentName,
           decoration: const InputDecoration(
-            labelText: '子体名称',
-            helperText: '它是你的私有 AI 助手，将以这个名字与你对话',
+            labelText: '账户昵称',
+            helperText: '用于认证中心显示；当前也会作为本机默认 Agent 名称',
             border: OutlineInputBorder(),
           ),
           onChanged: onAgentNameChanged,

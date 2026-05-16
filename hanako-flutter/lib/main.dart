@@ -156,7 +156,10 @@ Future<bool> _confirmProtocolLoginAuthorization(
     barrierDismissible: false,
     builder: (_) => ProtocolLoginConfirmDialog(
       request: request,
-      trustedCallback: request.isTrustedCallback(eng.backendClient.aiBaseUrl),
+      trustedCallback: request.isTrustedCallback(
+        aiBaseUrl: eng.backendClient.aiBaseUrl,
+        authBaseUrl: eng.backendClient.authBaseUrl,
+      ),
       accountLabel: accountLabel.isEmpty ? '本机 PH01 身份' : accountLabel,
     ),
   );

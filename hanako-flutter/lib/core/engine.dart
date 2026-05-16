@@ -13,8 +13,6 @@ import 'browser_manager.dart';
 import 'bridge_source_manager.dart';
 import 'activity_store.dart';
 import 'bridge_session_manager.dart';
-import 'channel_manager.dart';
-import 'collaboration_manager.dart';
 import 'config_coordinator.dart';
 import 'cron_scheduler.dart';
 import 'cron_store.dart';
@@ -44,8 +42,6 @@ class HanaEngine {
     required this.heartbeatRuntime,
     required this.deskManager,
     required this.browserManager,
-    required this.channelManager,
-    required this.collaborationManager,
     required this.bridgeSessionManager,
     required this.bridgeSourceManager,
     required this.skillManager,
@@ -65,8 +61,6 @@ class HanaEngine {
   final HeartbeatRuntime heartbeatRuntime;
   final DeskManager deskManager;
   final BrowserManager browserManager;
-  final ChannelManager channelManager;
-  final CollaborationManager collaborationManager;
   final BridgeSessionManager bridgeSessionManager;
   final BridgeSourceManager bridgeSourceManager;
   final SkillManager skillManager;
@@ -136,20 +130,19 @@ class HanaEngine {
     final skills = SkillManager(h);
     await skills.initialize();
     final browser = BrowserManager(preferences: prefs);
-    final channels = ChannelManager(h);
     late final CronScheduler cronScheduler;
     final sessions = SessionCoordinator(
       home: h,
       agentManager: agents,
       modelManager: models,
       config: cfg,
+      preferences: prefs,
       identityRepository: identityRepo,
       backendClient: gateway,
       cronStore: cronStore,
       runCronNow: (jobId) => cronScheduler.runNow(jobId),
       skillManager: skills,
       browserManager: browser,
-      channelManager: channels,
     );
     cronScheduler = CronScheduler(
       cronStore: cronStore,
@@ -175,21 +168,6 @@ class HanaEngine {
     );
 
     final deskManager = DeskManager(h);
-    final collaboration = CollaborationManager(
-      preferences: prefs,
-      agentManager: agents,
-      channelManager: channels,
-      activityStore: activityStore,
-      executeAgentTask:
-          ({required agentId, required prompt, modelId, required source}) =>
-              sessions.runIsolatedPrompt(
-                agentId: agentId,
-                prompt: prompt,
-                modelId: modelId,
-                source: source,
-              ),
-    );
-    sessions.collaborationManager = collaboration;
     final bridge = BridgeSessionManager(
       home: h,
       agentManager: agents,
@@ -218,8 +196,6 @@ class HanaEngine {
       heartbeatRuntime: heartbeat,
       deskManager: deskManager,
       browserManager: browser,
-      channelManager: channels,
-      collaborationManager: collaboration,
       bridgeSessionManager: bridge,
       bridgeSourceManager: bridgeSources,
       skillManager: skills,

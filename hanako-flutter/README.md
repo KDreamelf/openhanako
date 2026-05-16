@@ -1,7 +1,7 @@
-# Hanako (Flutter Edition)
+# PH01 Subbody Client
 
-> 个人 AI Agent，带记忆、灵魂、与多窗口桌面工作流。
-> 这是 Hanako 项目的 **Flutter 全 Dart 重写版**——前身 Electron + Node.js 版本完整保留在 [`legacy-electron/`](./legacy-electron/) 子目录里供参考。
+> PH01 个人 AI 子体客户端，带记忆、身份密钥、经验网络、Windows 操作链与多窗口桌面工作流。
+> UI、身份体系和业务能力为 PH01 重构实现；底层 Agent 执行引擎逻辑已迁入 OpenAI Codex 风格工具循环与工具注册体系。
 
 ## 当前状态（2026-04，Phase 0–4 全部完成）
 
@@ -43,6 +43,8 @@ HANA_PORT=4000 dart run bin/server.dart
 ## 核心特性
 
 - **AI 网关模型目录**：子体只选择模型，模型列表来自 `ai.xn--lbtx0e.cn` 在密钥协商后返回的授权模型列表
+- **Codex Agent Runtime**：工具以 Handler/Registry/Router 组织，支持 Codex 风格 `exec_command`、`write_stdin`、`apply_patch`、`tool_search`、`update_plan`、`request_user_input`、`request_permissions` 等执行入口
+- **权限模式**：设置页可选择“每次询问 / 完全授权 / 全部拒绝”；默认询问，嫌麻烦的用户可以自行切到完全授权
 - **私钥身份通信**：子体持有私钥，向 AI 网关做 ECDH 短期通道协商，聊天请求不再使用本地供应商/API Key
 - **Drift / SQLite 持久化**：与 legacy `better-sqlite3` 同 schema（facts + FTS5），**已通过兼容性测试**——现有用户 `facts.db` 可直接打开
 - **Memory 系统完整**：滚动摘要 + 4 块编译（today/week/longterm/facts）+ 元事实拆分 + 标签搜索 + FTS5 全文搜索补充
@@ -82,7 +84,7 @@ hanako/
 │   ├── widget_test.dart              # 主题 smoke
 │   └── drift_legacy_compat_test.dart # Drift ↔ better-sqlite3 兼容验证
 ├── flutter-migration-plan/           # 原始迁移规划文档（7 份 + 性能优化复盘）
-├── legacy-electron/                  # 原 Electron + Node 版本（参考用，不动）
+├── ../openai-codex/                  # OpenAI Codex 源码归档；保留 LICENSE / NOTICE
 ├── README.md / CHANGELOG.md
 └── pubspec.yaml
 ```
@@ -117,16 +119,6 @@ hanako/
 | macOS / Linux 打包 | 配置就绪，需对应平台机器构建 | CI 上配 |
 | Onboarding 视觉 | 5 步功能完整，UI 简约 | Phase 5 加 Lottie 动画 |
 
-## 旧 Electron 版
-
-完整保留在 [`legacy-electron/`](./legacy-electron/) 中，**不会动**。可以随时进入参考 / 跑测试：
-
-```bash
-cd legacy-electron
-npm install
-npm start
-```
-
 ## 测试
 
 ```bash
@@ -138,8 +130,8 @@ flutter test       # 包含 Drift 兼容测试
 
 - [`flutter-migration-plan/`](./flutter-migration-plan/) — 完整迁移方案（7 份 markdown + pubspec 模板 + 性能优化复盘）
 - [`CHANGELOG.md`](./CHANGELOG.md) — 详细变更记录
-- [`legacy-electron/README.md`](./legacy-electron/README.md) — 原 Electron 版项目说明
+- [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) — Codex Apache-2.0 引入说明
 
 ## License
 
-Apache-2.0（见 [`legacy-electron/LICENSE`](./legacy-electron/LICENSE)）
+Agent 执行引擎逻辑来源于 OpenAI Codex，遵循 Apache-2.0；上游 `LICENSE` 与 `NOTICE` 保留在 [`../openai-codex/`](../openai-codex/)。

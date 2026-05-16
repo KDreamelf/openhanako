@@ -206,28 +206,44 @@ func (r *Registry) Get(name string) *ToolDefinition {
 
 func BuildPrompt(registry *Registry) string {
 	var b strings.Builder
+	b.WriteString("Tool return conversion contract: tool return blocks preserve tool result fields as Markdown AST. Inspect returned fields such as ok, success, status, error, and message; do not assume completion from the wrapper itself.\n\n")
 	b.WriteString("工具调用协议：当前渠道启用了 Markdown AST 工具调用。你可以使用下列工具，但不要输出 JSON、function_call 或 provider 原生工具调用对象。\n")
-	b.WriteString("当你需要调用工具时，只输出一个或多个完整工具调用块；不要在工具调用块外夹杂解释文字。格式必须如下：\n\n")
-	b.WriteString("<----工具调用开始：tool_name---->\n")
-	b.WriteString("# parameter_name\n")
-	b.WriteString("parameter value\n\n")
-	b.WriteString("# nested_object\n")
-	b.WriteString("## child_parameter\n")
-	b.WriteString("child value\n")
-	b.WriteString("<----工具调用结束---->\n\n")
+	b.WriteString("当你需要调用工具时，只输出一个或多个完整工具调用块；不要在工具调用块外夹杂解释文字。每个工具的调用模板都已在下方列出。\n")
 	b.WriteString("工具执行结果会以同构的 Markdown 工具返回块出现在后续消息里。读取工具返回后，继续完成用户任务。\n\n")
 	b.WriteString("可用工具：\n")
+	sections := make([]string, 0, len(registry.Order))
 	for _, name := range registry.Order {
 		tool := registry.Tools[name]
-		b.WriteString("\n## ")
-		b.WriteString(tool.Name)
-		b.WriteString("\n")
-		if strings.TrimSpace(tool.Description) != "" {
-			b.WriteString(tool.Description)
-			b.WriteString("\n")
+		if tool == nil {
+			continue
 		}
-		b.WriteString(formatSchemaForPrompt(tool.Schema, 0))
+		sections = append(sections, formatToolPromptSection(tool))
 	}
+	if len(sections) > 0 {
+		b.WriteString("\n")
+		b.WriteString(strings.Join(sections, "\n\n"))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func formatToolPromptSection(tool *ToolDefinition) string {
+	if tool == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("# ")
+	b.WriteString(tool.Name)
+	b.WriteString("\n")
+	if strings.TrimSpace(tool.Description) != "" {
+		b.WriteString(tool.Description)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n## 调用模板\n")
+	b.WriteString("<----工具调用开始：")
+	b.WriteString(tool.Name)
+	b.WriteString("---->\n")
+	b.WriteString(formatSchemaForPrompt(tool.Schema, 0))
+	b.WriteString("<----工具调用结束---->")
 	return strings.TrimSpace(b.String())
 }
 
@@ -241,9 +257,9 @@ func FormatCallBlock(name string, arguments string) string {
 		return b.String()
 	}
 
-	var parsed map[string]any
+	var parsed any
 	if err := json.Unmarshal([]byte(arguments), &parsed); err == nil {
-		b.WriteString(formatMarkdownObject(parsed, 1))
+		b.WriteString(formatMarkdownObject(normalizeJSONStrings(parsed, 0), 1))
 	} else {
 		b.WriteString("# arguments\n")
 		b.WriteString(arguments)
@@ -260,19 +276,35 @@ func FormatReturnBlock(name string, toolCallID string, content string) string {
 	b.WriteString("<----工具返回开始：")
 	b.WriteString(name)
 	b.WriteString("---->\n")
-	b.WriteString("# status\nsuccess\n\n")
 	if strings.TrimSpace(toolCallID) != "" {
 		b.WriteString("# tool_call_id\n")
 		b.WriteString(toolCallID)
 		b.WriteString("\n\n")
 	}
-	b.WriteString("# content\n")
-	b.WriteString(content)
-	if !strings.HasSuffix(content, "\n") {
+	b.WriteString(formatReturnContent(content))
+	if !strings.HasSuffix(b.String(), "\n") {
 		b.WriteString("\n")
 	}
 	b.WriteString("<----工具返回结束---->")
 	return b.String()
+}
+
+func formatReturnContent(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return "# content\n\n"
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(trimmed), &decoded); err != nil {
+		return formatMarkdownObject(map[string]any{"content": content}, 1)
+	}
+	normalized := normalizeJSONStrings(decoded, 0)
+	switch normalized.(type) {
+	case map[string]any:
+		return formatMarkdownObject(normalized, 1)
+	default:
+		return formatMarkdownObject(map[string]any{"content": normalized}, 1)
+	}
 }
 
 func TransformTextResponse(c *gin.Context, response *dto.OpenAITextResponse) (bool, error) {
@@ -496,6 +528,9 @@ func parseMarkdownFields(block string, tool *ToolDefinition) map[string]any {
 	for _, line := range lines {
 		matches := headingRegexp.FindStringSubmatch(line)
 		if matches == nil {
+			if isPromptFieldMetaLine(line, currentSchema) {
+				continue
+			}
 			currentValue.WriteString(line)
 			currentValue.WriteString("\n")
 			continue
@@ -624,6 +659,46 @@ func autoConvertValue(value string) any {
 	return value
 }
 
+func normalizeJSONStrings(value any, depth int) any {
+	if depth > 8 {
+		return value
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, child := range typed {
+			out[key] = normalizeJSONStrings(child, depth+1)
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, child := range typed {
+			out = append(out, normalizeJSONStrings(child, depth+1))
+		}
+		return out
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return typed
+		}
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			var decoded any
+			if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
+				return normalizeJSONStrings(decoded, depth+1)
+			}
+		}
+		if strings.HasPrefix(trimmed, `"`) {
+			var decoded string
+			if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil && decoded != typed {
+				return normalizeJSONStrings(decoded, depth+1)
+			}
+		}
+		return typed
+	default:
+		return value
+	}
+}
+
 func formatMarkdownObject(value any, level int) string {
 	var b strings.Builder
 	switch typed := value.(type) {
@@ -641,8 +716,26 @@ func formatMarkdownObject(value any, level int) string {
 			switch child := typed[key].(type) {
 			case map[string]any:
 				b.WriteString(formatMarkdownObject(child, level+1))
+			case []any:
+				b.WriteString(formatMarkdownObject(child, level+1))
 			default:
 				b.WriteString(formatValueForMarkdown(child))
+				b.WriteString("\n\n")
+			}
+		}
+	case []any:
+		for i, child := range typed {
+			b.WriteString(strings.Repeat("#", level))
+			b.WriteString(" [")
+			b.WriteString(strconv.Itoa(i))
+			b.WriteString("]\n")
+			switch item := child.(type) {
+			case map[string]any:
+				b.WriteString(formatMarkdownObject(item, level+1))
+			case []any:
+				b.WriteString(formatMarkdownObject(item, level+1))
+			default:
+				b.WriteString(formatValueForMarkdown(item))
 				b.WriteString("\n\n")
 			}
 		}
@@ -670,7 +763,7 @@ func formatValueForMarkdown(value any) string {
 
 func formatSchemaForPrompt(schema *FieldSchema, depth int) string {
 	if schema == nil || len(schema.Properties) == 0 {
-		return "- 参数：无结构化 schema 或未声明参数。\n"
+		return "（无参数）\n"
 	}
 	keys := make([]string, 0, len(schema.Properties))
 	for key := range schema.Properties {
@@ -680,29 +773,47 @@ func formatSchemaForPrompt(schema *FieldSchema, depth int) string {
 	var b strings.Builder
 	for _, key := range keys {
 		field := schema.Properties[key]
-		b.WriteString(strings.Repeat("  ", depth))
-		b.WriteString("- ")
+		if field == nil {
+			continue
+		}
+		level := depth + 1
+		if level < 1 {
+			level = 1
+		}
+		b.WriteString(strings.Repeat("#", level))
+		b.WriteString(" ")
 		b.WriteString(key)
-		if field.Type != "" {
-			b.WriteString(" (")
-			b.WriteString(field.Type)
-			if field.Required {
-				b.WriteString(", required")
-			}
-			b.WriteString(")")
-		} else if field.Required {
-			b.WriteString(" (required)")
-		}
-		if strings.TrimSpace(field.Description) != "" {
-			b.WriteString(": ")
-			b.WriteString(field.Description)
-		}
 		b.WriteString("\n")
+		b.WriteString(formatFieldPromptMeta(field))
+		b.WriteString("\n\n")
 		if len(field.Properties) > 0 {
 			b.WriteString(formatSchemaForPrompt(field, depth+1))
 		}
 	}
 	return b.String()
+}
+
+func formatFieldPromptMeta(field *FieldSchema) string {
+	typ := strings.TrimSpace(field.Type)
+	if typ == "" {
+		if len(field.Properties) > 0 {
+			typ = "object"
+		} else {
+			typ = "string"
+		}
+	}
+	requiredLabel := "非必填"
+	if field.Required {
+		requiredLabel = "必填"
+	}
+	return "（" + typ + "，" + requiredLabel + "）"
+}
+
+func isPromptFieldMetaLine(line string, schema *FieldSchema) bool {
+	if schema == nil {
+		return false
+	}
+	return strings.TrimSpace(line) == formatFieldPromptMeta(schema)
 }
 
 func findCallStart(text string) (markerMatch, bool) {

@@ -1,5 +1,6 @@
 mod capture;
 mod cuda_driver;
+mod input;
 mod ocr;
 mod protocol;
 mod recovery;

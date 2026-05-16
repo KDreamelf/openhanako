@@ -27,9 +27,17 @@ ai_gateway_sync "default" {
   timeout_ms     = 5000
 }
 
+user_pow "default" {
+  difficulty_bits = 4
+  memory_kib      = 1048576
+  round_count     = 2
+  ttl_seconds     = 600
+}
+
 server "auth_gateway" {
   listen       = ":8080"
   admin_token  = "148e8975201d395fa417e4846847de6f458410ed86415065094002631a81b0ab"
+  public_base_url = "https://auth.xn--lbtx0e.cn"
   cors_origins = ["https://auth.xn--lbtx0e.cn", "https://ai.xn--lbtx0e.cn"]
 }
 

@@ -146,7 +146,15 @@ func PH01ChannelHandshake(c *gin.Context) {
 		ph01ProtocolError(c, http.StatusBadGateway, ph01ErrInternalError, "auth center response missing pubkey hash")
 		return
 	}
-	gatewayUser, _, err := model.FindOrCreateUserFromPH01(authResp.UserID, authResp.Username, authResp.PubkeyHash)
+	gatewayUser, _, err := model.FindOrCreateUserFromPH01State(model.PH01UserState{
+		PH01UserID:    authResp.UserID,
+		PH01Username:  authResp.Username,
+		PubkeyHash:    authResp.PubkeyHash,
+		PowVerified:   authResp.PowVerified,
+		PowAlgorithm:  authResp.PowAlgorithm,
+		PowScore:      authResp.PowScore,
+		PowVerifiedAt: authResp.PowVerifiedAt,
+	})
 	if err != nil {
 		ph01ProtocolError(c, http.StatusInternalServerError, ph01ErrInternalError, err.Error())
 		return

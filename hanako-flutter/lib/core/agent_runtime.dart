@@ -13,6 +13,11 @@ typedef RuntimeChatStream =
 typedef RuntimeToolExecutor =
     Future<RuntimeToolExecutionResult> Function(RuntimeToolCallBlock call);
 
+typedef RuntimeToolBatchExecutor =
+    Future<List<RuntimeToolExecutionResult>> Function(
+      List<RuntimeToolCallBlock> calls,
+    );
+
 typedef RuntimeMessageSink =
     FutureOr<void> Function(List<RuntimeMessage> messages);
 
@@ -23,6 +28,7 @@ class AgentRuntimeLoop {
     required this.tools,
     required this.streamChat,
     required this.executeTool,
+    this.executeTools,
     required this.onNewMessages,
   }) : _context = [...history];
 
@@ -30,11 +36,18 @@ class AgentRuntimeLoop {
   final List<Tool> tools;
   final RuntimeChatStream streamChat;
   final RuntimeToolExecutor executeTool;
+  final RuntimeToolBatchExecutor? executeTools;
   final RuntimeMessageSink onNewMessages;
   final List<RuntimeMessage> _context;
 
   Stream<LlmEvent> runUserPrompt(String text) async* {
-    final user = RuntimeMessage.userText(text);
+    yield* runUserPromptBlocks(<RuntimeContentBlock>[RuntimeTextBlock(text)]);
+  }
+
+  Stream<LlmEvent> runUserPromptBlocks(
+    List<RuntimeContentBlock> blocks,
+  ) async* {
+    final user = RuntimeMessage.userBlocks(blocks);
     _context.add(user);
     await onNewMessages([user]);
     yield* continueAssistantTurn();
@@ -55,6 +68,21 @@ class AgentRuntimeLoop {
         _appendThinkingBlock(blocks, value);
       }
 
+      Iterable<LlmEvent> emitParsedParts(
+        Iterable<AssistantContentPart> parts,
+      ) sync* {
+        for (final part in parts) {
+          switch (part) {
+            case AssistantTextPart(:final text):
+              appendText(text);
+              yield TextDelta(text);
+            case AssistantThinkingPart(:final text):
+              appendThinking(text);
+              yield ThinkingDelta(text);
+          }
+        }
+      }
+
       try {
         await for (final event in streamChat(
           messages: runtimeMessagesToOpenAi(
@@ -66,20 +94,25 @@ class AgentRuntimeLoop {
         )) {
           switch (event) {
             case TextDelta(:final text):
-              for (final part in thinkingParser.push(text)) {
-                switch (part) {
-                  case AssistantTextPart(:final text):
-                    appendText(text);
-                    yield TextDelta(text);
-                  case AssistantThinkingPart(:final text):
-                    appendThinking(text);
-                    yield ThinkingDelta(text);
-                }
+              for (final parsedEvent in emitParsedParts(
+                thinkingParser.push(text),
+              )) {
+                yield parsedEvent;
               }
             case ThinkingDelta(:final text):
+              for (final parsedEvent in emitParsedParts(
+                thinkingParser.flush(),
+              )) {
+                yield parsedEvent;
+              }
               appendThinking(text);
               yield event;
             case ToolCallStart(:final id, :final name, :final thoughtSignature):
+              for (final parsedEvent in emitParsedParts(
+                thinkingParser.flush(),
+              )) {
+                yield parsedEvent;
+              }
               final call = toolCallsById.putIfAbsent(
                 id,
                 () =>
@@ -90,6 +123,11 @@ class AgentRuntimeLoop {
               _upsertToolCallBlock(blocks, call);
               yield event;
             case ToolCallArgsDelta(:final id, :final argsJson):
+              for (final parsedEvent in emitParsedParts(
+                thinkingParser.flush(),
+              )) {
+                yield parsedEvent;
+              }
               final call = toolCallsById.putIfAbsent(
                 id,
                 () =>
@@ -99,6 +137,11 @@ class AgentRuntimeLoop {
               _upsertToolCallBlock(blocks, call);
               yield event;
             case ToolCallEnd(:final id):
+              for (final parsedEvent in emitParsedParts(
+                thinkingParser.flush(),
+              )) {
+                yield parsedEvent;
+              }
               final call = toolCallsById[id];
               if (call != null) {
                 call.ended = true;
@@ -118,15 +161,8 @@ class AgentRuntimeLoop {
         error = LlmError(message: '发送对话失败：客户端处理异常', details: e.toString());
       }
 
-      for (final part in thinkingParser.flush()) {
-        switch (part) {
-          case AssistantTextPart(:final text):
-            appendText(text);
-            yield TextDelta(text);
-          case AssistantThinkingPart(:final text):
-            appendThinking(text);
-            yield ThinkingDelta(text);
-        }
+      for (final parsedEvent in emitParsedParts(thinkingParser.flush())) {
+        yield parsedEvent;
       }
 
       if (error != null) {
@@ -155,8 +191,10 @@ class AgentRuntimeLoop {
         return;
       }
 
-      for (final call in toolCalls) {
-        final result = await _executeToolSafely(call);
+      final results = await _executeToolsSafely(toolCalls);
+      for (var i = 0; i < toolCalls.length; i++) {
+        final call = toolCalls[i];
+        final result = results[i];
         final resultMessage = RuntimeMessage.toolResult(
           toolCallId: call.id,
           toolName: call.name,
@@ -166,6 +204,10 @@ class AgentRuntimeLoop {
         );
         _context.add(resultMessage);
         await onNewMessages([resultMessage]);
+        if (result.followupMessages.isNotEmpty) {
+          _context.addAll(result.followupMessages);
+          await onNewMessages(result.followupMessages);
+        }
         yield ToolCallResult(
           id: call.id,
           name: call.name,
@@ -174,6 +216,48 @@ class AgentRuntimeLoop {
           details: result.details,
         );
       }
+    }
+  }
+
+  Future<List<RuntimeToolExecutionResult>> _executeToolsSafely(
+    List<RuntimeToolCallBlock> calls,
+  ) async {
+    final batchExecutor = executeTools;
+    if (batchExecutor == null || calls.length <= 1) {
+      final results = <RuntimeToolExecutionResult>[];
+      for (final call in calls) {
+        results.add(await _executeToolSafely(call));
+      }
+      return results;
+    }
+    try {
+      final results = await batchExecutor(calls);
+      if (results.length == calls.length) return results;
+      return [
+        for (final call in calls)
+          RuntimeToolExecutionResult(
+            content: const JsonEncoder.withIndent('  ').convert({
+              'ok': false,
+              'error': 'tool_batch_failed',
+              'tool': call.name,
+              'message': '工具批量执行返回数量不匹配。',
+            }),
+            isError: true,
+          ),
+      ];
+    } catch (e) {
+      return [
+        for (final call in calls)
+          RuntimeToolExecutionResult(
+            content: const JsonEncoder.withIndent('  ').convert({
+              'ok': false,
+              'error': 'tool_batch_failed',
+              'tool': call.name,
+              'message': e.toString(),
+            }),
+            isError: true,
+          ),
+      ];
     }
   }
 
@@ -212,6 +296,12 @@ class RuntimeMessage {
 
   factory RuntimeMessage.userText(String text) =>
       RuntimeMessage._(role: 'user', content: [RuntimeTextBlock(text)]);
+
+  factory RuntimeMessage.userBlocks(List<RuntimeContentBlock> blocks) =>
+      RuntimeMessage._(
+        role: 'user',
+        content: List<RuntimeContentBlock>.from(blocks),
+      );
 
   factory RuntimeMessage.assistant({
     required List<RuntimeContentBlock> blocks,
@@ -364,6 +454,22 @@ abstract class RuntimeContentBlock {
     switch (type) {
       case 'text':
         return RuntimeTextBlock(raw['text']?.toString() ?? '');
+      case 'image':
+        final dataUrl = raw['dataUrl']?.toString();
+        final imageUrl = raw['imageUrl']?.toString();
+        final path = raw['path']?.toString();
+        if ((dataUrl == null || dataUrl.isEmpty) &&
+            (imageUrl == null || imageUrl.isEmpty) &&
+            (path == null || path.isEmpty)) {
+          return null;
+        }
+        return RuntimeImageBlock(
+          dataUrl: dataUrl,
+          imageUrl: imageUrl,
+          path: path,
+          mimeType: raw['mimeType']?.toString(),
+          label: raw['label']?.toString(),
+        );
       case 'thinking':
         return RuntimeThinkingBlock(
           thinking: raw['thinking']?.toString() ?? '',
@@ -406,6 +512,43 @@ class RuntimeTextBlock extends RuntimeContentBlock {
 
   @override
   Map<String, dynamic> toJson() => {'type': type, 'text': text};
+}
+
+class RuntimeImageBlock extends RuntimeContentBlock {
+  const RuntimeImageBlock({
+    this.dataUrl,
+    this.imageUrl,
+    this.path,
+    this.mimeType,
+    this.label,
+  });
+
+  final String? dataUrl;
+  final String? imageUrl;
+  final String? path;
+  final String? mimeType;
+  final String? label;
+
+  String? get openAiUrl {
+    final direct = dataUrl?.trim();
+    if (direct != null && direct.isNotEmpty) return direct;
+    final remote = imageUrl?.trim();
+    if (remote != null && remote.isNotEmpty) return remote;
+    return null;
+  }
+
+  @override
+  String get type => 'image';
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'type': type,
+    if (dataUrl != null) 'dataUrl': dataUrl,
+    if (imageUrl != null) 'imageUrl': imageUrl,
+    if (path != null) 'path': path,
+    if (mimeType != null) 'mimeType': mimeType,
+    if (label != null) 'label': label,
+  };
 }
 
 class RuntimeThinkingBlock extends RuntimeContentBlock {
@@ -506,11 +649,13 @@ class RuntimeToolExecutionResult {
     required this.content,
     this.isError = false,
     this.details,
+    this.followupMessages = const <RuntimeMessage>[],
   });
 
   final String content;
   final bool isError;
   final Map<String, dynamic>? details;
+  final List<RuntimeMessage> followupMessages;
 }
 
 List<Map<String, dynamic>> runtimeMessagesToOpenAi(
@@ -540,11 +685,9 @@ List<RuntimeMessage> _mergeConsecutiveUserMessages(
         result.isNotEmpty &&
         result.last.role == 'user') {
       final previous = result.removeLast();
-      final merged = [previous.visibleText, message.visibleText]
-          .map((text) => text.trim())
-          .where((text) => text.isNotEmpty)
-          .join('\n\n');
-      result.add(RuntimeMessage.userText(merged));
+      result.add(
+        RuntimeMessage.userBlocks(_mergeUserContent(previous, message)),
+      );
       continue;
     }
     result.add(message);
@@ -605,9 +748,9 @@ List<RuntimeMessage> _insertSyntheticToolResults(
 Map<String, dynamic>? _runtimeMessageToOpenAi(RuntimeMessage message) {
   switch (message.role) {
     case 'user':
-      final text = message.visibleText.trim();
-      if (text.isEmpty) return null;
-      return {'role': 'user', 'content': text};
+      final content = _userContentToOpenAi(message.content);
+      if (content == null) return null;
+      return {'role': 'user', 'content': content};
     case 'assistant':
       final text = message.visibleText;
       final toolCalls = message.toolCalls;
@@ -644,6 +787,55 @@ Map<String, dynamic>? _runtimeMessageToOpenAi(RuntimeMessage message) {
     default:
       return null;
   }
+}
+
+List<RuntimeContentBlock> _mergeUserContent(
+  RuntimeMessage previous,
+  RuntimeMessage next,
+) {
+  final out = <RuntimeContentBlock>[];
+  out.addAll(previous.content);
+  final previousText = previous.visibleText.trim();
+  final nextText = next.visibleText.trim();
+  if (previousText.isNotEmpty && nextText.isNotEmpty) {
+    out.add(const RuntimeTextBlock('\n\n'));
+  }
+  out.addAll(next.content);
+  return out;
+}
+
+Object? _userContentToOpenAi(List<RuntimeContentBlock> blocks) {
+  final parts = <Map<String, dynamic>>[];
+  final textOnly = <String>[];
+  var hasImage = false;
+  for (final block in blocks) {
+    switch (block) {
+      case RuntimeTextBlock(:final text):
+        if (text.isEmpty) break;
+        textOnly.add(text);
+        parts.add(<String, dynamic>{'type': 'text', 'text': text});
+      case RuntimeImageBlock(:final openAiUrl, :final label):
+        if (openAiUrl == null || openAiUrl.trim().isEmpty) break;
+        hasImage = true;
+        if (label?.trim().isNotEmpty == true) {
+          parts.add(<String, dynamic>{
+            'type': 'text',
+            'text': '[图片：${label!.trim()}]',
+          });
+        }
+        parts.add(<String, dynamic>{
+          'type': 'image_url',
+          'image_url': <String, dynamic>{'url': openAiUrl.trim()},
+        });
+      case RuntimeThinkingBlock():
+      case RuntimeToolCallBlock():
+      case RuntimeDetailsBlock():
+        break;
+    }
+  }
+  if (hasImage) return parts.isEmpty ? null : parts;
+  final text = textOnly.join().trim();
+  return text.isEmpty ? null : text;
 }
 
 sealed class AssistantContentPart {

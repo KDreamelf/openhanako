@@ -11,9 +11,13 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
+import 'dart:isolate';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:crypto/crypto.dart' as crypto;
 
 import '../llm/provider.dart';
 import '../shared/diagnostics_log.dart';
@@ -90,18 +94,22 @@ class HanakoBackendClient {
       'pubkey_hex': keyPair.publicKeyHex,
     };
     final req = signRequest(keyPair: keyPair, businessPayload: payload);
-    final resp = await _dio.postUri<Map<String, dynamic>>(
-      Uri.parse('$authBaseUrl/api/v1/auth/register'),
-      data: req.toJson(),
-      options: Options(contentType: Headers.jsonContentType),
-    );
-    final body = resp.data!;
-    return RegisterResult(
-      userId: (body['user_id'] as num).toInt(),
-      username: body['username'] as String,
-      tier: body['tier'] as String,
-      pubkeyHash: body['pubkey_hash'] as String,
-    );
+    try {
+      final resp = await _dio.postUri<Map<String, dynamic>>(
+        Uri.parse('$authBaseUrl/api/v1/auth/register'),
+        data: req.toJson(),
+        options: Options(contentType: Headers.jsonContentType),
+      );
+      final body = resp.data!;
+      return RegisterResult(
+        userId: (body['user_id'] as num).toInt(),
+        username: body['username'] as String,
+        tier: body['tier'] as String,
+        pubkeyHash: body['pubkey_hash'] as String,
+      );
+    } on DioException catch (e) {
+      throw await HanakoBackendException.fromDio(e, action: '注册账号');
+    }
   }
 
   /// 注册邮箱验证：用户名可用后，先向邮箱发送验证码。
@@ -109,18 +117,22 @@ class HanakoBackendClient {
     required String username,
     required String email,
   }) async {
-    final resp = await _dio.postUri<Map<String, dynamic>>(
-      Uri.parse('$authBaseUrl/api/v1/auth/register_email/start'),
-      data: {'username': username.trim(), 'email': email.trim()},
-      options: Options(contentType: Headers.jsonContentType),
-    );
-    final body = resp.data!;
-    return RegistrationEmailChallenge(
-      challengeId: body['challenge_id'] as String,
-      delivery: body['delivery'] as String,
-      expiresIn: (body['expires_in'] as num).toInt(),
-      cooldownSeconds: (body['cooldown_seconds'] as num?)?.toInt() ?? 60,
-    );
+    try {
+      final resp = await _dio.postUri<Map<String, dynamic>>(
+        Uri.parse('$authBaseUrl/api/v1/auth/register_email/start'),
+        data: {'username': username.trim(), 'email': email.trim()},
+        options: Options(contentType: Headers.jsonContentType),
+      );
+      final body = resp.data!;
+      return RegistrationEmailChallenge(
+        challengeId: body['challenge_id'] as String,
+        delivery: body['delivery'] as String,
+        expiresIn: (body['expires_in'] as num).toInt(),
+        cooldownSeconds: (body['cooldown_seconds'] as num?)?.toInt() ?? 60,
+      );
+    } on DioException catch (e) {
+      throw await HanakoBackendException.fromDio(e, action: '发送注册邮箱验证码');
+    }
   }
 
   /// 身份确认（已知 username + 持有私钥）。
@@ -145,6 +157,392 @@ class HanakoBackendClient {
       tier: body['tier'] as String,
       pubkeyHash: body['pubkey_hash'] as String,
     );
+  }
+
+  /// 用户 PoW：不影响注册/登录，只在用户主动做“真人/反黑产验证”时调用。
+  Future<UserPowChallenge> startUserPow({required String pubkeyHash}) async {
+    final startedAt = DateTime.now();
+    const endpoint = '/api/v1/auth/pow/challenge';
+    final normalized = pubkeyHash.trim();
+    _writeBackendTransportLog(
+      'transport_request',
+      operation: 'user_pow_challenge',
+      phase: 'request',
+      status: 'start',
+      method: 'POST',
+      endpoint: endpoint,
+      fields: {'pubkey_hash': _shortLogHash(normalized)},
+    );
+    try {
+      final resp = await _dio.postUri<Map<String, dynamic>>(
+        Uri.parse('$authBaseUrl$endpoint'),
+        data: {'pubkey_hash': normalized},
+        options: Options(contentType: Headers.jsonContentType),
+      );
+      final challenge = UserPowChallenge.fromJson(resp.data!);
+      _writeBackendTransportLog(
+        'transport_success',
+        operation: 'user_pow_challenge',
+        phase: 'response',
+        status: 'success',
+        method: 'POST',
+        endpoint: endpoint,
+        fields: {
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          'status_code': resp.statusCode,
+          'challenge_id': challenge.challengeId,
+          'difficulty_bits': challenge.difficultyBits,
+          'memory_kib': challenge.memoryKiB,
+          'round_count': challenge.roundCount,
+          'expires_at': challenge.expiresAt,
+        },
+      );
+      return challenge;
+    } on DioException catch (e) {
+      final error = await HanakoBackendException.fromDio(e, action: '发起工作量证明');
+      _writeBackendTransportLog(
+        'transport_failure',
+        operation: 'user_pow_challenge',
+        phase: 'response',
+        status: 'failure',
+        method: 'POST',
+        endpoint: endpoint,
+        fields: {
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          ..._backendExceptionLogFields(error),
+        },
+      );
+      throw error;
+    }
+  }
+
+  Future<UserPowStatus> completeUserPow({
+    required HanakoKeyPair keyPair,
+    UserPowChallenge? challenge,
+  }) async {
+    return completeUserPowWithProgress(keyPair: keyPair, challenge: challenge);
+  }
+
+  Future<UserPowStatus> completeUserPowWithProgress({
+    required HanakoKeyPair keyPair,
+    UserPowChallenge? challenge,
+    void Function(UserPowProgress progress)? onProgress,
+  }) async {
+    onProgress?.call(
+      const UserPowProgress(
+        stage: UserPowProgressStage.challenge,
+        message: '正在向认证中心领取账号工作量证明挑战',
+        completed: 0,
+        total: 1,
+        fraction: 0.04,
+      ),
+    );
+    final activeChallenge =
+        challenge ?? await startUserPow(pubkeyHash: keyPair.publicKeyHash);
+    onProgress?.call(
+      UserPowProgress(
+        stage: UserPowProgressStage.compute,
+        message:
+            '正在本机分阶段计算 ${activeChallenge.algorithm}，难度 ${activeChallenge.difficultyBits}bit',
+        completed: 0,
+        total: 1,
+        fraction: 0.12,
+      ),
+    );
+    final solutionNonce = await solveUserPowInBackground(
+      activeChallenge,
+      onProgress: (progress) {
+        onProgress?.call(
+          progress.copyWith(fraction: 0.12 + progress.fraction * 0.72),
+        );
+      },
+    );
+    onProgress?.call(
+      const UserPowProgress(
+        stage: UserPowProgressStage.submit,
+        message: '计算完成，正在签名并提交证明',
+        completed: 1,
+        total: 1,
+        fraction: 0.88,
+      ),
+    );
+    final req = signRequest(
+      keyPair: keyPair,
+      businessPayload: {
+        'challenge_id': activeChallenge.challengeId,
+        'pubkey_hash': activeChallenge.pubkeyHash,
+        'solution_nonce': solutionNonce,
+      },
+    );
+    final submitStartedAt = DateTime.now();
+    const endpoint = '/api/v1/auth/pow/verify';
+    _writeBackendTransportLog(
+      'transport_request',
+      operation: 'user_pow_verify',
+      phase: 'request',
+      status: 'start',
+      method: 'POST',
+      endpoint: endpoint,
+      fields: {
+        'challenge_id': activeChallenge.challengeId,
+        'pubkey_hash': _shortLogHash(activeChallenge.pubkeyHash),
+        'difficulty_bits': activeChallenge.difficultyBits,
+        'memory_kib': activeChallenge.memoryKiB,
+        'round_count': activeChallenge.roundCount,
+        'solution_nonce_chars': solutionNonce.length,
+      },
+    );
+    try {
+      final resp = await _dio.postUri<Map<String, dynamic>>(
+        Uri.parse('$authBaseUrl$endpoint'),
+        data: req.toJson(),
+        options: Options(contentType: Headers.jsonContentType),
+      );
+      final status = UserPowStatus.fromJson(resp.data!);
+      _writeBackendTransportLog(
+        'transport_success',
+        operation: 'user_pow_verify',
+        phase: 'response',
+        status: 'success',
+        method: 'POST',
+        endpoint: endpoint,
+        fields: {
+          'duration_ms': DateTime.now()
+              .difference(submitStartedAt)
+              .inMilliseconds,
+          'status_code': resp.statusCode,
+          'pubkey_hash': _shortLogHash(status.pubkeyHash),
+          'pow_verified': status.powVerified,
+          'pow_score': status.powScore,
+          'pow_algorithm': status.powAlgorithm,
+          'pow_verified_at': status.powVerifiedAt,
+        },
+      );
+      onProgress?.call(
+        const UserPowProgress(
+          stage: UserPowProgressStage.done,
+          message: '证明已写入认证中心',
+          completed: 1,
+          total: 1,
+          fraction: 1,
+        ),
+      );
+      return status;
+    } on DioException catch (e) {
+      final error = await HanakoBackendException.fromDio(e, action: '提交工作量证明');
+      _writeBackendTransportLog(
+        'transport_failure',
+        operation: 'user_pow_verify',
+        phase: 'response',
+        status: 'failure',
+        method: 'POST',
+        endpoint: endpoint,
+        fields: {
+          'duration_ms': DateTime.now()
+              .difference(submitStartedAt)
+              .inMilliseconds,
+          'challenge_id': activeChallenge.challengeId,
+          ..._backendExceptionLogFields(error),
+        },
+      );
+      throw error;
+    }
+  }
+
+  Future<UserPowStatus?> fetchUserPowStatus({
+    required String pubkeyHash,
+  }) async {
+    final normalized = pubkeyHash.trim();
+    if (normalized.isEmpty) return null;
+    final startedAt = DateTime.now();
+    const endpoint = '/api/v1/auth/pubkeys/status';
+    _writeBackendTransportLog(
+      'transport_request',
+      operation: 'user_pow_status',
+      phase: 'request',
+      status: 'start',
+      method: 'POST',
+      endpoint: endpoint,
+      fields: {'pubkey_hash': _shortLogHash(normalized)},
+    );
+    try {
+      final resp = await _dio.postUri<Map<String, dynamic>>(
+        Uri.parse('$authBaseUrl$endpoint'),
+        data: {
+          'pubkey_hashes': [normalized],
+        },
+        options: Options(contentType: Headers.jsonContentType),
+      );
+      final items = resp.data?['items'];
+      if (items is! List || items.isEmpty) {
+        _writeBackendTransportLog(
+          'transport_success',
+          operation: 'user_pow_status',
+          phase: 'response',
+          status: 'success',
+          method: 'POST',
+          endpoint: endpoint,
+          fields: {
+            'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+            'status_code': resp.statusCode,
+            'item_count': items is List ? items.length : 0,
+          },
+        );
+        return null;
+      }
+      final first = items.first;
+      if (first is! Map) {
+        _writeBackendTransportLog(
+          'transport_success',
+          operation: 'user_pow_status',
+          phase: 'response',
+          status: 'success',
+          method: 'POST',
+          endpoint: endpoint,
+          fields: {
+            'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+            'status_code': resp.statusCode,
+            'item_count': items.length,
+            'first_item_type': first.runtimeType.toString(),
+          },
+        );
+        return null;
+      }
+      final status = UserPowStatus.fromJson(Map<String, dynamic>.from(first));
+      _writeBackendTransportLog(
+        'transport_success',
+        operation: 'user_pow_status',
+        phase: 'response',
+        status: 'success',
+        method: 'POST',
+        endpoint: endpoint,
+        fields: {
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          'status_code': resp.statusCode,
+          'item_count': items.length,
+          'pubkey_hash': _shortLogHash(status.pubkeyHash),
+          'valid': status.valid,
+          'pow_verified': status.powVerified,
+          'pow_score': status.powScore,
+          'pow_algorithm': status.powAlgorithm,
+          'pow_verified_at': status.powVerifiedAt,
+        },
+      );
+      return status;
+    } on DioException catch (e) {
+      final error = await HanakoBackendException.fromDio(
+        e,
+        action: '查询工作量证明状态',
+      );
+      _writeBackendTransportLog(
+        'transport_failure',
+        operation: 'user_pow_status',
+        phase: 'response',
+        status: 'failure',
+        method: 'POST',
+        endpoint: endpoint,
+        fields: {
+          'duration_ms': DateTime.now().difference(startedAt).inMilliseconds,
+          ..._backendExceptionLogFields(error),
+        },
+      );
+      throw error;
+    }
+  }
+
+  Future<DelegatedPowChallenge> fetchDelegatedPowChallenge({
+    required String challengeId,
+  }) async {
+    final normalized = challengeId.trim();
+    if (normalized.isEmpty) {
+      throw ArgumentError.value(challengeId, 'challengeId', 'empty');
+    }
+    final endpoint = '/api/v1/auth/pow/delegated/challenge/$normalized';
+    try {
+      final resp = await _dio.getUri<Map<String, dynamic>>(
+        Uri.parse('$authBaseUrl$endpoint'),
+        options: Options(contentType: Headers.jsonContentType),
+      );
+      return DelegatedPowChallenge.fromJson(resp.data!);
+    } on DioException catch (e) {
+      throw await HanakoBackendException.fromDio(e, action: '领取委托工作量证明挑战');
+    }
+  }
+
+  Future<DelegatedPowStatus> completeDelegatedPowWithProgress({
+    required HanakoKeyPair keyPair,
+    required String challengeId,
+    DelegatedPowChallenge? challenge,
+    void Function(UserPowProgress progress)? onProgress,
+  }) async {
+    onProgress?.call(
+      const UserPowProgress(
+        stage: UserPowProgressStage.challenge,
+        message: '正在向认证中心领取委托工作量证明挑战',
+        completed: 0,
+        total: 1,
+        fraction: 0.04,
+      ),
+    );
+    final activeChallenge =
+        challenge ?? await fetchDelegatedPowChallenge(challengeId: challengeId);
+    onProgress?.call(
+      UserPowProgress(
+        stage: UserPowProgressStage.compute,
+        message: '正在执行静默工作量证明，难度 ${activeChallenge.difficultyBits}bit',
+        completed: 0,
+        total: 1,
+        fraction: 0.12,
+      ),
+    );
+    final solutionNonce = await solveUserPowInBackground(
+      activeChallenge.toUserPowChallenge(),
+      onProgress: (progress) {
+        onProgress?.call(
+          progress.copyWith(fraction: 0.12 + progress.fraction * 0.72),
+        );
+      },
+    );
+    onProgress?.call(
+      const UserPowProgress(
+        stage: UserPowProgressStage.submit,
+        message: '证明计算完成，正在写入认证中心缓存',
+        completed: 1,
+        total: 1,
+        fraction: 0.9,
+      ),
+    );
+    final req = signRequest(
+      keyPair: keyPair,
+      businessPayload: {
+        'challenge_id': activeChallenge.challengeId,
+        'purpose': activeChallenge.purpose,
+        'subject_hash': activeChallenge.subjectHash,
+        'pubkey_hash': activeChallenge.pubkeyHash,
+        'solution_nonce': solutionNonce,
+      },
+    );
+    final Response<Map<String, dynamic>> resp;
+    try {
+      resp = await _dio.postUri<Map<String, dynamic>>(
+        Uri.parse('$authBaseUrl/api/v1/auth/pow/delegated/verify'),
+        data: req.toJson(),
+        options: Options(contentType: Headers.jsonContentType),
+      );
+    } on DioException catch (e) {
+      throw await HanakoBackendException.fromDio(e, action: '提交委托工作量证明');
+    }
+    final status = DelegatedPowStatus.fromJson(resp.data!);
+    onProgress?.call(
+      const UserPowProgress(
+        stage: UserPowProgressStage.done,
+        message: '委托工作量证明已完成',
+        completed: 1,
+        total: 1,
+        fraction: 1,
+      ),
+    );
+    return status;
   }
 
   /// 密钥轮换第一步：当前有效旧私钥签名后，请求绑定邮箱验证码。
@@ -346,16 +744,16 @@ class HanakoBackendClient {
     );
   }
 
-  // ============== ai-gateway ==============
+  // ============== ph01 protocol login ==============
 
-  /// 生成 AI 网关登录授权结果。
+  /// 生成 PH01 协议登录授权结果。
   ///
   /// 返回值用于两条路径：
   ///   - 登录码：把 JSON 字符串复制给网页粘贴框
   ///   - 协议登录：POST 到 `ph01://login` 给出的 callback
   ///
   /// 签名内容就是原始 base64url challenge 字符串。
-  Map<String, dynamic> buildAiGatewayLoginAuthorization({
+  Map<String, dynamic> buildProtocolLoginAuthorization({
     required HanakoKeyPair keyPair,
     required int userId,
     required String challenge,
@@ -363,7 +761,7 @@ class HanakoBackendClient {
     if (userId <= 0) {
       throw ArgumentError.value(userId, 'userId', 'must be positive');
     }
-    final nonce = _decodeAiGatewayChallengeNonce(challenge);
+    final nonce = _decodeProtocolChallengeNonce(challenge);
     final signature = keyPair.sign(Uint8List.fromList(utf8.encode(challenge)));
     return {
       'user_id': userId,
@@ -372,14 +770,26 @@ class HanakoBackendClient {
     };
   }
 
+  Map<String, dynamic> buildAiGatewayLoginAuthorization({
+    required HanakoKeyPair keyPair,
+    required int userId,
+    required String challenge,
+  }) {
+    return buildProtocolLoginAuthorization(
+      keyPair: keyPair,
+      userId: userId,
+      challenge: challenge,
+    );
+  }
+
   /// 生成网页登录码输入框可直接粘贴的 JSON 字符串。
-  String buildAiGatewayLoginCode({
+  String buildProtocolLoginCode({
     required HanakoKeyPair keyPair,
     required int userId,
     required String challenge,
   }) {
     return jsonEncode(
-      buildAiGatewayLoginAuthorization(
+      buildProtocolLoginAuthorization(
         keyPair: keyPair,
         userId: userId,
         challenge: challenge,
@@ -387,14 +797,26 @@ class HanakoBackendClient {
     );
   }
 
-  /// 协议登录授权后，把签名结果回传给 AI 网关 callback。
-  Future<void> completeAiGatewayProtocolLogin({
+  String buildAiGatewayLoginCode({
+    required HanakoKeyPair keyPair,
+    required int userId,
+    required String challenge,
+  }) {
+    return buildProtocolLoginCode(
+      keyPair: keyPair,
+      userId: userId,
+      challenge: challenge,
+    );
+  }
+
+  /// 协议登录授权后，把签名结果回传给 callback。
+  Future<void> completeProtocolLogin({
     required HanakoKeyPair keyPair,
     required int userId,
     required String challenge,
     required String callbackUrl,
   }) async {
-    final body = buildAiGatewayLoginAuthorization(
+    final body = buildProtocolLoginAuthorization(
       keyPair: keyPair,
       userId: userId,
       challenge: challenge,
@@ -408,8 +830,22 @@ class HanakoBackendClient {
     if (respBody == null) return;
     if (respBody['success'] == false) {
       final message = respBody['message'] ?? respBody['error'] ?? respBody;
-      throw StateError('AI gateway protocol login failed: $message');
+      throw StateError('PH01 protocol login failed: $message');
     }
+  }
+
+  Future<void> completeAiGatewayProtocolLogin({
+    required HanakoKeyPair keyPair,
+    required int userId,
+    required String challenge,
+    required String callbackUrl,
+  }) async {
+    return completeProtocolLogin(
+      keyPair: keyPair,
+      userId: userId,
+      challenge: challenge,
+      callbackUrl: callbackUrl,
+    );
   }
 
   /// ECDH 握手：建立短期通信通道，缓存到 [_channel]。
@@ -780,6 +1216,7 @@ class HanakoBackendClient {
 
     final stream = resp.data!.stream;
     final buffer = StringBuffer();
+    final decoder = _ChatStreamEventDecoder();
     await for (final chunk in stream) {
       buffer.write(utf8.decode(chunk, allowMalformed: true));
       while (true) {
@@ -801,7 +1238,7 @@ class HanakoBackendClient {
             ciphertextHex: env['ciphertext'] as String,
             tagHex: env['tag'] as String,
           );
-          for (final event in _extractChatStreamEvents(utf8.decode(pt))) {
+          for (final event in decoder.parse(utf8.decode(pt))) {
             yield event;
           }
         } catch (_) {
@@ -1013,6 +1450,12 @@ int _choiceCount(Map<String, dynamic> body) {
   return choices is List ? choices.length : 0;
 }
 
+String _shortLogHash(String value) {
+  final text = value.trim();
+  if (text.length <= 16) return text;
+  return '${text.substring(0, 16)}...';
+}
+
 Map<String, dynamic> _backendExceptionLogFields(HanakoBackendException error) {
   return {
     'error_type': error.runtimeType.toString(),
@@ -1046,15 +1489,17 @@ String _serverPlaintextFromDetails(String? details) {
   return details.substring(index + marker.length).trim();
 }
 
-String _decodeAiGatewayChallengeNonce(String challenge) {
+String _decodeProtocolChallengeNonce(String challenge) {
   final raw = base64Url.decode(base64Url.normalize(challenge));
   final decoded = jsonDecode(utf8.decode(raw));
   if (decoded is! Map<String, dynamic>) {
-    throw const FormatException('AI gateway challenge must be a JSON object');
+    throw const FormatException(
+      'PH01 protocol challenge must be a JSON object',
+    );
   }
   final nonce = decoded['nonce'];
   if (nonce is! String || nonce.trim().isEmpty) {
-    throw const FormatException('AI gateway challenge nonce is missing');
+    throw const FormatException('PH01 protocol challenge nonce is missing');
   }
   return nonce.trim();
 }
@@ -1089,7 +1534,8 @@ class HanakoBackendException implements Exception {
     final body = await _responseBodyText(response?.data);
     final uri = error.requestOptions.uri;
     final method = error.requestOptions.method;
-    final summary = _gatewayErrorSummary(action, status, body);
+    final serviceLabel = _backendServiceLabel(uri);
+    final summary = _gatewayErrorSummary(action, status, body, serviceLabel);
     final details = StringBuffer()
       ..writeln('$action失败')
       ..writeln('HTTP 状态：${status ?? "无响应"}')
@@ -1121,18 +1567,61 @@ class HanakoBackendException implements Exception {
   String toString() => message;
 }
 
-String _gatewayErrorSummary(String action, int? status, String body) {
-  if (status == null) return '$action失败：无法连接服务器';
-  if (status == 400) return '$action失败：AI 网关拒绝了请求参数';
+String _gatewayErrorSummary(
+  String action,
+  int? status,
+  String body,
+  String serviceLabel,
+) {
+  if (status == null) return '$action失败：无法连接$serviceLabel';
+  final parsed = _gatewayErrorBody(body);
+  switch (parsed.code) {
+    case 'username_taken':
+      return '$action失败：用户名已被占用，请更换用户名。';
+    case 'email_taken':
+      return '$action失败：该邮箱已绑定其他账号，请更换邮箱或登录原账号。';
+    case 'email_verification_required':
+      return '$action失败：邮箱验证码缺失、过期或与本次注册不匹配。';
+    case 'rfa_code_invalid':
+      return '$action失败：验证码错误，请重新输入。';
+    case 'rfa_code_expired':
+      return '$action失败：验证码已过期，请重新获取。';
+    case 'invalid_signature':
+    case 'timestamp_expired':
+    case 'nonce_replayed':
+      if (action.contains('注册')) {
+        return '$action失败：注册请求签名校验未通过，请重新生成账号后再试。';
+      }
+      return '$action失败：身份或通信通道已失效';
+    case 'invalid_payload':
+      if (serviceLabel == '认证中心' && parsed.message.isNotEmpty) {
+        return '$action失败：${parsed.message}';
+      }
+      break;
+    case 'pubkey_not_found':
+      return '$action失败：认证中心没有找到当前公钥，请重新登录或完成账号绑定';
+    case 'user_disabled':
+      return '$action失败：账号已被禁用';
+  }
+  if (parsed.message.isNotEmpty && action.contains('注册')) {
+    return '$action失败：${parsed.message}';
+  }
+  if (status == 400) return '$action失败：$serviceLabel拒绝了请求参数';
   if (status == 401) return '$action失败：身份或通信通道已失效';
-  if (status == 403) return _gatewayForbiddenSummary(action, body);
-  if (status == 404) return '$action失败：服务接口不存在或未部署最新版本';
+  if (status == 403) {
+    return _gatewayForbiddenSummary(action, body, serviceLabel);
+  }
+  if (status == 404) return '$action失败：$serviceLabel接口不存在或未部署最新版本';
   if (status == 429) return '$action失败：请求过于频繁';
-  if (status >= 500) return '$action失败：AI 网关或上游模型服务异常';
+  if (status >= 500) return '$action失败：$serviceLabel异常';
   return '$action失败：服务器返回 HTTP $status';
 }
 
-String _gatewayForbiddenSummary(String action, String body) {
+String _gatewayForbiddenSummary(
+  String action,
+  String body,
+  String serviceLabel,
+) {
   final parsed = _gatewayErrorBody(body);
   final code = parsed.code;
   final message = parsed.message;
@@ -1150,7 +1639,30 @@ String _gatewayForbiddenSummary(String action, String body) {
     return '$action失败：root 公开故事密钥 IP 限制拒绝了当前请求';
   }
   if (message.isNotEmpty) return '$action失败：$message';
+  if (serviceLabel == '认证中心') return '$action失败：认证中心拒绝访问';
   return '$action失败：当前身份无权使用该模型';
+}
+
+String _backendServiceLabel(Uri uri) {
+  final path = uri.path;
+  if (path.startsWith('/api/v1/auth/') || path.startsWith('/admin/')) {
+    return '认证中心';
+  }
+  if (path.startsWith('/api/v1/channel/') ||
+      path.startsWith('/api/v1/llm/') ||
+      path.startsWith('/api/v1/models') ||
+      path.startsWith('/api/v1/public/story/')) {
+    return 'AI 网关';
+  }
+
+  final host = uri.host.toLowerCase();
+  if (host.startsWith('auth.') || host.contains('auth')) {
+    return '认证中心';
+  }
+  if (host.startsWith('ai.') || host.contains('gateway')) {
+    return 'AI 网关';
+  }
+  return '服务器';
 }
 
 ({String code, String message}) _gatewayErrorBody(String body) {
@@ -1186,31 +1698,38 @@ Future<String> _responseBodyText(Object? data) async {
   return data.toString();
 }
 
-Iterable<LlmEvent> _extractChatStreamEvents(String decoded) sync* {
-  final lines = const LineSplitter().convert(decoded);
-  final source = lines.isEmpty ? <String>[decoded] : lines;
-  for (final rawLine in source) {
-    var line = rawLine.trim();
-    if (line.isEmpty || line.startsWith(':') || line.startsWith('event:')) {
-      continue;
-    }
-    if (line.startsWith('data:')) {
-      line = line.substring(5).trimLeft();
-    }
-    if (line.isEmpty || line == '[DONE]') continue;
+class _ChatStreamEventDecoder {
+  final _toolCalls = _ToolCallDeltaState();
 
-    try {
-      final parsed = jsonDecode(line);
-      for (final event in _chatDeltaEvents(parsed)) {
-        yield event;
+  Iterable<LlmEvent> parse(String decoded) sync* {
+    final lines = const LineSplitter().convert(decoded);
+    final source = lines.isEmpty ? <String>[decoded] : lines;
+    for (final rawLine in source) {
+      var line = rawLine.trim();
+      if (line.isEmpty || line.startsWith(':') || line.startsWith('event:')) {
+        continue;
       }
-    } catch (_) {
-      yield TextDelta(line);
+      if (line.startsWith('data:')) {
+        line = line.substring(5).trimLeft();
+      }
+      if (line.isEmpty || line == '[DONE]') continue;
+
+      try {
+        final parsed = jsonDecode(line);
+        for (final event in _chatDeltaEvents(parsed, _toolCalls)) {
+          yield event;
+        }
+      } catch (_) {
+        yield TextDelta(line);
+      }
     }
   }
 }
 
-Iterable<LlmEvent> _chatDeltaEvents(Object? parsed) sync* {
+Iterable<LlmEvent> _chatDeltaEvents(
+  Object? parsed,
+  _ToolCallDeltaState toolCalls,
+) sync* {
   if (parsed is! Map) return;
   final streamError = _streamErrorEvent(parsed);
   if (streamError != null) {
@@ -1219,7 +1738,8 @@ Iterable<LlmEvent> _chatDeltaEvents(Object? parsed) sync* {
   }
   final choices = parsed['choices'];
   if (choices is List && choices.isNotEmpty) {
-    for (final choice in choices) {
+    for (var choiceIndex = 0; choiceIndex < choices.length; choiceIndex++) {
+      final choice = choices[choiceIndex];
       if (choice is! Map) continue;
       final delta = choice['delta'];
       if (delta is Map) {
@@ -1233,9 +1753,9 @@ Iterable<LlmEvent> _chatDeltaEvents(Object? parsed) sync* {
         if (content is String && content.isNotEmpty) {
           yield TextDelta(content);
         }
-        yield* _toolCallEvents(delta['tool_calls']);
+        yield* toolCalls.events(delta['tool_calls'], choiceIndex: choiceIndex);
       }
-      yield* _toolCallEvents(choice['tool_calls']);
+      yield* toolCalls.events(choice['tool_calls'], choiceIndex: choiceIndex);
       final message = choice['message'];
       if (message is Map) {
         final reasoning = message['reasoning_content'] ?? message['reasoning'];
@@ -1244,7 +1764,10 @@ Iterable<LlmEvent> _chatDeltaEvents(Object? parsed) sync* {
         }
         final content = message['content'];
         if (content is String && content.isNotEmpty) yield TextDelta(content);
-        yield* _toolCallEvents(message['tool_calls']);
+        yield* toolCalls.events(
+          message['tool_calls'],
+          choiceIndex: choiceIndex,
+        );
       }
       final text = choice['text'];
       if (text is String && text.isNotEmpty) yield TextDelta(text);
@@ -1299,50 +1822,91 @@ int? _intFromAny(Object? value) {
   return null;
 }
 
-Iterable<LlmEvent> _toolCallEvents(Object? raw) sync* {
-  if (raw is! List) return;
-  for (var index = 0; index < raw.length; index++) {
-    final item = raw[index];
-    if (item is! Map) continue;
-    final id = (item['id'] ?? item['call_id'] ?? 'tool_call_$index').toString();
-    final function = item['function'];
-    String? name;
-    String? args;
-    String? thoughtSignature;
-    if (function is Map) {
-      final rawName = function['name'];
-      if (rawName is String && rawName.isNotEmpty) name = rawName;
-      final rawArgs = function['arguments'];
-      if (rawArgs is String && rawArgs.isNotEmpty) args = rawArgs;
-      final rawThoughtSignature =
-          function['thought_signature'] ?? function['thoughtSignature'];
-      if (rawThoughtSignature is String && rawThoughtSignature.isNotEmpty) {
-        thoughtSignature = rawThoughtSignature;
-      }
-    } else {
-      final rawName = item['name'];
-      if (rawName is String && rawName.isNotEmpty) name = rawName;
-      final rawArgs = item['arguments'] ?? item['input'];
-      if (rawArgs is String && rawArgs.isNotEmpty) {
-        args = rawArgs;
-      } else if (rawArgs is Map) {
-        args = jsonEncode(rawArgs);
-      }
-      final rawThoughtSignature =
-          item['thought_signature'] ?? item['thoughtSignature'];
-      if (rawThoughtSignature is String && rawThoughtSignature.isNotEmpty) {
-        thoughtSignature = rawThoughtSignature;
-      }
-    }
-    if (name != null) {
-      yield ToolCallStart(
-        id: id,
-        name: name,
-        thoughtSignature: thoughtSignature,
+class _ToolCallDeltaState {
+  final _pending = <String, _PendingToolCallDelta>{};
+
+  Iterable<LlmEvent> events(Object? raw, {required int choiceIndex}) sync* {
+    if (raw is! List) return;
+    for (var position = 0; position < raw.length; position++) {
+      final item = raw[position];
+      if (item is! Map) continue;
+
+      final toolIndex = _intFromAny(item['index']) ?? position;
+      final key = '$choiceIndex:$toolIndex';
+      final call = _pending.putIfAbsent(
+        key,
+        () => _PendingToolCallDelta(id: 'tool_call_${choiceIndex}_$toolIndex'),
       );
+
+      final rawId =
+          _nonEmptyString(item['id']) ?? _nonEmptyString(item['call_id']);
+      if (rawId != null) call.id = rawId;
+
+      final parts = _toolCallParts(item);
+      if (parts.name != null) call.name = parts.name!;
+      if (parts.thoughtSignature != null) {
+        call.thoughtSignature = parts.thoughtSignature;
+      }
+
+      final name = call.name;
+      if (!call.started && name != null && name.trim().isNotEmpty) {
+        call.started = true;
+        yield ToolCallStart(
+          id: call.id,
+          name: name,
+          thoughtSignature: call.thoughtSignature,
+        );
+      }
+
+      final argsJson = parts.argumentsJson;
+      if (argsJson != null) {
+        yield ToolCallArgsDelta(id: call.id, argsJson: argsJson);
+      }
     }
-    if (args != null) yield ToolCallArgsDelta(id: id, argsJson: args);
   }
+}
+
+class _PendingToolCallDelta {
+  _PendingToolCallDelta({required this.id});
+
+  String id;
+  String? name;
+  String? thoughtSignature;
+  bool started = false;
+}
+
+({String? name, String? argumentsJson, String? thoughtSignature})
+_toolCallParts(Map item) {
+  final function = item['function'];
+  if (function is Map) {
+    return (
+      name: _nonEmptyString(function['name']),
+      argumentsJson: _argumentsJson(function['arguments']),
+      thoughtSignature:
+          _nonEmptyString(function['thought_signature']) ??
+          _nonEmptyString(function['thoughtSignature']),
+    );
+  }
+
+  return (
+    name: _nonEmptyString(item['name']),
+    argumentsJson: _argumentsJson(item['arguments'] ?? item['input']),
+    thoughtSignature:
+        _nonEmptyString(item['thought_signature']) ??
+        _nonEmptyString(item['thoughtSignature']),
+  );
+}
+
+String? _nonEmptyString(Object? value) {
+  if (value is! String) return null;
+  final text = value.trim();
+  return text.isEmpty ? null : text;
+}
+
+String? _argumentsJson(Object? value) {
+  if (value is String) return value.isEmpty ? null : value;
+  if (value is Map || value is List) return jsonEncode(value);
+  return null;
 }
 
 /// 用户名预检返回值。
@@ -1365,6 +1929,223 @@ class RegisterResult {
   final String username;
   final String tier;
   final String pubkeyHash;
+}
+
+class UserPowChallenge {
+  UserPowChallenge({
+    required this.challengeId,
+    required this.pubkeyHash,
+    required this.algorithm,
+    required this.difficultyBits,
+    required this.memoryKiB,
+    required this.roundCount,
+    required this.seed,
+    required this.expiresAt,
+  });
+
+  factory UserPowChallenge.fromJson(Map<String, dynamic> json) {
+    return UserPowChallenge(
+      challengeId: json['challenge_id'] as String,
+      pubkeyHash: json['pubkey_hash'] as String,
+      algorithm: json['algorithm'] as String,
+      difficultyBits: (json['difficulty_bits'] as num).toInt(),
+      memoryKiB: (json['memory_kib'] as num).toInt(),
+      roundCount: (json['round_count'] as num).toInt(),
+      seed: json['seed'] as String,
+      expiresAt: (json['expires_at'] as num).toInt(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'challenge_id': challengeId,
+      'pubkey_hash': pubkeyHash,
+      'algorithm': algorithm,
+      'difficulty_bits': difficultyBits,
+      'memory_kib': memoryKiB,
+      'round_count': roundCount,
+      'seed': seed,
+      'expires_at': expiresAt,
+    };
+  }
+
+  final String challengeId;
+  final String pubkeyHash;
+  final String algorithm;
+  final int difficultyBits;
+  final int memoryKiB;
+  final int roundCount;
+  final String seed;
+  final int expiresAt;
+}
+
+class UserPowStatus {
+  UserPowStatus({
+    required this.valid,
+    required this.userId,
+    required this.username,
+    required this.tier,
+    required this.pubkeyHash,
+    required this.powVerified,
+    required this.powAlgorithm,
+    required this.powScore,
+    required this.powVerifiedAt,
+  });
+
+  factory UserPowStatus.fromJson(Map<String, dynamic> json) {
+    return UserPowStatus(
+      valid: json['valid'] as bool? ?? false,
+      userId: (json['user_id'] as num?)?.toInt() ?? 0,
+      username: json['username']?.toString() ?? '',
+      tier: json['tier']?.toString() ?? '',
+      pubkeyHash: json['pubkey_hash']?.toString() ?? '',
+      powVerified: json['pow_verified'] as bool? ?? false,
+      powAlgorithm: json['pow_algorithm']?.toString() ?? '',
+      powScore: (json['pow_score'] as num?)?.toInt() ?? 0,
+      powVerifiedAt: (json['pow_verified_at'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  final bool valid;
+  final int userId;
+  final String username;
+  final String tier;
+  final String pubkeyHash;
+  final bool powVerified;
+  final String powAlgorithm;
+  final int powScore;
+  final int powVerifiedAt;
+}
+
+class DelegatedPowChallenge {
+  DelegatedPowChallenge({
+    required this.challengeId,
+    required this.purpose,
+    required this.subjectHash,
+    required this.pubkeyHash,
+    required this.algorithm,
+    required this.difficultyBits,
+    required this.memoryKiB,
+    required this.roundCount,
+    required this.seed,
+    required this.expiresAt,
+  });
+
+  factory DelegatedPowChallenge.fromJson(Map<String, dynamic> json) {
+    return DelegatedPowChallenge(
+      challengeId: json['challenge_id'] as String,
+      purpose: json['purpose'] as String,
+      subjectHash: json['subject_hash'] as String,
+      pubkeyHash: json['pubkey_hash']?.toString() ?? '',
+      algorithm: json['algorithm'] as String,
+      difficultyBits: (json['difficulty_bits'] as num).toInt(),
+      memoryKiB: (json['memory_kib'] as num).toInt(),
+      roundCount: (json['round_count'] as num).toInt(),
+      seed: json['seed'] as String,
+      expiresAt: (json['expires_at'] as num).toInt(),
+    );
+  }
+
+  UserPowChallenge toUserPowChallenge() {
+    return UserPowChallenge(
+      challengeId: challengeId,
+      pubkeyHash: subjectHash,
+      algorithm: algorithm,
+      difficultyBits: difficultyBits,
+      memoryKiB: memoryKiB,
+      roundCount: roundCount,
+      seed: seed,
+      expiresAt: expiresAt,
+    );
+  }
+
+  final String challengeId;
+  final String purpose;
+  final String subjectHash;
+  final String pubkeyHash;
+  final String algorithm;
+  final int difficultyBits;
+  final int memoryKiB;
+  final int roundCount;
+  final String seed;
+  final int expiresAt;
+}
+
+class DelegatedPowStatus {
+  DelegatedPowStatus({
+    required this.challengeId,
+    required this.purpose,
+    required this.subjectHash,
+    required this.pubkeyHash,
+    required this.verified,
+    required this.algorithm,
+    required this.score,
+    required this.verifiedAt,
+    required this.expiresAt,
+  });
+
+  factory DelegatedPowStatus.fromJson(Map<String, dynamic> json) {
+    return DelegatedPowStatus(
+      challengeId: json['challenge_id']?.toString() ?? '',
+      purpose: json['purpose']?.toString() ?? '',
+      subjectHash: json['subject_hash']?.toString() ?? '',
+      pubkeyHash: json['pubkey_hash']?.toString() ?? '',
+      verified: json['verified'] as bool? ?? false,
+      algorithm: json['algorithm']?.toString() ?? '',
+      score: (json['score'] as num?)?.toInt() ?? 0,
+      verifiedAt: (json['verified_at'] as num?)?.toInt() ?? 0,
+      expiresAt: (json['expires_at'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  final String challengeId;
+  final String purpose;
+  final String subjectHash;
+  final String pubkeyHash;
+  final bool verified;
+  final String algorithm;
+  final int score;
+  final int verifiedAt;
+  final int expiresAt;
+}
+
+abstract final class UserPowProgressStage {
+  static const challenge = 'challenge';
+  static const compute = 'compute';
+  static const submit = 'submit';
+  static const done = 'done';
+}
+
+class UserPowProgress {
+  const UserPowProgress({
+    required this.stage,
+    required this.message,
+    required this.completed,
+    required this.total,
+    required this.fraction,
+  });
+
+  UserPowProgress copyWith({
+    String? stage,
+    String? message,
+    int? completed,
+    int? total,
+    double? fraction,
+  }) {
+    return UserPowProgress(
+      stage: stage ?? this.stage,
+      message: message ?? this.message,
+      completed: completed ?? this.completed,
+      total: total ?? this.total,
+      fraction: fraction ?? this.fraction,
+    );
+  }
+
+  final String stage;
+  final String message;
+  final int completed;
+  final int total;
+  final double fraction;
 }
 
 /// 注册邮箱验证码挑战。
@@ -1446,6 +2227,405 @@ class RecoveryGrant {
   final String recoveryGrant;
   final int expiresIn;
   final int maxCandidatesPerColumn;
+}
+
+String solveUserPow(UserPowChallenge challenge, {int maxAttempts = 1 << 24}) {
+  for (var i = 0; i < maxAttempts; i++) {
+    final nonce = i.toRadixString(16);
+    if (_verifyUserPowSolution(challenge, nonce)) return nonce;
+  }
+  throw StateError('工作量证明计算未在限制次数内完成');
+}
+
+Future<String> solveUserPowInBackground(
+  UserPowChallenge challenge, {
+  int maxAttempts = 1 << 24,
+  int? workerCount,
+  void Function(UserPowProgress progress)? onProgress,
+}) async {
+  final receivePort = ReceivePort();
+  final isolates = <Isolate>[];
+  final completer = Completer<String>();
+  final normalizedWorkerCount = _normalizeUserPowWorkerCount(
+    challenge,
+    workerCount,
+  );
+  final unitsPerAttempt = _userPowAttemptProgressUnits(challenge);
+  final expectedProgressWindow = _estimatedUserPowProgressTotal(
+    challenge,
+    maxAttempts,
+  );
+  final maxProgressUnits = maxAttempts * unitsPerAttempt;
+  final workerCompleted = List<int>.filled(normalizedWorkerCount, 0);
+  var finishedWorkers = 0;
+
+  void emitProgress() {
+    final completed = workerCompleted.fold<int>(0, (sum, value) => sum + value);
+    var total = completed + expectedProgressWindow;
+    if (maxProgressUnits > 0 && total > maxProgressUnits) {
+      total = maxProgressUnits;
+    }
+    if (total < expectedProgressWindow) {
+      total = expectedProgressWindow;
+    }
+    if (total < completed) {
+      total = completed;
+    }
+    final rawFraction = total <= 0 ? 0 : completed / total;
+    final taskLabel = normalizedWorkerCount > 1
+        ? '（$normalizedWorkerCount 个计算任务）'
+        : '';
+    onProgress?.call(
+      UserPowProgress(
+        stage: UserPowProgressStage.compute,
+        message: '正在本机计算工作量证明$taskLabel，请保持窗口开启',
+        completed: completed,
+        total: total,
+        fraction: rawFraction.clamp(0, 0.98).toDouble(),
+      ),
+    );
+  }
+
+  late final StreamSubscription<dynamic> sub;
+  sub = receivePort.listen((message) {
+    if (message is! Map) return;
+    switch (message['type']) {
+      case 'progress':
+        final worker = (message['worker'] as num?)?.toInt() ?? 0;
+        if (worker < 0 || worker >= workerCompleted.length) return;
+        final completed = (message['completed'] as num?)?.toInt() ?? 0;
+        if (completed > workerCompleted[worker]) {
+          workerCompleted[worker] = completed;
+          emitProgress();
+        }
+        break;
+      case 'done':
+        if (!completer.isCompleted) {
+          completer.complete(message['nonce']?.toString() ?? '');
+        }
+        break;
+      case 'finished':
+        finishedWorkers++;
+        if (finishedWorkers >= normalizedWorkerCount &&
+            !completer.isCompleted) {
+          completer.completeError(StateError('工作量证明计算未在限制次数内完成'));
+        }
+        break;
+      case 'error':
+        if (!completer.isCompleted) {
+          completer.completeError(
+            StateError(message['message']?.toString() ?? '工作量证明计算失败'),
+          );
+        }
+        break;
+    }
+  });
+
+  try {
+    for (var worker = 0; worker < normalizedWorkerCount; worker++) {
+      isolates.add(
+        await Isolate.spawn(_solveUserPowIsolateMain, {
+          'send_port': receivePort.sendPort,
+          'challenge': challenge.toJson(),
+          'max_attempts': maxAttempts,
+          'worker': worker,
+          'worker_count': normalizedWorkerCount,
+        }, debugName: 'hanako-user-pow-$worker'),
+      );
+    }
+    return await completer.future;
+  } finally {
+    await sub.cancel();
+    receivePort.close();
+    for (final isolate in isolates) {
+      isolate.kill(priority: Isolate.immediate);
+    }
+  }
+}
+
+void _solveUserPowIsolateMain(Map<String, dynamic> args) {
+  final sendPort = args['send_port'] as SendPort;
+  try {
+    final challenge = UserPowChallenge.fromJson(
+      Map<String, dynamic>.from(args['challenge'] as Map),
+    );
+    final maxAttempts = (args['max_attempts'] as num?)?.toInt() ?? 1 << 24;
+    final worker = (args['worker'] as num?)?.toInt() ?? 0;
+    final workerCount = (args['worker_count'] as num?)?.toInt() ?? 1;
+    final unitsPerAttempt = _userPowAttemptProgressUnits(challenge);
+    final workspace = Uint64List(_userPowWordCount(challenge.memoryKiB));
+    var completedUnits = 0;
+    void sendProgress(int attemptUnit) {
+      sendPort.send({
+        'type': 'progress',
+        'worker': worker,
+        'completed': completedUnits + attemptUnit,
+      });
+    }
+
+    for (var i = worker; i < maxAttempts; i += workerCount) {
+      sendProgress(0);
+      final nonce = i.toRadixString(16);
+      final digest = _userPowDigest(
+        seed: challenge.seed,
+        pubkeyHash: challenge.pubkeyHash,
+        nonce: nonce,
+        memoryKiB: challenge.memoryKiB,
+        roundCount: challenge.roundCount,
+        workspace: workspace,
+        onProgress: (completed, _) => sendProgress(completed),
+      );
+      if (_hasLeadingZeroBits(digest, challenge.difficultyBits)) {
+        sendProgress(unitsPerAttempt);
+        sendPort.send({'type': 'done', 'nonce': nonce});
+        return;
+      }
+      completedUnits += unitsPerAttempt;
+    }
+    sendPort.send({'type': 'finished', 'worker': worker});
+  } catch (e) {
+    sendPort.send({'type': 'error', 'message': '$e'});
+  }
+}
+
+bool _verifyUserPowSolution(UserPowChallenge challenge, String nonce) {
+  final digest = _userPowDigest(
+    seed: challenge.seed,
+    pubkeyHash: challenge.pubkeyHash,
+    nonce: nonce,
+    memoryKiB: challenge.memoryKiB,
+    roundCount: challenge.roundCount,
+  );
+  return _hasLeadingZeroBits(digest, challenge.difficultyBits);
+}
+
+int _estimatedUserPowProgressTotal(
+  UserPowChallenge challenge,
+  int maxAttempts,
+) {
+  final unitsPerAttempt = _userPowAttemptProgressUnits(challenge);
+  final normalizedBits = challenge.difficultyBits.clamp(1, 28).toInt();
+  final expectedAttempts = 1 << normalizedBits;
+  final expectedUnits = expectedAttempts * unitsPerAttempt;
+  final maxUnits = maxAttempts * unitsPerAttempt;
+  return expectedUnits < maxUnits ? expectedUnits : maxUnits;
+}
+
+int _userPowAttemptProgressUnits(UserPowChallenge challenge) {
+  return _normalizeUserPowRoundCount(challenge.roundCount) *
+      _userPowUnitsPerStage;
+}
+
+int _normalizeUserPowWorkerCount(UserPowChallenge challenge, int? requested) {
+  if (requested != null) {
+    return requested.clamp(1, 64).toInt();
+  }
+  final cores = Platform.numberOfProcessors;
+  if (cores <= 2) return 1;
+  final cpuBound = math.min(cores - 1, 4);
+  final memoryKiB = _normalizeUserPowMemoryKiB(challenge.memoryKiB);
+  const memoryBudgetKiB = 2 * 1024 * 1024;
+  final memoryBound = math.max(1, memoryBudgetKiB ~/ memoryKiB);
+  return math.max(1, math.min(cpuBound, memoryBound));
+}
+
+Uint8List _userPowDigest({
+  required String seed,
+  required String pubkeyHash,
+  required String nonce,
+  required int memoryKiB,
+  required int roundCount,
+  Uint64List? workspace,
+  void Function(int completed, int total)? onProgress,
+}) {
+  final normalizedRoundCount = _normalizeUserPowRoundCount(roundCount);
+  final wordCount = _userPowWordCount(memoryKiB);
+  final activeWorkspace = workspace?.length == wordCount
+      ? workspace!
+      : Uint64List(wordCount);
+  final base = Uint8List.fromList(
+    crypto.sha256
+        .convert(
+          utf8.encode(
+            [
+              'ph01.memory_pow.v1',
+              seed.trim(),
+              pubkeyHash.trim().toLowerCase(),
+              nonce.trim(),
+            ].join('\n'),
+          ),
+        )
+        .bytes,
+  );
+  final acc = <int>[
+    _readUint64LE(base, 0),
+    _readUint64LE(base, 8),
+    _readUint64LE(base, 16),
+    _readUint64LE(base, 24),
+  ];
+  final totalUnits = normalizedRoundCount * _userPowUnitsPerStage;
+  void report(int stage, int phase) {
+    onProgress?.call(stage * _userPowUnitsPerStage + phase, totalUnits);
+  }
+
+  for (var round = 0; round < normalizedRoundCount; round++) {
+    final stageSeed = _userPowStageSeed(base, acc, round);
+    var state = _u64(_readUint64LE(stageSeed, 0) ^ (round + 1));
+    if (state == 0) {
+      state = 0x9e3779b97f4a7c15;
+    }
+    final step = _readUint64LE(stageSeed, 8) | 1;
+    var nextFillUnit = 1;
+    var nextFillAt = _userPowProgressBoundary(
+      activeWorkspace.length,
+      nextFillUnit,
+      _userPowFillProgressUnits,
+    );
+    for (var i = 0; i < activeWorkspace.length; i++) {
+      state = _userPowNextState(state + step);
+      final word = _userPowSplitMix64(state ^ i ^ acc[i & 3]);
+      activeWorkspace[i] = word;
+      acc[i & 3] = _userPowSplitMix64(acc[i & 3] + word + i + round);
+      if (i + 1 >= nextFillAt) {
+        report(round, nextFillUnit);
+        nextFillUnit++;
+        nextFillAt = _userPowProgressBoundary(
+          activeWorkspace.length,
+          nextFillUnit,
+          _userPowFillProgressUnits,
+        );
+      }
+    }
+
+    final probeCount = _userPowProbeCount(activeWorkspace.length);
+    var nextProbeUnit = 1;
+    var nextProbeAt = _userPowProgressBoundary(
+      probeCount,
+      nextProbeUnit,
+      _userPowProbeProgressUnits,
+    );
+    for (var i = 0; i < probeCount; i++) {
+      final lane = i & 3;
+      final idx =
+          (_userPowSplitMix64(acc[lane] + i * 0x9e3779b97f4a7c15 + round) %
+          activeWorkspace.length);
+      final word = activeWorkspace[idx];
+      acc[lane] = _userPowSplitMix64(acc[(lane + 1) & 3] ^ word ^ idx ^ i);
+      if (i + 1 >= nextProbeAt) {
+        report(round, _userPowFillProgressUnits + nextProbeUnit);
+        nextProbeUnit++;
+        nextProbeAt = _userPowProgressBoundary(
+          probeCount,
+          nextProbeUnit,
+          _userPowProbeProgressUnits,
+        );
+      }
+    }
+
+    final edge = activeWorkspace[(round * 0x9e3779b9) % activeWorkspace.length];
+    acc[round & 3] = _userPowSplitMix64(
+      acc[round & 3] ^ edge ^ probeCount ^ round,
+    );
+    report(round, _userPowUnitsPerStage);
+  }
+  return _userPowDigestAccumulators(acc);
+}
+
+const int _userPowWordBytes = 8;
+const int _userPowMinMemoryKiB = 16;
+const int _userPowMaxMemoryKiB = 1024 * 1024;
+const int _userPowMaxRounds = 64;
+const int _userPowFillProgressUnits = 12;
+const int _userPowProbeProgressUnits = 3;
+const int _userPowFoldProgressUnits = 1;
+const int _userPowUnitsPerStage =
+    _userPowFillProgressUnits +
+    _userPowProbeProgressUnits +
+    _userPowFoldProgressUnits;
+
+int _normalizeUserPowMemoryKiB(int memoryKiB) {
+  if (memoryKiB < _userPowMinMemoryKiB) return _userPowMinMemoryKiB;
+  if (memoryKiB > _userPowMaxMemoryKiB) return _userPowMaxMemoryKiB;
+  return memoryKiB;
+}
+
+int _normalizeUserPowRoundCount(int roundCount) {
+  if (roundCount < 1) return 1;
+  if (roundCount > _userPowMaxRounds) return _userPowMaxRounds;
+  return roundCount;
+}
+
+int _userPowWordCount(int memoryKiB) {
+  final normalizedMemoryKiB = _normalizeUserPowMemoryKiB(memoryKiB);
+  return ((normalizedMemoryKiB * 1024) ~/ _userPowWordBytes)
+      .clamp(1, 1 << 31)
+      .toInt();
+}
+
+int _userPowProbeCount(int wordCount) {
+  final probes = wordCount ~/ 16;
+  return probes < 1024 ? 1024 : probes;
+}
+
+int _userPowProgressBoundary(int total, int unit, int units) {
+  if (unit >= units) return total;
+  final boundary = ((total * unit) / units).ceil();
+  return boundary < 1 ? 1 : boundary;
+}
+
+int _readUint64LE(Uint8List bytes, int offset) {
+  return ByteData.sublistView(bytes).getUint64(offset, Endian.little);
+}
+
+Uint8List _userPowStageSeed(Uint8List base, List<int> acc, int stage) {
+  final bytes = Uint8List(72);
+  bytes.setRange(0, 32, base);
+  final view = ByteData.sublistView(bytes);
+  for (var i = 0; i < acc.length; i++) {
+    view.setUint64(32 + i * 8, _u64(acc[i]), Endian.little);
+  }
+  view.setUint64(64, stage, Endian.little);
+  return Uint8List.fromList(crypto.sha256.convert(bytes).bytes);
+}
+
+Uint8List _userPowDigestAccumulators(List<int> acc) {
+  final bytes = Uint8List(32);
+  final view = ByteData.sublistView(bytes);
+  for (var i = 0; i < 4; i++) {
+    view.setUint64(i * 8, _u64(acc[i]), Endian.little);
+  }
+  return Uint8List.fromList(crypto.sha256.convert(bytes).bytes);
+}
+
+int _userPowNextState(int value) {
+  var x = _u64(value);
+  x = _u64(x ^ (x >>> 12));
+  x = _u64(x ^ (x << 25));
+  x = _u64(x ^ (x >>> 27));
+  return _u64(x * 2685821657736338717);
+}
+
+int _userPowSplitMix64(int value) {
+  var z = _u64(value + 0x9e3779b97f4a7c15);
+  z = _u64((z ^ (z >>> 30)) * 0xbf58476d1ce4e5b9);
+  z = _u64((z ^ (z >>> 27)) * 0x94d049bb133111eb);
+  return _u64(z ^ (z >>> 31));
+}
+
+int _u64(int value) => value.toUnsigned(64);
+
+bool _hasLeadingZeroBits(Uint8List data, int bits) {
+  final normalizedBits = bits.clamp(4, 28);
+  final fullBytes = normalizedBits ~/ 8;
+  final restBits = normalizedBits % 8;
+  if (data.length < fullBytes) return false;
+  for (var i = 0; i < fullBytes; i++) {
+    if (data[i] != 0) return false;
+  }
+  if (restBits == 0) return true;
+  if (data.length <= fullBytes) return false;
+  final mask = 0xff << (8 - restBits);
+  return data[fullBytes] & mask == 0;
 }
 
 /// AI 网关当前通道授权模型列表。

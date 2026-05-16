@@ -1,22 +1,19 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
 import '../core/browser_manager.dart';
-import '../core/channel_manager.dart';
-import '../core/collaboration_manager.dart';
 import '../core/cron_store.dart';
 import '../core/skill_manager.dart';
+import '../experience/experience.dart';
+import '../memory/claude_memory.dart';
 import '../llm/provider.dart';
 
 class LocalToolRegistry {
   const LocalToolRegistry._();
 
-  static final List<_TodoItem> _todos = <_TodoItem>[];
-  static int _nextTodoId = 1;
   static int _artifactCounter = 0;
 
   static List<Tool> buildTools() => _toolSpecs
@@ -41,37 +38,26 @@ class LocalToolRegistry {
     Future<CronRunRecord> Function(String jobId)? runCronNow,
     SkillManager? skillManager,
     BrowserManager? browserManager,
-    ChannelManager? channelManager,
-    CollaborationManager? collaborationManager,
+    String? sessionPath,
   }) async {
     try {
       final result = switch (name) {
-        LocalToolNames.environment => _environment(cwd, agentDir),
-        LocalToolNames.ls ||
-        LocalToolNames.listDirectory => _listDirectory(arguments, cwd),
-        LocalToolNames.read ||
-        LocalToolNames.readTextFile => await _readTextFile(arguments, cwd),
-        LocalToolNames.grep ||
-        LocalToolNames.searchText => await _grep(arguments, cwd),
-        LocalToolNames.find => await _findFiles(arguments, cwd),
-        LocalToolNames.write => await _writeFile(arguments, cwd),
-        LocalToolNames.edit => await _editFile(arguments, cwd),
-        LocalToolNames.bash => await _runCommand(arguments, cwd),
         LocalToolNames.webFetch => await _webFetch(arguments),
         LocalToolNames.webSearch => _notConfigured(
           name,
           '客户端尚未配置搜索 provider。可以先用 web_fetch 读取已知 URL。',
         ),
-        LocalToolNames.todo => _todo(arguments),
         LocalToolNames.searchMemory => await _searchMemory(arguments, agentDir),
         LocalToolNames.pinMemory => await _pinMemory(arguments, agentDir),
         LocalToolNames.unpinMemory => await _unpinMemory(arguments, agentDir),
         LocalToolNames.listPinnedMemory => await _listPinnedMemory(agentDir),
-        LocalToolNames.recallExperience => await _recallExperience(
+        LocalToolNames.createExperience => await _createExperience(
           arguments,
           agentDir,
+          sessionPath,
+          cwd,
         ),
-        LocalToolNames.recordExperience => await _recordExperience(
+        LocalToolNames.experienceSearch => await _experienceSearch(
           arguments,
           agentDir,
         ),
@@ -81,31 +67,9 @@ class LocalToolRegistry {
           activeAgentId: activeAgentId,
           runCronNow: runCronNow,
         ),
-        LocalToolNames.presentFiles => _presentFiles(arguments),
-        LocalToolNames.createArtifact => _createArtifact(arguments),
+        LocalToolNames.createArtifact => _createArtifact(arguments, cwd),
         LocalToolNames.notify => _notify(arguments),
         LocalToolNames.browser => await _browser(arguments, browserManager),
-        LocalToolNames.channel => await _channel(
-          arguments,
-          channelManager,
-          collaborationManager,
-          activeAgentId,
-        ),
-        LocalToolNames.askAgent => await _askAgent(
-          arguments,
-          collaborationManager,
-          activeAgentId,
-        ),
-        LocalToolNames.dm || LocalToolNames.messageAgent => await _dm(
-          arguments,
-          collaborationManager,
-          activeAgentId,
-        ),
-        LocalToolNames.delegate => await _delegate(
-          arguments,
-          collaborationManager,
-          activeAgentId,
-        ),
         LocalToolNames.installSkill => await _installSkill(
           arguments,
           activeAgentId: activeAgentId,
@@ -128,418 +92,11 @@ class LocalToolRegistry {
     }
   }
 
-  static Map<String, dynamic> _environment(String? cwd, String? agentDir) => {
-    'ok': true,
-    'cwd': _defaultCwd(cwd),
-    'agent_dir': agentDir,
-    'process_cwd': Directory.current.path,
-    'operating_system': Platform.operatingSystem,
-    'path_separator': p.separator,
-  };
-
-  static Map<String, dynamic> _listDirectory(
-    Map<String, dynamic> args,
-    String? cwd,
-  ) {
-    final dir = Directory(_resolvePath(args['path'] as String?, cwd));
-    final maxEntries = _boundedInt(args['max_entries'], 80, 1, 300);
-    if (!dir.existsSync()) {
-      return {'ok': false, 'error': 'directory_not_found', 'path': dir.path};
-    }
-
-    final entries = <Map<String, dynamic>>[];
-    var scanned = 0;
-    for (final entity in dir.listSync(followLinks: false)) {
-      scanned++;
-      if (entries.length >= maxEntries) continue;
-      final stat = entity.statSync();
-      entries.add({
-        'name': p.basename(entity.path),
-        'path': entity.path,
-        'type': _entityType(stat.type),
-        if (stat.type == FileSystemEntityType.file) 'size': stat.size,
-        'modified': stat.modified.toIso8601String(),
-      });
-    }
-    entries.sort(
-      (a, b) => a['name'].toString().compareTo(b['name'].toString()),
-    );
-    return {
-      'ok': true,
-      'path': dir.path,
-      'entries': entries,
-      'truncated': scanned > entries.length,
-      'total_seen': scanned,
-    };
-  }
-
-  static Future<Map<String, dynamic>> _readTextFile(
-    Map<String, dynamic> args,
-    String? cwd,
-  ) async {
-    final path = _resolvePath(_requiredString(args, 'path'), cwd);
-    final maxChars = _boundedInt(args['max_chars'], 20000, 1, 60000);
-    final file = File(path);
-    if (!file.existsSync()) {
-      return {'ok': false, 'error': 'file_not_found', 'path': path};
-    }
-    final stat = file.statSync();
-    if (stat.type != FileSystemEntityType.file) {
-      return {'ok': false, 'error': 'not_a_file', 'path': path};
-    }
-    final readLimit = stat.size > 2 * 1024 * 1024 ? 2 * 1024 * 1024 : null;
-    final bytes = await file
-        .openRead(0, readLimit)
-        .fold<List<int>>(<int>[], (all, chunk) => all..addAll(chunk));
-    final text = utf8.decode(bytes, allowMalformed: true);
-    return {
-      'ok': true,
-      'path': path,
-      'size': stat.size,
-      'content': text.length > maxChars ? text.substring(0, maxChars) : text,
-      'truncated': text.length > maxChars || stat.size > bytes.length,
-    };
-  }
-
-  static Future<Map<String, dynamic>> _grep(
-    Map<String, dynamic> args,
-    String? cwd,
-  ) async {
-    final root = Directory(
-      _resolvePath(
-        (args['root'] ?? args['path']) is String
-            ? (args['root'] ?? args['path']) as String
-            : null,
-        cwd,
-      ),
-    );
-    final query =
-        _optionalString(args, 'query') ??
-        _optionalString(args, 'pattern') ??
-        _requiredString(args, 'query');
-    final maxResults = _boundedInt(args['max_results'], 60, 1, 200);
-    if (!root.existsSync()) {
-      return {'ok': false, 'error': 'directory_not_found', 'root': root.path};
-    }
-
-    final results = <Map<String, dynamic>>[];
-    var filesScanned = 0;
-    await for (final entity in root.list(recursive: true, followLinks: false)) {
-      if (results.length >= maxResults) break;
-      if (_hasSkippedSegment(entity.path)) continue;
-      if (entity is! File) continue;
-      if (_shouldSkipFile(entity.path)) continue;
-      final stat = await entity.stat();
-      if (stat.size > 1024 * 1024) continue;
-      filesScanned++;
-      final lines = await entity
-          .openRead()
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .toList()
-          .catchError((_) => <String>[]);
-      for (var i = 0; i < lines.length && results.length < maxResults; i++) {
-        final line = lines[i];
-        if (line.contains(query)) {
-          results.add({
-            'path': entity.path,
-            'line': i + 1,
-            'text': line.length > 500 ? line.substring(0, 500) : line,
-          });
-        }
-      }
-    }
-    return {
-      'ok': true,
-      'root': root.path,
-      'query': query,
-      'results': results,
-      'files_scanned': filesScanned,
-      'truncated': results.length >= maxResults,
-    };
-  }
-
-  static Future<Map<String, dynamic>> _findFiles(
-    Map<String, dynamic> args,
-    String? cwd,
-  ) async {
-    final root = Directory(
-      _resolvePath(
-        (args['root'] ?? args['path']) is String
-            ? (args['root'] ?? args['path']) as String
-            : null,
-        cwd,
-      ),
-    );
-    final pattern =
-        _optionalString(args, 'pattern') ??
-        _optionalString(args, 'name') ??
-        _requiredString(args, 'pattern');
-    final maxResults = _boundedInt(args['max_results'], 80, 1, 300);
-    if (!root.existsSync()) {
-      return {'ok': false, 'error': 'directory_not_found', 'root': root.path};
-    }
-    final matcher = _globMatcher(pattern);
-    final results = <Map<String, dynamic>>[];
-    await for (final entity in root.list(recursive: true, followLinks: false)) {
-      if (results.length >= maxResults) break;
-      if (_hasSkippedSegment(entity.path)) continue;
-      final name = p.basename(entity.path);
-      if (!matcher(name) && !entity.path.contains(pattern)) continue;
-      final stat = await entity.stat();
-      results.add({
-        'name': name,
-        'path': entity.path,
-        'type': _entityType(stat.type),
-        if (stat.type == FileSystemEntityType.file) 'size': stat.size,
-      });
-    }
-    return {
-      'ok': true,
-      'root': root.path,
-      'pattern': pattern,
-      'results': results,
-      'truncated': results.length >= maxResults,
-    };
-  }
-
-  static Future<Map<String, dynamic>> _writeFile(
-    Map<String, dynamic> args,
-    String? cwd,
-  ) async {
-    final path = _resolvePath(_requiredString(args, 'path'), cwd);
-    final content = _requiredString(args, 'content');
-    final overwrite = args['overwrite'] == true;
-    final file = File(path);
-    if (file.existsSync() && !overwrite) {
-      return {
-        'ok': false,
-        'error': 'file_exists',
-        'path': path,
-        'message': '文件已存在；如确需覆盖，传 overwrite=true',
-      };
-    }
-    file.parent.createSync(recursive: true);
-    await file.writeAsString(content, flush: true);
-    return {'ok': true, 'path': path, 'bytes': await file.length()};
-  }
-
-  static Future<Map<String, dynamic>> _editFile(
-    Map<String, dynamic> args,
-    String? cwd,
-  ) async {
-    final path = _resolvePath(_requiredString(args, 'path'), cwd);
-    final oldText = _requiredString(args, 'old_text');
-    final newText = args['new_text']?.toString() ?? '';
-    final replaceAll = args['replace_all'] == true;
-    final file = File(path);
-    if (!file.existsSync()) {
-      return {'ok': false, 'error': 'file_not_found', 'path': path};
-    }
-    final original = await file.readAsString();
-    if (!original.contains(oldText)) {
-      return {'ok': false, 'error': 'old_text_not_found', 'path': path};
-    }
-    final updated = replaceAll
-        ? original.replaceAll(oldText, newText)
-        : original.replaceFirst(oldText, newText);
-    await file.writeAsString(updated, flush: true);
-    return {
-      'ok': true,
-      'path': path,
-      'replacements': replaceAll ? original.split(oldText).length - 1 : 1,
-    };
-  }
-
-  static Future<Map<String, dynamic>> _runCommand(
-    Map<String, dynamic> args,
-    String? cwd,
-  ) async {
-    final command = _requiredString(args, 'command');
-    final timeoutSeconds = _boundedInt(args['timeout_seconds'], 30, 1, 120);
-    final invocation = _resolveShellInvocation(command);
-    final proc = await Process.start(
-      invocation.executable,
-      invocation.args,
-      workingDirectory: _defaultCwd(cwd),
-      runInShell: false,
-    );
-    final stdoutFuture = proc.stdout
-        .fold<BytesBuilder>(BytesBuilder(copy: false), (all, chunk) {
-          all.add(chunk);
-          return all;
-        })
-        .then(
-          (bytes) => _truncateOutput(_decodeProcessOutput(bytes.takeBytes())),
-        );
-    final stderrFuture = proc.stderr
-        .fold<BytesBuilder>(BytesBuilder(copy: false), (all, chunk) {
-          all.add(chunk);
-          return all;
-        })
-        .then(
-          (bytes) => _truncateOutput(_decodeProcessOutput(bytes.takeBytes())),
-        );
-    final exitCode = await proc.exitCode.timeout(
-      Duration(seconds: timeoutSeconds),
-      onTimeout: () {
-        proc.kill(ProcessSignal.sigkill);
-        return -1;
-      },
-    );
-    return {
-      'ok': exitCode == 0,
-      'exit_code': exitCode,
-      'stdout': await stdoutFuture,
-      'stderr': await stderrFuture,
-      'timed_out': exitCode == -1,
-    };
-  }
-
-  static String _decodeProcessOutput(List<int> bytes) {
-    if (bytes.isEmpty) return '';
-    try {
-      return utf8.decode(bytes);
-    } catch (_) {
-      try {
-        return systemEncoding.decode(bytes);
-      } catch (_) {
-        return utf8.decode(bytes, allowMalformed: true);
-      }
-    }
-  }
-
-  static _ShellInvocation _resolveShellInvocation(String command) {
-    if (!Platform.isWindows) {
-      return _ShellInvocation('/bin/sh', <String>['-lc', command]);
-    }
-
-    return _tryPowerShellInvocation(command) ??
-        _ShellInvocation('cmd.exe', <String>['/c', command]);
-  }
-
-  static _ShellInvocation? _tryPowerShellInvocation(String command) {
-    final executable = _readWindowsCommandToken(command, 0);
-    if (executable == null || !_isPowerShellExecutable(executable.value)) {
-      return null;
-    }
-
-    final prefixArgs = <String>[];
-    var offset = executable.end;
-    while (true) {
-      final token = _readWindowsCommandToken(command, offset);
-      if (token == null) return null;
-
-      final value = token.value.toLowerCase();
-      if (value == '-command' ||
-          value == '-c' ||
-          value == '/command' ||
-          value == '/c') {
-        final rawScript = command.substring(token.end).trim();
-        if (rawScript.isEmpty) return null;
-        return _ShellInvocation(executable.value, <String>[
-          ...prefixArgs,
-          '-Command',
-          _wrapPowerShellScript(_stripCommandOuterQuotes(rawScript)),
-        ]);
-      }
-
-      if (value == '-encodedcommand' ||
-          value == '-enc' ||
-          value == '/encodedcommand' ||
-          value == '/enc' ||
-          value == '-file' ||
-          value == '-f' ||
-          value == '/file' ||
-          value == '/f') {
-        return null;
-      }
-
-      prefixArgs.add(token.value);
-      offset = token.end;
-    }
-  }
-
-  static _CommandToken? _readWindowsCommandToken(String input, int offset) {
-    var i = offset;
-    while (i < input.length && input.codeUnitAt(i) <= 0x20) {
-      i++;
-    }
-    if (i >= input.length) return null;
-
-    final token = StringBuffer();
-    var inQuotes = false;
-    final start = i;
-    while (i < input.length) {
-      final char = input[i];
-      if (char == r'\') {
-        final next = i + 1 < input.length ? input[i + 1] : '';
-        if (next == '"') {
-          token.write('"');
-          i += 2;
-          continue;
-        }
-      }
-      if (char == '"') {
-        inQuotes = !inQuotes;
-        i++;
-        continue;
-      }
-      if (!inQuotes && char.codeUnitAt(0) <= 0x20) break;
-      token.write(char);
-      i++;
-    }
-    return _CommandToken(token.toString(), start, i);
-  }
-
-  static bool _isPowerShellExecutable(String executable) {
-    final baseName = executable.split(RegExp(r'[\\/]')).last.toLowerCase();
-    return baseName == 'powershell' ||
-        baseName == 'powershell.exe' ||
-        baseName == 'pwsh' ||
-        baseName == 'pwsh.exe';
-  }
-
-  static String _stripCommandOuterQuotes(String value) {
-    var text = value.trim();
-    if (text.length >= 4 && text.startsWith(r'\"') && text.endsWith(r'\"')) {
-      text = text.substring(2, text.length - 2);
-    }
-    if (text.length >= 2) {
-      final first = text[0];
-      final last = text[text.length - 1];
-      if ((first == '"' && last == '"') || (first == "'" && last == "'")) {
-        return text.substring(1, text.length - 1);
-      }
-    }
-    return text;
-  }
-
-  static String _wrapPowerShellScript(String script) {
-    final escaped = script.replaceAll("'", "''");
-    return <String>[
-      r"$ErrorActionPreference = 'Stop'",
-      'try {',
-      "  Invoke-Expression '$escaped'",
-      r'  if ($global:LASTEXITCODE -is [int] -and $global:LASTEXITCODE -ne 0) { exit $global:LASTEXITCODE }',
-      '  exit 0',
-      '} catch {',
-      r'  [Console]::Error.WriteLine(($_ | Out-String))',
-      '  exit 1',
-      '}',
-    ].join('; ');
-  }
-
   static Future<Map<String, dynamic>> _webFetch(
     Map<String, dynamic> args,
   ) async {
     final rawUrl = _requiredString(args, 'url');
-    final maxLength = _boundedInt(
-      args['maxLength'] ?? args['max_length'],
-      12000,
-      1,
-      60000,
-    );
+    final maxLength = _boundedInt(args['maxLength'], 12000, 1, 60000);
     Uri uri;
     try {
       uri = Uri.parse(rawUrl);
@@ -613,59 +170,25 @@ class LocalToolRegistry {
     }
   }
 
-  static Map<String, dynamic> _todo(Map<String, dynamic> args) {
-    final action = _requiredString(args, 'action');
-    switch (action) {
-      case 'list':
-        return {
-          'ok': true,
-          'todos': _todos.map((todo) => todo.toJson()).toList(growable: false),
-        };
-      case 'add':
-        final text = _requiredString(args, 'text');
-        final todo = _TodoItem(id: _nextTodoId++, text: text);
-        _todos.add(todo);
-        return {'ok': true, 'todo': todo.toJson()};
-      case 'toggle':
-        final id = _boundedInt(args['id'], -1, -1, 1 << 31);
-        final match = _todos.where((todo) => todo.id == id).firstOrNull;
-        if (match == null) {
-          return {'ok': false, 'error': 'todo_not_found', 'id': id};
-        }
-        match.done = !match.done;
-        return {'ok': true, 'todo': match.toJson()};
-      case 'clear':
-        final count = _todos.length;
-        _todos.clear();
-        _nextTodoId = 1;
-        return {'ok': true, 'cleared': count};
-      default:
-        return {'ok': false, 'error': 'unknown_action', 'action': action};
-    }
-  }
-
   static Future<Map<String, dynamic>> _searchMemory(
     Map<String, dynamic> args,
     String? agentDir,
   ) async {
     final dir = _requireAgentDir(agentDir);
     final query = _requiredString(args, 'query');
-    final files = [
-      File(p.join(dir, 'memory', 'memory.md')),
-      File(p.join(dir, 'memory', 'facts.md')),
-      File(p.join(dir, 'pinned.md')),
-    ];
-    final results = <Map<String, dynamic>>[];
-    for (final file in files) {
-      if (!file.existsSync()) continue;
-      final lines = await file.readAsLines();
-      for (var i = 0; i < lines.length; i++) {
-        if (lines[i].contains(query)) {
-          results.add({'path': file.path, 'line': i + 1, 'text': lines[i]});
-        }
-      }
-    }
-    return {'ok': true, 'query': query, 'results': results};
+    final maxResults = _boundedInt(args['max_results'], 20, 1, 200);
+    final memoryRoot = getClaudeMemoryRoot(Directory(dir));
+    final results = await searchMemoryFiles(
+      memoryRoot,
+      query,
+      maxResults: maxResults,
+    );
+    return {
+      'ok': true,
+      'query': query,
+      'memory_root': memoryRoot.path,
+      'results': results.map((result) => result.toJson()).toList(),
+    };
   }
 
   static Future<Map<String, dynamic>> _pinMemory(
@@ -726,94 +249,124 @@ class LocalToolRegistry {
     return {'ok': true, 'path': file.path, 'items': items};
   }
 
-  static Future<Map<String, dynamic>> _recallExperience(
+  static Future<Map<String, dynamic>> _experienceSearch(
     Map<String, dynamic> args,
     String? agentDir,
   ) async {
-    final dir = _requireAgentDir(agentDir);
-    final category = _optionalString(args, 'category');
-    final file = category == null || category.isEmpty
-        ? File(p.join(dir, 'experience.md'))
-        : File(p.join(dir, 'experience', '$category.md'));
-    if (!file.existsSync()) {
-      return {'ok': true, 'content': '', 'message': '经验库为空或分类不存在'};
-    }
+    final dir = Directory(_requireAgentDir(agentDir));
+    final query = _requiredString(args, 'query');
+    final maxResults = _boundedInt(args['max_results'], 50, 1, 200);
+    final scope = _optionalString(args, 'scope');
+    final scopes = switch (scope) {
+      'private' => {ExperienceScope.private},
+      'network' => {ExperienceScope.network},
+      _ => {ExperienceScope.private, ExperienceScope.network},
+    };
+    final store = ExperienceStore(agentDir: dir);
+    final results = await store.search(
+      query,
+      maxResults: maxResults,
+      scopes: scopes,
+    );
     return {
       'ok': true,
-      'path': file.path,
-      'content': await file.readAsString(),
+      'query': query,
+      'results': results.map((result) => result.toJson()).toList(),
+      'message': '仅返回路径、行号和片段；需要全文时请继续用 exec_command 读取对应文件。',
     };
   }
 
-  static Future<Map<String, dynamic>> _recordExperience(
+  static Future<Map<String, dynamic>> _createExperience(
     Map<String, dynamic> args,
     String? agentDir,
+    String? sessionPath,
+    String? cwd,
   ) async {
-    final dir = _requireAgentDir(agentDir);
-    final category = _requiredString(
-      args,
-      'category',
-    ).replaceAll('#', '').trim();
-    final content = _requiredString(args, 'content');
-    final experienceDir = Directory(p.join(dir, 'experience'));
-    experienceDir.createSync(recursive: true);
-    final file = File(p.join(experienceDir.path, '$category.md'));
-    final existing = file.existsSync() ? await file.readAsString() : '';
-    if (existing.contains(content)) {
-      return {'ok': true, 'status': 'already_exists', 'path': file.path};
+    final dir = Directory(_requireAgentDir(agentDir));
+    final title = _requiredString(args, 'title');
+    final brief = _optionalString(args, 'brief') ?? '';
+    final keywords = _jsonStringList(args['keywords']);
+    final source = (_optionalString(args, 'source') ?? 'current_session')
+        .trim()
+        .toLowerCase();
+    final ExperienceSaveResult saved;
+    if (source == 'raw_directory') {
+      final rawDirectory =
+          _optionalString(args, 'raw_directory') ??
+          _optionalString(args, 'raw_dir');
+      if (rawDirectory == null || rawDirectory.trim().isEmpty) {
+        throw StateError('raw_directory 模式需要提供 raw_directory');
+      }
+      final resolved = _resolvePath(rawDirectory, cwd);
+      final rawDir = Directory(resolved);
+      if (!rawDir.existsSync()) {
+        throw StateError('raw_directory 不存在：$resolved');
+      }
+      saved = await ExperienceStore(
+        agentDir: dir,
+      ).importRawDirectoryToPrivate(rawDir: rawDir);
+    } else if (source == 'current_session') {
+      final path = _optionalString(args, 'session_path') ?? sessionPath;
+      if (path == null || path.trim().isEmpty) {
+        throw StateError('当前工具缺少 session_path，无法从会话生成经验');
+      }
+      saved = await ExperienceSessionCapture.saveSessionAsPrivateExperience(
+        agentDir: dir,
+        sessionPath: path,
+        title: title,
+        brief: brief,
+        keywords: keywords,
+        // Model-triggered session capture must be complete; do not let the
+        // model choose a partial message window.
+        maxMessages: 0,
+      );
+    } else {
+      throw StateError('未知 create_experience source：$source');
     }
-    final count = RegExp(
-      r'^\d+\.\s',
-      multiLine: true,
-    ).allMatches(existing).length;
-    await file.writeAsString(
-      '${existing.trimRight()}\n${count + 1}. $content\n'.trimLeft(),
-    );
-    return {'ok': true, 'path': file.path};
+    return {
+      'ok': true,
+      'experience_id': saved.experienceId,
+      'scope': saved.scope.wireName,
+      'path': saved.path,
+      'content_path': saved.contentPath,
+      'metadata_path': saved.metadataPath,
+      'message': source == 'raw_directory'
+          ? '已导入脱敏原始目录为本地私有经验。网络提审需要用户在设置页确认后执行。'
+          : '已保存为本地私有经验。网络提审需要用户在设置页确认后执行。',
+    };
   }
 
-  static Map<String, dynamic> _presentFiles(Map<String, dynamic> args) {
-    final rawPaths = <String>[
-      if (args['filepaths'] is List)
-        ...(args['filepaths'] as List).map((item) => item.toString()),
-      if (args['filePath'] is String) args['filePath'] as String,
-    ];
-    if (rawPaths.isEmpty) {
-      return {'ok': false, 'error': 'missing_filepaths'};
-    }
-    final files = <Map<String, dynamic>>[];
-    final errors = <String>[];
-    for (final raw in rawPaths) {
-      final path = raw.trim();
-      if (!p.isAbsolute(path)) {
-        errors.add('路径必须是绝对路径: $path');
-        continue;
-      }
-      final file = File(path);
-      if (!file.existsSync()) {
-        errors.add('文件不存在: $path');
-        continue;
-      }
-      files.add({'path': file.path, 'label': p.basename(file.path)});
-    }
-    return {'ok': files.isNotEmpty, 'files': files, 'errors': errors};
-  }
-
-  static Map<String, dynamic> _createArtifact(Map<String, dynamic> args) {
+  static Map<String, dynamic> _createArtifact(
+    Map<String, dynamic> args,
+    String? cwd,
+  ) {
     final type = _requiredString(args, 'type');
     final title = _requiredString(args, 'title');
     final content = _requiredString(args, 'content');
+    final id =
+        'artifact-${DateTime.now().millisecondsSinceEpoch}-${++_artifactCounter}';
+    final language = _optionalString(args, 'language');
+    final file = _writeArtifactFile(
+      cwd: cwd,
+      id: id,
+      type: type,
+      title: title,
+      language: language,
+      content: content,
+    );
     return {
       'ok': true,
       'artifact': {
-        'id':
-            'artifact-${DateTime.now().millisecondsSinceEpoch}-${++_artifactCounter}',
+        'id': id,
         'type': type,
         'title': title,
-        'content': content,
-        'language': args['language'],
+        'language': language,
+        'file_path': file.path,
+        'size_bytes': file.lengthSync(),
       },
-      'message': '已创建 Artifact，客户端会在会话中显示预览入口。',
+      'files': [_fileReference(file, label: title)],
+      'message':
+          '已创建 Artifact 并写入本地文件。最终回复请用 Markdown 链接引用 file_path，客户端会自动渲染文件卡片。',
     };
   }
 
@@ -833,8 +386,7 @@ class LocalToolRegistry {
     }
     final enable = args['enabled'] is bool ? args['enabled'] as bool : true;
     final content = _optionalString(args, 'skill_content');
-    final sourcePath =
-        _optionalString(args, 'source_path') ?? _optionalString(args, 'path');
+    final sourcePath = _optionalString(args, 'source_path');
     final githubUrl = _optionalString(args, 'github_url');
     try {
       final skill = content != null
@@ -1030,102 +582,6 @@ class LocalToolRegistry {
     return manager.execute(args);
   }
 
-  static Future<Map<String, dynamic>> _channel(
-    Map<String, dynamic> args,
-    ChannelManager? channelManager,
-    CollaborationManager? collaborationManager,
-    String? activeAgentId,
-  ) async {
-    final manager = collaborationManager;
-    if (manager != null) {
-      return manager.channel(args, sourceAgentId: activeAgentId);
-    }
-    final channels = channelManager;
-    if (channels == null) {
-      return _notConfigured(LocalToolNames.channel, 'Channel 运行时尚未初始化。');
-    }
-    final action = _requiredString(args, 'action');
-    switch (action) {
-      case 'list':
-        final list = await channels.listChannels();
-        return {
-          'ok': true,
-          'channels': list.map((channel) => channel.toJson()).toList(),
-        };
-      case 'create':
-        final channel = await channels.createChannel(
-          id: _optionalString(args, 'channel'),
-          name: _optionalString(args, 'name'),
-          description: _optionalString(args, 'description'),
-          members: _stringList(args['members']),
-          intro: _optionalString(args, 'intro'),
-        );
-        return {'ok': true, 'channel': channel.toJson()};
-      case 'read':
-        final messages = await channels.readRecent(
-          _requiredString(args, 'channel'),
-          limit: _boundedInt(args['count'], 50, 1, 200),
-        );
-        return {
-          'ok': true,
-          'messages': messages.map((message) => message.toJson()).toList(),
-        };
-      case 'post':
-        await channels.appendMessage(
-          _requiredString(args, 'channel'),
-          'agent:${activeAgentId ?? "unknown"}',
-          _requiredString(args, 'content'),
-        );
-        return {'ok': true, 'message': '已写入频道消息'};
-      default:
-        return {
-          'ok': false,
-          'error': 'unknown_action',
-          'message': '未知 channel 操作：$action',
-        };
-    }
-  }
-
-  static Future<Map<String, dynamic>> _askAgent(
-    Map<String, dynamic> args,
-    CollaborationManager? collaborationManager,
-    String? activeAgentId,
-  ) async {
-    final manager = collaborationManager;
-    if (manager == null) {
-      return _notConfigured(LocalToolNames.askAgent, '多 Agent 协作运行时尚未初始化。');
-    }
-    return manager.delegate(
-      args,
-      sourceAgentId: activeAgentId,
-      toolName: LocalToolNames.askAgent,
-    );
-  }
-
-  static Future<Map<String, dynamic>> _dm(
-    Map<String, dynamic> args,
-    CollaborationManager? collaborationManager,
-    String? activeAgentId,
-  ) async {
-    final manager = collaborationManager;
-    if (manager == null) {
-      return _notConfigured(LocalToolNames.dm, 'DM 协作运行时尚未初始化。');
-    }
-    return manager.dm(args, sourceAgentId: activeAgentId);
-  }
-
-  static Future<Map<String, dynamic>> _delegate(
-    Map<String, dynamic> args,
-    CollaborationManager? collaborationManager,
-    String? activeAgentId,
-  ) async {
-    final manager = collaborationManager;
-    if (manager == null) {
-      return _notConfigured(LocalToolNames.delegate, 'Delegate 协作运行时尚未初始化。');
-    }
-    return manager.delegate(args, sourceAgentId: activeAgentId);
-  }
-
   static Map<String, dynamic> _notify(Map<String, dynamic> args) => {
     'ok': true,
     'title': _requiredString(args, 'title'),
@@ -1140,6 +596,113 @@ class LocalToolRegistry {
     'error': 'not_configured',
     'message': message,
   };
+
+  static File _writeArtifactFile({
+    required String? cwd,
+    required String id,
+    required String type,
+    required String title,
+    required String? language,
+    required String content,
+  }) {
+    final dir = Directory(p.join(_defaultCwd(cwd), 'artifacts'))
+      ..createSync(recursive: true);
+    final extension = _artifactExtension(type, language);
+    final baseName = _safeFileStem(title).isEmpty
+        ? id
+        : '${_safeFileStem(title)}-$id';
+    final file = _uniqueFile(dir, '$baseName.$extension');
+    file.writeAsStringSync(content, flush: true);
+    return file;
+  }
+
+  static File _uniqueFile(Directory dir, String fileName) {
+    final dot = fileName.lastIndexOf('.');
+    final stem = dot <= 0 ? fileName : fileName.substring(0, dot);
+    final ext = dot <= 0 ? '' : fileName.substring(dot);
+    var candidate = File(p.join(dir.path, fileName));
+    var index = 2;
+    while (candidate.existsSync()) {
+      candidate = File(p.join(dir.path, '$stem-$index$ext'));
+      index++;
+    }
+    return candidate;
+  }
+
+  static String _safeFileStem(String title) {
+    final sanitized = title
+        .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '_')
+        .replaceAll(RegExp(r'\s+'), '_')
+        .trim();
+    if (sanitized.length <= 80) return sanitized;
+    return sanitized.substring(0, 80);
+  }
+
+  static String _artifactExtension(String type, String? language) {
+    final normalizedType = type.trim().toLowerCase();
+    if (normalizedType == 'markdown') return 'md';
+    if (normalizedType == 'html') return 'html';
+    if (normalizedType != 'code') return 'txt';
+    return switch (language?.trim().toLowerCase()) {
+      'dart' => 'dart',
+      'javascript' || 'js' => 'js',
+      'typescript' || 'ts' => 'ts',
+      'tsx' => 'tsx',
+      'jsx' => 'jsx',
+      'python' || 'py' => 'py',
+      'go' || 'golang' => 'go',
+      'rust' || 'rs' => 'rs',
+      'json' => 'json',
+      'yaml' || 'yml' => 'yaml',
+      'shell' || 'bash' || 'sh' => 'sh',
+      'powershell' || 'ps1' => 'ps1',
+      'bat' || 'cmd' => 'bat',
+      'css' => 'css',
+      'scss' => 'scss',
+      'sql' => 'sql',
+      'markdown' || 'md' => 'md',
+      _ => 'txt',
+    };
+  }
+
+  static Map<String, dynamic> _fileReference(File file, {String? label}) {
+    final stat = file.statSync();
+    return {
+      'path': file.path,
+      'label': label?.trim().isNotEmpty == true
+          ? label!.trim()
+          : p.basename(file.path),
+      'size_bytes': stat.size,
+      'modified_at': stat.modified.toUtc().toIso8601String(),
+      'mime_type': _mimeTypeForPath(file.path),
+    };
+  }
+
+  static String _mimeTypeForPath(String path) {
+    final ext = p.extension(path).toLowerCase();
+    return switch (ext) {
+      '.html' || '.htm' => 'text/html',
+      '.md' || '.markdown' => 'text/markdown',
+      '.txt' || '.log' => 'text/plain',
+      '.json' => 'application/json',
+      '.yaml' || '.yml' => 'application/x-yaml',
+      '.csv' => 'text/csv',
+      '.pdf' => 'application/pdf',
+      '.png' => 'image/png',
+      '.jpg' || '.jpeg' => 'image/jpeg',
+      '.gif' => 'image/gif',
+      '.webp' => 'image/webp',
+      '.svg' => 'image/svg+xml',
+      '.zip' => 'application/zip',
+      '.7z' => 'application/x-7z-compressed',
+      '.rar' => 'application/vnd.rar',
+      '.mp3' => 'audio/mpeg',
+      '.wav' => 'audio/wav',
+      '.mp4' => 'video/mp4',
+      '.mov' => 'video/quicktime',
+      _ => 'application/octet-stream',
+    };
+  }
 
   static String _resolvePath(String? raw, String? cwd) {
     final value = raw?.trim();
@@ -1174,22 +737,6 @@ class LocalToolRegistry {
     return null;
   }
 
-  static List<String> _stringList(Object? raw) {
-    if (raw is List) {
-      return raw
-          .map((item) => item.toString().trim())
-          .where((item) => item.isNotEmpty)
-          .toList(growable: false);
-    }
-    final text = raw?.toString() ?? '';
-    if (text.trim().isEmpty) return const [];
-    return text
-        .split(',')
-        .map((item) => item.trim())
-        .where((item) => item.isNotEmpty)
-        .toList(growable: false);
-  }
-
   static int _boundedInt(Object? value, int fallback, int min, int max) {
     final raw = value is num
         ? value.toInt()
@@ -1199,60 +746,17 @@ class LocalToolRegistry {
     return raw;
   }
 
-  static String _entityType(FileSystemEntityType type) {
-    if (type == FileSystemEntityType.directory) return 'directory';
-    if (type == FileSystemEntityType.file) return 'file';
-    if (type == FileSystemEntityType.link) return 'link';
-    return 'other';
-  }
-
-  static bool _shouldSkipDir(String path) {
-    return const {
-      '.git',
-      '.dart_tool',
-      '.gradle',
-      '.idea',
-      '.vscode',
-      'node_modules',
-      'build',
-      'dist',
-      'target',
-      '.next',
-    }.contains(p.basename(path).toLowerCase());
-  }
-
-  static bool _hasSkippedSegment(String path) {
-    final segments = p.split(path).map((segment) => segment.toLowerCase());
-    for (final segment in segments) {
-      if (_shouldSkipDir(segment)) return true;
+  static List<String> _jsonStringList(Object? value) {
+    if (value is! List) return const [];
+    final out = <String>[];
+    final seen = <String>{};
+    for (final item in value) {
+      final text = item.toString().trim();
+      if (text.isEmpty || !seen.add(text)) continue;
+      out.add(text);
     }
-    return false;
+    return out;
   }
-
-  static bool _shouldSkipFile(String path) {
-    final name = p.basename(path).toLowerCase();
-    return name.endsWith('.png') ||
-        name.endsWith('.jpg') ||
-        name.endsWith('.jpeg') ||
-        name.endsWith('.gif') ||
-        name.endsWith('.ico') ||
-        name.endsWith('.exe') ||
-        name.endsWith('.dll') ||
-        name.endsWith('.onnx') ||
-        name.endsWith('.rten') ||
-        name.endsWith('.zip') ||
-        name.endsWith('.7z');
-  }
-
-  static bool Function(String name) _globMatcher(String pattern) {
-    final escaped = RegExp.escape(
-      pattern,
-    ).replaceAll(r'\*', '.*').replaceAll(r'\?', '.');
-    final regex = RegExp('^$escaped\$', caseSensitive: false);
-    return (name) => regex.hasMatch(name);
-  }
-
-  static String _truncateOutput(String text) => _truncate(text, 40000);
 
   static String _truncate(String text, int maxLength) {
     if (text.length <= maxLength) return text;
@@ -1345,49 +849,19 @@ class LocalToolRegistry {
 class LocalToolNames {
   const LocalToolNames._();
 
-  static const environment = 'local_environment';
-  static const listDirectory = 'local_list_directory';
-  static const readTextFile = 'local_read_text_file';
-  static const searchText = 'local_search_text';
-
-  static const read = 'read';
-  static const write = 'write';
-  static const edit = 'edit';
-  static const bash = 'bash';
-  static const grep = 'grep';
-  static const find = 'find';
-  static const ls = 'ls';
-
   static const searchMemory = 'search_memory';
   static const webSearch = 'web_search';
   static const webFetch = 'web_fetch';
-  static const todo = 'todo';
   static const pinMemory = 'pin_memory';
   static const unpinMemory = 'unpin_memory';
   static const listPinnedMemory = 'list_pinned_memory';
-  static const recallExperience = 'recall_experience';
-  static const recordExperience = 'record_experience';
+  static const createExperience = 'create_experience';
+  static const experienceSearch = 'experience_search';
   static const cron = 'cron';
-  static const presentFiles = 'present_files';
   static const createArtifact = 'create_artifact';
-  static const channel = 'channel';
-  static const askAgent = 'ask_agent';
-  static const dm = 'dm';
-  static const messageAgent = 'message_agent';
   static const browser = 'browser';
   static const installSkill = 'install_skill';
   static const notify = 'notify';
-  static const delegate = 'delegate';
-}
-
-class _TodoItem {
-  _TodoItem({required this.id, required this.text});
-
-  final int id;
-  final String text;
-  bool done = false;
-
-  Map<String, dynamic> toJson() => {'id': id, 'text': text, 'done': done};
 }
 
 class _ToolSpec {
@@ -1402,135 +876,19 @@ class _ToolSpec {
   final Map<String, dynamic> parameters;
 }
 
-class _ShellInvocation {
-  const _ShellInvocation(this.executable, this.args);
-
-  final String executable;
-  final List<String> args;
-}
-
-class _CommandToken {
-  const _CommandToken(this.value, this.start, this.end);
-
-  final String value;
-  final int start;
-  final int end;
-}
-
-final _knownToolNames = <String>{
-  for (final spec in _toolSpecs) spec.name,
-  LocalToolNames.environment,
-  LocalToolNames.listDirectory,
-  LocalToolNames.readTextFile,
-  LocalToolNames.searchText,
-};
+final _knownToolNames = <String>{for (final spec in _toolSpecs) spec.name};
 
 const _toolSpecs = <_ToolSpec>[
   _ToolSpec(
-    name: LocalToolNames.read,
-    description: '读取本地文本文件内容。用于查看代码、配置、日志和普通文本；过长内容会截断。',
-    parameters: {
-      'type': 'object',
-      'additionalProperties': false,
-      'properties': {
-        'path': {'type': 'string', 'description': '文件路径'},
-        'max_chars': {'type': 'integer', 'minimum': 1, 'maximum': 60000},
-      },
-      'required': ['path'],
-    },
-  ),
-  _ToolSpec(
-    name: LocalToolNames.write,
-    description: '写入本地文本文件。默认不覆盖已存在文件；确需覆盖时传 overwrite=true。',
-    parameters: {
-      'type': 'object',
-      'additionalProperties': false,
-      'properties': {
-        'path': {'type': 'string'},
-        'content': {'type': 'string'},
-        'overwrite': {'type': 'boolean'},
-      },
-      'required': ['path', 'content'],
-    },
-  ),
-  _ToolSpec(
-    name: LocalToolNames.edit,
-    description: '在本地文本文件中替换指定文本。适合小范围精确编辑。',
-    parameters: {
-      'type': 'object',
-      'additionalProperties': false,
-      'properties': {
-        'path': {'type': 'string'},
-        'old_text': {'type': 'string'},
-        'new_text': {'type': 'string'},
-        'replace_all': {'type': 'boolean'},
-      },
-      'required': ['path', 'old_text', 'new_text'],
-    },
-  ),
-  _ToolSpec(
-    name: LocalToolNames.bash,
-    description: '在当前工作目录执行一条 shell 命令，并返回 stdout/stderr/exit_code。',
-    parameters: {
-      'type': 'object',
-      'additionalProperties': false,
-      'properties': {
-        'command': {'type': 'string'},
-        'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 120},
-      },
-      'required': ['command'],
-    },
-  ),
-  _ToolSpec(
-    name: LocalToolNames.grep,
-    description: '在目录下搜索文本。适合定位代码符号、配置项和错误信息。',
-    parameters: {
-      'type': 'object',
-      'additionalProperties': false,
-      'properties': {
-        'root': {'type': 'string'},
-        'path': {'type': 'string'},
-        'query': {'type': 'string'},
-        'pattern': {'type': 'string'},
-        'max_results': {'type': 'integer', 'minimum': 1, 'maximum': 200},
-      },
-    },
-  ),
-  _ToolSpec(
-    name: LocalToolNames.find,
-    description: '按文件名或路径片段查找文件。支持 * 和 ? 通配符。',
-    parameters: {
-      'type': 'object',
-      'additionalProperties': false,
-      'properties': {
-        'root': {'type': 'string'},
-        'path': {'type': 'string'},
-        'pattern': {'type': 'string'},
-        'name': {'type': 'string'},
-        'max_results': {'type': 'integer', 'minimum': 1, 'maximum': 300},
-      },
-    },
-  ),
-  _ToolSpec(
-    name: LocalToolNames.ls,
-    description: '列出本地目录内容。',
-    parameters: {
-      'type': 'object',
-      'additionalProperties': false,
-      'properties': {
-        'path': {'type': 'string'},
-        'max_entries': {'type': 'integer', 'minimum': 1, 'maximum': 300},
-      },
-    },
-  ),
-  _ToolSpec(
     name: LocalToolNames.searchMemory,
-    description: '搜索当前 Agent 的本地记忆文本。',
+    description:
+        '搜索当前 Agent 的本地记忆文件树（含 MEMORY.md 索引、topic 文件与 team 子目录），只返回路径、行号和片段。',
     parameters: {
       'type': 'object',
       'additionalProperties': false,
       'properties': {
         'query': {'type': 'string'},
+        'max_results': {'type': 'integer', 'minimum': 1, 'maximum': 200},
         'tags': {
           'type': 'array',
           'items': {'type': 'string'},
@@ -1543,7 +901,8 @@ const _toolSpecs = <_ToolSpec>[
   ),
   _ToolSpec(
     name: LocalToolNames.webSearch,
-    description: '搜索互联网获取实时信息。当前 Flutter 客户端需要配置搜索 provider 后才能执行。',
+    description:
+        '搜索互联网获取实时信息。仅在需要当前事件、最新数据或外部信息时使用；回答时应附上来源链接。当前 Flutter 客户端需要配置搜索 provider 后才能执行。',
     parameters: {
       'type': 'object',
       'additionalProperties': false,
@@ -1556,7 +915,8 @@ const _toolSpecs = <_ToolSpec>[
   ),
   _ToolSpec(
     name: LocalToolNames.webFetch,
-    description: '抓取指定 http/https URL 并提取文本。会阻止内网地址访问。',
+    description:
+        '抓取指定 http/https URL 并提取可读文本。URL 必须完整有效；此工具只读，不修改文件；会阻止内网地址访问，结果过大时按 maxLength 截断。',
     parameters: {
       'type': 'object',
       'additionalProperties': false,
@@ -1565,23 +925,6 @@ const _toolSpecs = <_ToolSpec>[
         'maxLength': {'type': 'integer', 'minimum': 1, 'maximum': 60000},
       },
       'required': ['url'],
-    },
-  ),
-  _ToolSpec(
-    name: LocalToolNames.todo,
-    description: '管理当前客户端会话内的待办清单。',
-    parameters: {
-      'type': 'object',
-      'additionalProperties': false,
-      'properties': {
-        'action': {
-          'type': 'string',
-          'enum': ['list', 'add', 'toggle', 'clear'],
-        },
-        'text': {'type': 'string'},
-        'id': {'type': 'integer'},
-      },
-      'required': ['action'],
     },
   ),
   _ToolSpec(
@@ -1618,27 +961,51 @@ const _toolSpecs = <_ToolSpec>[
     },
   ),
   _ToolSpec(
-    name: LocalToolNames.recallExperience,
-    description: '查看当前 Agent 的经验库索引或指定分类。',
+    name: LocalToolNames.createExperience,
+    description:
+        '把当前会话或 Agent 已通过文件编辑生成的原始目录保存为 PH01 本地私有经验，不会提交网络审核。经验本体必须来自会话截取或 raw_directory 文件树；AI 不得把完整经验正文作为工具参数传入。',
     parameters: {
       'type': 'object',
       'additionalProperties': false,
       'properties': {
-        'category': {'type': 'string'},
+        'source': {
+          'type': 'string',
+          'enum': ['current_session', 'raw_directory'],
+          'description':
+              '默认 current_session；脱敏导入只能使用 raw_directory，且目录必须由 Agent 通过持续文件读写生成。',
+        },
+        'title': {'type': 'string'},
+        'brief': {'type': 'string'},
+        'keywords': {
+          'type': 'array',
+          'items': {'type': 'string'},
+        },
+        'raw_directory': {
+          'type': 'string',
+          'description':
+              'raw_directory 模式必填。指向 Agent 在独立会话里写好的暂存目录，目录根部应包含 metadata.json、raw/conversation.md、raw/events.md、tool-calls/、attachments/。',
+        },
+        'session_path': {'type': 'string', 'description': '可选；默认使用当前会话路径。'},
       },
+      'required': ['title'],
     },
   ),
   _ToolSpec(
-    name: LocalToolNames.recordExperience,
-    description: '把一条经验记录到当前 Agent 的经验库。',
+    name: LocalToolNames.experienceSearch,
+    description:
+        '检索 PH01 经验包文件树，只返回经验 ID、文件路径、行号和短片段。读取全文或继续定位请使用 read_file/list_dir/search_text。',
     parameters: {
       'type': 'object',
       'additionalProperties': false,
       'properties': {
-        'category': {'type': 'string'},
-        'content': {'type': 'string'},
+        'query': {'type': 'string'},
+        'scope': {
+          'type': 'string',
+          'enum': ['private', 'network', 'all'],
+        },
+        'max_results': {'type': 'integer', 'minimum': 1, 'maximum': 200},
       },
-      'required': ['category', 'content'],
+      'required': ['query'],
     },
   ),
   _ToolSpec(
@@ -1669,24 +1036,9 @@ const _toolSpecs = <_ToolSpec>[
     },
   ),
   _ToolSpec(
-    name: LocalToolNames.presentFiles,
-    description: '将已生成的本地文件呈现给用户。',
-    parameters: {
-      'type': 'object',
-      'additionalProperties': false,
-      'properties': {
-        'filepaths': {
-          'type': 'array',
-          'items': {'type': 'string'},
-        },
-        'filePath': {'type': 'string'},
-        'label': {'type': 'string'},
-      },
-    },
-  ),
-  _ToolSpec(
     name: LocalToolNames.createArtifact,
-    description: '创建 HTML、代码或 Markdown 预览内容。',
+    description:
+        '创建 HTML、代码或 Markdown 产物，并写入当前 Agent 工作目录下的 artifacts 文件夹；完成后返回本地文件路径，最终回复需用 Markdown 链接引用该路径。',
     parameters: {
       'type': 'object',
       'additionalProperties': false,
@@ -1703,96 +1055,11 @@ const _toolSpecs = <_ToolSpec>[
     },
   ),
   _ToolSpec(
-    name: LocalToolNames.channel,
-    description: '管理频道消息，并可触发多 Agent channel triage。',
-    parameters: {
-      'type': 'object',
-      'properties': {
-        'action': {
-          'type': 'string',
-          'enum': [
-            'read',
-            'post',
-            'create',
-            'list',
-            'triage',
-            'status',
-            'configure',
-          ],
-        },
-        'channel': {'type': 'string'},
-        'content': {'type': 'string'},
-        'description': {'type': 'string'},
-        'sender': {'type': 'string'},
-        'agent': {'type': 'string'},
-        'targetAgentId': {'type': 'string'},
-        'auto_triage': {'type': 'boolean'},
-        'enabled': {'type': 'boolean'},
-        'triage': {'type': 'boolean'},
-        'name': {'type': 'string'},
-        'members': {
-          'type': 'array',
-          'items': {'type': 'string'},
-        },
-        'intro': {'type': 'string'},
-        'count': {'type': 'integer'},
-      },
-      'required': ['action'],
-    },
-  ),
-  _ToolSpec(
-    name: LocalToolNames.askAgent,
-    description: '向另一个 Agent 发起一次同步任务，并返回结果 session 路径与摘要。',
-    parameters: {
-      'type': 'object',
-      'properties': {
-        'agent': {'type': 'string'},
-        'targetAgentId': {'type': 'string'},
-        'task': {'type': 'string'},
-        'model': {'type': 'string'},
-        'depth': {'type': 'integer'},
-      },
-      'required': ['task'],
-    },
-  ),
-  _ToolSpec(
-    name: LocalToolNames.dm,
-    description: '给另一个 Agent 发送私信，或配置 DM 自动回复开关。',
-    parameters: {
-      'type': 'object',
-      'properties': {
-        'action': {
-          'type': 'string',
-          'enum': ['send', 'status', 'configure'],
-        },
-        'to': {'type': 'string'},
-        'agent': {'type': 'string'},
-        'message': {'type': 'string'},
-        'auto_reply': {'type': 'boolean'},
-        'enabled': {'type': 'boolean'},
-        'depth': {'type': 'integer'},
-      },
-      'required': [],
-    },
-  ),
-  _ToolSpec(
-    name: LocalToolNames.messageAgent,
-    description: '向另一个 Agent 发送消息并等待回复。',
-    parameters: {
-      'type': 'object',
-      'properties': {
-        'to': {'type': 'string'},
-        'agent': {'type': 'string'},
-        'message': {'type': 'string'},
-        'max_rounds': {'type': 'integer'},
-        'depth': {'type': 'integer'},
-      },
-      'required': ['to', 'message'],
-    },
-  ),
-  _ToolSpec(
     name: LocalToolNames.browser,
-    description: '控制浏览器打开网页、读取页面标题/文本和查看状态；复杂交互会返回中文限制说明。',
+    description:
+        '控制浏览器打开网页、读取页面标题/文本和查看状态。用于需要真实页面状态、动态内容或轻量自动化的场景；已知 URL 的静态内容优先用 web_fetch。'
+        '浏览器操作应聚焦具体任务；连续失败、页面无响应、加载超时或自动化变复杂时停止并向用户说明尝试过程。避免触发 alert/confirm/prompt 等会阻塞自动化的浏览器模态对话框。'
+        '复杂交互会返回中文限制说明。',
     parameters: {
       'type': 'object',
       'properties': {
@@ -1841,7 +1108,6 @@ const _toolSpecs = <_ToolSpec>[
       'properties': {
         'github_url': {'type': 'string'},
         'source_path': {'type': 'string'},
-        'path': {'type': 'string'},
         'skill_content': {'type': 'string'},
         'skill_name': {'type': 'string'},
         'reason': {'type': 'string'},
@@ -1862,27 +1128,4 @@ const _toolSpecs = <_ToolSpec>[
       'required': ['title', 'body'],
     },
   ),
-  _ToolSpec(
-    name: LocalToolNames.delegate,
-    description: '委派独立子任务给后台 Agent，结果会写入目标 Agent session 和活动记录。',
-    parameters: {
-      'type': 'object',
-      'properties': {
-        'agent': {'type': 'string'},
-        'targetAgentId': {'type': 'string'},
-        'task': {'type': 'string'},
-        'model': {'type': 'string'},
-        'depth': {'type': 'integer'},
-      },
-      'required': ['task'],
-    },
-  ),
 ];
-
-extension _FirstOrNull<T> on Iterable<T> {
-  T? get firstOrNull {
-    final iterator = this.iterator;
-    if (!iterator.moveNext()) return null;
-    return iterator.current;
-  }
-}

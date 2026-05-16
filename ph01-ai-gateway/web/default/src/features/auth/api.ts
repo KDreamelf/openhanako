@@ -64,6 +64,7 @@ export async function getPH01ChallengeStatus(
   const res = await api.get(`/api/ph01/auth/challenge/${challengeId}/status`, {
     disableDuplicate: true,
     skipBusinessError: true,
+    skipErrorHandler: true,
   } as Record<string, unknown>)
   return res.data
 }

@@ -51,12 +51,16 @@ type PH01LoginChallenge struct {
 }
 
 type PH01InternalUserSyncRequest struct {
-	PH01UserID uint64 `json:"ph01_user_id"`
-	Username   string `json:"username"`
-	Nickname   string `json:"nickname,omitempty"`
-	Email      string `json:"email,omitempty"`
-	Tier       string `json:"tier,omitempty"`
-	PubkeyHash string `json:"pubkey_hash"`
+	PH01UserID    uint64 `json:"ph01_user_id"`
+	Username      string `json:"username"`
+	Nickname      string `json:"nickname,omitempty"`
+	Email         string `json:"email,omitempty"`
+	Tier          string `json:"tier,omitempty"`
+	PubkeyHash    string `json:"pubkey_hash"`
+	PowVerified   bool   `json:"pow_verified,omitempty"`
+	PowAlgorithm  string `json:"pow_algorithm,omitempty"`
+	PowScore      int    `json:"pow_score,omitempty"`
+	PowVerifiedAt int64  `json:"pow_verified_at,omitempty"`
 }
 
 type PH01InternalChannelRevokeRequest struct {
@@ -69,17 +73,21 @@ type PH01InternalChannelRevokeRequest struct {
 }
 
 type ph01PendingChallenge struct {
-	mu              sync.Mutex
-	Challenge       PH01LoginChallenge
-	Encoded         string
-	Completed       bool
-	GatewayUserID   int
-	PubkeyHash      string
-	AuthUserID      uint64
-	AuthUsername    string
-	AuthTier        string
-	CompletedAt     int64
-	CompletionError string
+	mu                sync.Mutex
+	Challenge         PH01LoginChallenge
+	Encoded           string
+	Completed         bool
+	GatewayUserID     int
+	PubkeyHash        string
+	AuthUserID        uint64
+	AuthUsername      string
+	AuthTier          string
+	AuthPowVerified   bool
+	AuthPowAlgorithm  string
+	AuthPowScore      int
+	AuthPowVerifiedAt int64
+	CompletedAt       int64
+	CompletionError   string
 }
 
 var (
@@ -166,10 +174,14 @@ func PH01ChallengeStatus(c *gin.Context) {
 	completionError := record.CompletionError
 	userID := record.GatewayUserID
 	authResp := &ph01auth.VerifySignatureResponse{
-		Valid:    true,
-		UserID:   record.AuthUserID,
-		Username: record.AuthUsername,
-		Tier:     record.AuthTier,
+		Valid:         true,
+		UserID:        record.AuthUserID,
+		Username:      record.AuthUsername,
+		Tier:          record.AuthTier,
+		PowVerified:   record.AuthPowVerified,
+		PowAlgorithm:  record.AuthPowAlgorithm,
+		PowScore:      record.AuthPowScore,
+		PowVerifiedAt: record.AuthPowVerifiedAt,
 	}
 	record.mu.Unlock()
 
@@ -233,7 +245,15 @@ func PH01InternalSyncUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "pubkey_hash required"})
 		return
 	}
-	gatewayUser, identity, err := model.FindOrCreateUserFromPH01(req.PH01UserID, req.Username, req.PubkeyHash)
+	gatewayUser, identity, err := model.FindOrCreateUserFromPH01State(model.PH01UserState{
+		PH01UserID:    req.PH01UserID,
+		PH01Username:  req.Username,
+		PubkeyHash:    req.PubkeyHash,
+		PowVerified:   req.PowVerified,
+		PowAlgorithm:  req.PowAlgorithm,
+		PowScore:      req.PowScore,
+		PowVerifiedAt: req.PowVerifiedAt,
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
@@ -319,7 +339,15 @@ func completePH01Login(c *gin.Context, attachBrowserSession bool) {
 		return
 	}
 	pubkeyHash := strings.ToLower(strings.TrimSpace(authResp.PubkeyHash))
-	gatewayUser, identity, err := model.FindOrCreateUserFromPH01(authResp.UserID, authResp.Username, pubkeyHash)
+	gatewayUser, identity, err := model.FindOrCreateUserFromPH01State(model.PH01UserState{
+		PH01UserID:    authResp.UserID,
+		PH01Username:  authResp.Username,
+		PubkeyHash:    pubkeyHash,
+		PowVerified:   authResp.PowVerified,
+		PowAlgorithm:  authResp.PowAlgorithm,
+		PowScore:      authResp.PowScore,
+		PowVerifiedAt: authResp.PowVerifiedAt,
+	})
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -510,6 +538,10 @@ func markPH01ChallengeComplete(record *ph01PendingChallenge, user *model.User, a
 	record.AuthUserID = authResp.UserID
 	record.AuthUsername = authResp.Username
 	record.AuthTier = authResp.Tier
+	record.AuthPowVerified = authResp.PowVerified
+	record.AuthPowAlgorithm = authResp.PowAlgorithm
+	record.AuthPowScore = authResp.PowScore
+	record.AuthPowVerifiedAt = authResp.PowVerifiedAt
 	record.CompletedAt = common.GetTimestamp()
 	record.CompletionError = ""
 }
@@ -926,16 +958,20 @@ func setupPH01LoginSession(c *gin.Context, user *model.User, identity *model.PH0
 		"message": "",
 		"success": true,
 		"data": gin.H{
-			"id":            user.Id,
-			"username":      user.Username,
-			"display_name":  user.DisplayName,
-			"role":          user.Role,
-			"status":        user.Status,
-			"group":         user.Group,
-			"ph01_user_id":  authResp.UserID,
-			"ph01_username": authResp.Username,
-			"ph01_tier":     authResp.Tier,
-			"pubkey_hash":   identity.PubkeyHash,
+			"id":              user.Id,
+			"username":        user.Username,
+			"display_name":    user.DisplayName,
+			"role":            user.Role,
+			"status":          user.Status,
+			"group":           user.Group,
+			"ph01_user_id":    authResp.UserID,
+			"ph01_username":   authResp.Username,
+			"ph01_tier":       authResp.Tier,
+			"pubkey_hash":     identity.PubkeyHash,
+			"pow_verified":    identity.PowVerified,
+			"pow_algorithm":   identity.PowAlgorithm,
+			"pow_score":       identity.PowScore,
+			"pow_verified_at": identity.PowVerifiedAt,
 		},
 	})
 }

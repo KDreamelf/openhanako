@@ -116,6 +116,10 @@ class WindowsOpsClient {
     return call('protocol.describe');
   }
 
+  Future<Map<String, dynamic>> inputStatus() {
+    return call('input.status');
+  }
+
   Future<Uint8List> captureRegionPng({
     required int x,
     required int y,
@@ -202,6 +206,39 @@ class WindowsOpsClient {
       params['max_nodes'] = maxNodes;
     }
     return call('uia.invoke', params: params);
+  }
+
+  Future<Map<String, dynamic>> moveMouse({required int x, required int y}) {
+    return call('input.mouse_move', params: <String, dynamic>{'x': x, 'y': y});
+  }
+
+  Future<Map<String, dynamic>> clickMouse({
+    required int x,
+    required int y,
+    String button = 'left',
+    int clicks = 1,
+    int? intervalMs,
+  }) {
+    return call(
+      'input.mouse_click',
+      params: <String, dynamic>{
+        'x': x,
+        'y': y,
+        'button': button,
+        'clicks': clicks,
+        if (intervalMs != null) ...{'interval_ms': intervalMs},
+      },
+    );
+  }
+
+  Future<Map<String, dynamic>> inputText({
+    required String text,
+    bool pressEnter = false,
+  }) {
+    return call(
+      'input.text',
+      params: <String, dynamic>{'text': text, 'press_enter': pressEnter},
+    );
   }
 
   Future<Map<String, dynamic>> recognizeOcr({

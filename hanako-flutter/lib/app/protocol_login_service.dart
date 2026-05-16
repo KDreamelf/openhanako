@@ -5,6 +5,9 @@ import 'package:flutter/material.dart';
 import '../core/engine.dart';
 import '../identity/identity.dart';
 
+const ph01AiGatewayLoginPurpose = 'ph01_ai_gateway_login';
+const ph01AuthAdminLoginPurpose = 'ph01_auth_admin_login';
+
 typedef ProtocolLoginAuthorizationConfirmer =
     Future<bool> Function(ProtocolLoginRequest request);
 
@@ -40,78 +43,39 @@ class ProtocolLoginService {
 
   Future<void> handleUrl(String rawUrl) async {
     final request = ProtocolLoginRequest.parse(rawUrl);
+    final serviceLabel = request.detail.serviceLabel;
     try {
-      _notify('收到 AI 网关登录请求，请确认授权');
+      _notify('收到 $serviceLabel 登录请求，请确认授权');
       final approved = await authorizationConfirmer?.call(request) ?? false;
       if (!approved) {
-        _notify('已取消 AI 网关登录授权');
+        _notify('已取消 $serviceLabel 登录授权');
         return;
       }
-      if (!request.isTrustedCallback(_engine.backendClient.aiBaseUrl)) {
-        throw StateError('AI 网关回调地址不受信任：${request.callbackHost}');
+      if (!request.isTrustedCallback(
+        aiBaseUrl: _engine.backendClient.aiBaseUrl,
+        authBaseUrl: _engine.backendClient.authBaseUrl,
+      )) {
+        throw StateError('$serviceLabel 回调地址不受信任：${request.callbackHost}');
       }
-      _notify('正在完成 AI 网关登录...');
+      _notify('正在完成 $serviceLabel 登录...');
       final existing = _engine.identityRepository.current;
       final identity = existing ?? await _engine.identityRepository.unlock();
       if (existing == null) {
         onIdentityChanged?.call();
       }
-      final userId = await _resolveUserId(identity);
+      final userId = await resolveProtocolLoginUserId(_engine, identity);
 
-      await _engine.backendClient.completeAiGatewayProtocolLogin(
+      await _engine.backendClient.completeProtocolLogin(
         keyPair: identity.keyPair,
         userId: userId,
         challenge: request.challenge,
         callbackUrl: request.callbackUrl,
       );
-      _notify('AI 网关登录已授权');
+      _notify('$serviceLabel 登录已授权');
     } catch (e, st) {
       debugPrint('[ph01 protocol login failed] $e\n$st');
-      _notify('AI 网关登录失败：$e', isError: true);
+      _notify('$serviceLabel 登录失败：$e', isError: true);
     }
-  }
-
-  Future<int> _resolveUserId(HanakoIdentity identity) async {
-    final cfg = _engine.config.read();
-    final auth = cfg['auth'] is Map ? cfg['auth'] as Map : const {};
-    final existing = _parsePositiveInt(auth['user_id']);
-    if (existing != null) return existing;
-
-    final username =
-        _stringValue(auth['username']) ??
-        _stringValue(
-          (cfg['user'] is Map ? cfg['user'] as Map : const {})['name'],
-        );
-    if (username == null) {
-      throw StateError('本地配置缺少 auth.user_id，且无法用用户名补全身份');
-    }
-
-    final login = await _engine.backendClient.login(
-      keyPair: identity.keyPair,
-      username: username,
-    );
-    _engine.config.writeAt(['auth', 'user_id'], login.userId);
-    _engine.config.writeAt(['auth', 'username'], login.username);
-    _engine.config.writeAt(['auth', 'tier'], login.tier);
-    _engine.config.writeAt(['auth', 'pubkey_hash'], login.pubkeyHash);
-    return login.userId;
-  }
-
-  int? _parsePositiveInt(Object? value) {
-    final parsed = switch (value) {
-      int v => v,
-      num v => v.toInt(),
-      String v => int.tryParse(v.trim()),
-      _ => null,
-    };
-    if (parsed == null || parsed <= 0) return null;
-    return parsed;
-  }
-
-  String? _stringValue(Object? value) {
-    if (value is! String) return null;
-    final trimmed = value.trim();
-    return trimmed.isEmpty ? null : trimmed;
   }
 
   void _notify(String message, {bool isError = false}) {
@@ -136,6 +100,35 @@ class ProtocolLoginService {
   }
 }
 
+Future<int> resolveProtocolLoginUserId(
+  HanaEngine engine,
+  HanakoIdentity identity,
+) async {
+  final cfg = engine.config.read();
+  final auth = cfg['auth'] is Map ? cfg['auth'] as Map : const {};
+  final existing = _parsePositiveInt(auth['user_id']);
+  if (existing != null) return existing;
+
+  final username =
+      _nullableString(auth['username']) ??
+      _nullableString(
+        (cfg['user'] is Map ? cfg['user'] as Map : const {})['name'],
+      );
+  if (username == null) {
+    throw StateError('本地配置缺少 auth.user_id，且无法用用户名补全身份');
+  }
+
+  final login = await engine.backendClient.login(
+    keyPair: identity.keyPair,
+    username: username,
+  );
+  engine.config.writeAt(['auth', 'user_id'], login.userId);
+  engine.config.writeAt(['auth', 'username'], login.username);
+  engine.config.writeAt(['auth', 'tier'], login.tier);
+  engine.config.writeAt(['auth', 'pubkey_hash'], login.pubkeyHash);
+  return login.userId;
+}
+
 class ProtocolLoginRequest {
   const ProtocolLoginRequest({
     required this.rawUrl,
@@ -149,23 +142,31 @@ class ProtocolLoginRequest {
   final String challenge;
   final String callbackUrl;
   final Uri callbackUri;
-  final AiGatewayLoginChallengeDetail detail;
+  final ProtocolLoginChallengeDetail detail;
 
   String get callbackHost => callbackUri.host;
-  String get callbackOrigin => '${callbackUri.scheme}://${callbackUri.host}';
+  String get callbackOrigin =>
+      '${callbackUri.scheme}://${callbackUri.authority}';
 
-  bool isTrustedCallback(String aiBaseUrl) {
-    final expected = Uri.tryParse(aiBaseUrl.trim());
+  bool isTrustedCallback({
+    required String aiBaseUrl,
+    required String authBaseUrl,
+  }) {
+    final baseUrl = detail.purpose == ph01AuthAdminLoginPurpose
+        ? authBaseUrl
+        : aiBaseUrl;
+    final expected = Uri.tryParse(baseUrl.trim());
     if (expected == null || expected.host.isEmpty) return false;
-    if (callbackUri.path != '/api/ph01/auth/protocol/complete') {
+    if (callbackUri.path != detail.callbackPath) {
       return false;
     }
     if (!callbackNonceMatches) return false;
-    if (_isLoopbackHost(callbackUri.host)) {
-      return callbackUri.scheme == 'http' || callbackUri.scheme == 'https';
-    }
-    return callbackUri.scheme == 'https' &&
-        callbackUri.host.toLowerCase() == expected.host.toLowerCase();
+    final expectedScheme = expected.scheme.toLowerCase();
+    final callbackScheme = callbackUri.scheme.toLowerCase();
+    if (expectedScheme != 'https' && expectedScheme != 'http') return false;
+    return callbackScheme == expectedScheme &&
+        callbackUri.host.toLowerCase() == expected.host.toLowerCase() &&
+        _effectivePort(callbackUri) == _effectivePort(expected);
   }
 
   bool get callbackNonceMatches {
@@ -197,18 +198,18 @@ class ProtocolLoginRequest {
       throw const FormatException('callback URL 必须是 http 或 https');
     }
 
-    final detail = AiGatewayLoginChallengeDetail.decode(challenge);
+    final detail = ProtocolLoginChallengeDetail.decode(challenge);
     if (detail.version != 1) {
-      throw FormatException('不支持的 AI 网关登录挑战版本：${detail.version}');
+      throw FormatException('不支持的 PH01 登录挑战版本：${detail.version}');
     }
-    if (detail.purpose != 'ph01_ai_gateway_login') {
-      throw FormatException('不支持的 AI 网关登录用途：${detail.purpose}');
+    if (!detail.isSupportedPurpose) {
+      throw FormatException('不支持的 PH01 登录用途：${detail.purpose}');
     }
     if (detail.nonce.isEmpty) {
-      throw const FormatException('AI 网关登录挑战缺少 nonce');
+      throw const FormatException('PH01 登录挑战缺少 nonce');
     }
     if (detail.isExpired(DateTime.now())) {
-      throw const FormatException('AI 网关登录挑战已过期');
+      throw const FormatException('PH01 登录挑战已过期');
     }
     final request = ProtocolLoginRequest(
       rawUrl: rawUrl,
@@ -224,8 +225,8 @@ class ProtocolLoginRequest {
   }
 }
 
-class AiGatewayLoginChallengeDetail {
-  const AiGatewayLoginChallengeDetail({
+class ProtocolLoginChallengeDetail {
+  const ProtocolLoginChallengeDetail({
     required this.version,
     required this.purpose,
     required this.nonce,
@@ -247,6 +248,21 @@ class AiGatewayLoginChallengeDetail {
   final int issuedAt;
   final int expiresAt;
 
+  bool get isSupportedPurpose =>
+      purpose == ph01AiGatewayLoginPurpose ||
+      purpose == ph01AuthAdminLoginPurpose;
+
+  String get serviceLabel => switch (purpose) {
+    ph01AuthAdminLoginPurpose => '认证中心管理端',
+    ph01AiGatewayLoginPurpose => 'AI 网关',
+    _ => 'PH01 服务',
+  };
+
+  String get callbackPath => switch (purpose) {
+    ph01AuthAdminLoginPurpose => '/admin/session/protocol/complete',
+    _ => '/api/ph01/auth/protocol/complete',
+  };
+
   bool isExpired(DateTime now) =>
       expiresAt <= now.millisecondsSinceEpoch ~/ 1000;
 
@@ -256,7 +272,7 @@ class AiGatewayLoginChallengeDetail {
   DateTime get expiresAtTime =>
       DateTime.fromMillisecondsSinceEpoch(expiresAt * 1000);
 
-  static AiGatewayLoginChallengeDetail decode(String encoded) {
+  static ProtocolLoginChallengeDetail decode(String encoded) {
     try {
       final normalized = base64Url.normalize(encoded.trim());
       final raw = utf8.decode(base64Url.decode(normalized));
@@ -264,16 +280,16 @@ class AiGatewayLoginChallengeDetail {
       if (json is! Map) {
         throw const FormatException('challenge JSON 不是对象');
       }
-      return AiGatewayLoginChallengeDetail.fromJson(json);
+      return ProtocolLoginChallengeDetail.fromJson(json);
     } on FormatException {
       rethrow;
     } catch (e) {
-      throw FormatException('无法解析 AI 网关登录挑战：$e');
+      throw FormatException('无法解析 PH01 登录挑战：$e');
     }
   }
 
-  factory AiGatewayLoginChallengeDetail.fromJson(Map<dynamic, dynamic> json) {
-    return AiGatewayLoginChallengeDetail(
+  factory ProtocolLoginChallengeDetail.fromJson(Map<dynamic, dynamic> json) {
+    return ProtocolLoginChallengeDetail(
       version: _intValue(json['version']),
       purpose: _stringValue(json['purpose']),
       nonce: _stringValue(json['nonce']),
@@ -287,6 +303,8 @@ class AiGatewayLoginChallengeDetail {
   }
 }
 
+typedef AiGatewayLoginChallengeDetail = ProtocolLoginChallengeDetail;
+
 int _intValue(Object? value) => switch (value) {
   int v => v,
   num v => v.toInt(),
@@ -299,9 +317,28 @@ String _stringValue(Object? value) {
   return '$value'.trim();
 }
 
-bool _isLoopbackHost(String host) {
-  final normalized = host.toLowerCase();
-  return normalized == 'localhost' ||
-      normalized == '127.0.0.1' ||
-      normalized == '::1';
+int? _parsePositiveInt(Object? value) {
+  final parsed = switch (value) {
+    int v => v,
+    num v => v.toInt(),
+    String v => int.tryParse(v.trim()),
+    _ => null,
+  };
+  if (parsed == null || parsed <= 0) return null;
+  return parsed;
+}
+
+String? _nullableString(Object? value) {
+  if (value is! String && value is! num) return null;
+  final trimmed = '$value'.trim();
+  return trimmed.isEmpty ? null : trimmed;
+}
+
+int? _effectivePort(Uri uri) {
+  if (uri.hasPort) return uri.port;
+  return switch (uri.scheme.toLowerCase()) {
+    'https' => 443,
+    'http' => 80,
+    _ => null,
+  };
 }

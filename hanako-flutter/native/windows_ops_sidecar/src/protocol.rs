@@ -1,4 +1,4 @@
-use crate::{capture, ocr, recovery, ui_parser, uia};
+use crate::{capture, input, ocr, recovery, ui_parser, uia};
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -59,6 +59,11 @@ where
                         "tree": true,
                         "invoke": true
                     },
+                    "input": {
+                        "status": true,
+                        "mouse": true,
+                        "keyboard": true
+                    },
                     "ocr": {
                         "bundle_status": true,
                         "status": true,
@@ -86,6 +91,10 @@ where
                     "ping",
                     "protocol.describe",
                     "screen.capture_region",
+                    "input.status",
+                    "input.mouse_move",
+                    "input.mouse_click",
+                    "input.text",
                     "uia.tree",
                     "uia.invoke",
                     "ocr.status",
@@ -104,6 +113,42 @@ where
                 "capture_failed",
                 err.to_string(),
                 Some(json!({"method": "screen.capture_region"})),
+            ),
+        },
+        "input.status" => match input::status_request(&request.params) {
+            Ok(result) => ok(request.id, result),
+            Err(err) => error(
+                request.id,
+                "input_not_ready",
+                err.to_string(),
+                Some(json!({"method": "input.status"})),
+            ),
+        },
+        "input.mouse_move" => match input::mouse_move_request(&request.params) {
+            Ok(result) => ok(request.id, result),
+            Err(err) => error(
+                request.id,
+                "input_failed",
+                err.to_string(),
+                Some(json!({"method": "input.mouse_move"})),
+            ),
+        },
+        "input.mouse_click" => match input::mouse_click_request(&request.params) {
+            Ok(result) => ok(request.id, result),
+            Err(err) => error(
+                request.id,
+                "input_failed",
+                err.to_string(),
+                Some(json!({"method": "input.mouse_click"})),
+            ),
+        },
+        "input.text" => match input::text_input_request(&request.params) {
+            Ok(result) => ok(request.id, result),
+            Err(err) => error(
+                request.id,
+                "input_failed",
+                err.to_string(),
+                Some(json!({"method": "input.text"})),
             ),
         },
         "uia.tree" => match uia::tree_request(&request.params) {

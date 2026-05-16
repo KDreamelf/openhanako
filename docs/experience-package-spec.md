@@ -26,6 +26,8 @@
 
 脱敏在客户端完成，由子体和用户确认哪些内容需要隐藏。脱敏后仍应保留原始结构和过程，不能改写成摘要或教程。
 
+客户端脱敏采用路径驱动的独立 Agent 任务：用户在界面里选择源经验、填写脱敏要求，子体只把源目录路径和输出暂存目录交给 Agent。Agent 按正常工具流程分块读取源文件、持续修改暂存目录里的文件，逐项处理附件和工具记录，最终形成新的 `metadata.json`、`raw/conversation.md`、`raw/events.md`、`tool-calls/`、`attachments/` 文件树，再导入成本地私有经验副本。客户端不做规则脱敏，也不把整份经验一次性塞入模型上下文或要求模型输出完整脱敏稿。
+
 ---
 
 ## 2. 经验与 Skill 的边界
@@ -120,6 +122,7 @@ package.zip
 
 - `brief` 只能服务于检索和展示，不能替代原始记录。
 - `keywords` 用于 v3 中的程序层初筛。
+- `title`、`brief`、`keywords` 属于索引路标，可以由 Agent 辅助编写；它们不能作为经验本体或替代 `raw/` 下的机械转录。
 - 没有 metadata 时，管理端可以用 `package.zip` hash 生成经验 ID。
 
 ---
@@ -147,6 +150,196 @@ PH01 Root Private Key
 ```
 
 目前管理端先保留 `publisher.json`，后续再补完整二级证书与签名字段。
+
+第二阶段新增 `review-materials.json`，用于表达管理端审核通过后签发的网络流转材料。它可以由管理端包下载接口直接附加到 `.hxp`，也可以由原作者单独取回后附加到本地包：
+
+```text
+exp_xxx.hxp
+├── package.zip
+├── publisher.json
+├── ratings.dat
+└── review-materials.json
+```
+
+`review-materials.json` 最小字段：
+
+```json
+{
+  "schema_version": "ph01.experience.review_materials.v1",
+  "root_key_id": "ph01-exp-root-20260504",
+  "signature_algorithm": "secp256k1_ecdsa_sha256_rs64",
+  "signature_payload_sha256": "sha256-of-signature-payload",
+  "manager_review_signature": "64-byte-rs-hex",
+  "signature_payload": {
+    "schema_version": "ph01.experience.review_payload.v1",
+    "experience_id": "exp_xxx",
+    "package_hash_algorithm": "sha256",
+    "package_hash": "package.zip-sha256",
+    "publisher_pubkey": "publisher-public-key-hex",
+    "review_status": "network",
+    "review_mode": "manual_review",
+    "reviewed_at": "2026-05-09T00:00:00Z",
+    "certificate_id": "ph01-exp-master-20260504",
+    "signer_role": "experience_review_master",
+    "signature_algorithm": "secp256k1_ecdsa_sha256_rs64"
+  },
+  "manager_certificate": {}
+}
+```
+
+客户端导入 network 经验时必须同时验证：
+
+- 内置 Root 公钥验证主控工作证书。
+- 主控工作证书验证 `manager_review_signature`。
+- 审核 payload 中的经验 ID、发布者公钥、`package.zip` hash 与本地包一致。
+- `publisher.json` 发布者签名与 `package.zip` hash 一致。
+
+---
+
+### 6.1 P2P / DHT 传输层补充
+
+第二阶段的包请求与节点发现只负责“找到谁能发包”，不负责把包判定为可信。可信性仍然只来自签名链与 hash 校验。
+
+DHT 传输层采用独立 `experience-dht` 部署版。经验管理端不内置 DHT 运行时，也不承担打洞 socket 或 relay 字节搬运；它只维护公共 DHT 列表、注册、注销、健康检查和管理端兜底下载。源码和部署资产分开：`experience-dht/deployment-package/` 是可扩散部署包，内置部署脚本、Dockerfile、Compose 配置、可选极简 `config.yml` 和预编译二进制放置目录；开发机侧构建脚本负责编译并生成可发放压缩包，也可发布不含源码的 Docker Hub 镜像 `dreamelf6174/experience-dht`。Docker 部署只要求 `EXPERIENCE_DHT_INIT_PASSWORD` 一次性绑定密码、端口映射和持久化 `/data/experience-dht` volume；状态路径由程序和容器映射内部约定，不作为配置字段暴露；节点 ID 首次启动自动生成并写入 DHT 状态文件；公网访问 URL、UDP 候选地址、relay 策略、管理端地址和公开状态都由绑定客户端配置面板签名同步。DHT 默认是私有节点，公开/私有状态不作为部署配置项存在，而是由绑定客户端用账号公钥签名切换，并持久化到 DHT 运行状态文件；客户端绑定 DHT 时应把默认经验管理端地址写入 DHT 作为 bootstrap 地址，私有 DHT 可据此拉取公共 DHT 列表并与公共 DHT 进行短 TTL discovery federation，但不会自动公开注册。公共 DHT 注册/注销不依赖管理端 admin token；用户 DHT 的注册/注销请求必须携带 `owner_peer_id` 对应公钥的签名证明。需要重新绑定时，通过部署包 reset 脚本删除 DHT 状态后重建。
+
+客户端通过 DHT 发送 presence 时，使用 PH01 签名请求包裹业务 payload：
+
+```json
+{
+  "payload": "{\"peer_id\":\"peer_...\",\"endpoints\":[...],\"package_hashes\":[\"sha256:...\"]}",
+  "pubkey": "04...",
+  "signature": "64-byte-rs-hex",
+  "timestamp": 1778323200,
+  "nonce": "random"
+}
+```
+
+`payload` 最小字段：
+
+```json
+{
+  "peer_id": "peer_...",
+  "owner_peer_id": "owner_...",
+  "endpoints": [],
+  "package_hashes": ["sha256:..."],
+  "ttl_seconds": 300
+}
+```
+
+P2P 包请求最小字段：
+
+```json
+{
+  "schema_version": "ph01.experience.package_request.v1",
+  "request_id": "req_...",
+  "experience_id": "exp_...",
+  "package_hash": "sha256:...",
+  "requester_peer_id": "peer_...",
+  "requester_public_key": "04...",
+  "requester_addrs": [],
+  "preferred_transports": ["ipv6_direct", "ipv4_hole_punch", "dht_relay", "manager_seed"],
+  "dht_node_id": "dht_01",
+  "nonce": "random",
+  "timestamp": "2026-05-09T09:00:00Z",
+  "requester_signature": "64-byte-rs-hex"
+}
+```
+
+P2P 包供给响应最小字段：
+
+```json
+{
+  "schema_version": "ph01.experience.package_offer.v1",
+  "request_id": "req_...",
+  "experience_id": "exp_...",
+  "package_hash": "sha256:...",
+  "provider_peer_id": "peer_...",
+  "provider_addrs": [],
+  "available_transports": ["ipv6_direct", "ipv4_hole_punch", "dht_relay"],
+  "review_materials": {},
+  "publisher": {},
+  "nonce": "random",
+  "timestamp": "2026-05-09T09:00:00Z",
+  "provider_signature": "64-byte-rs-hex"
+}
+```
+
+DHT relay 会话创建使用 PH01 签名请求包裹以下业务 payload：
+
+```json
+{
+  "schema_version": "ph01.experience.relay_session_request.v1",
+  "request_id": "req_...",
+  "experience_id": "exp_...",
+  "package_hash": "sha256:...",
+  "requester_peer_id": "peer_...",
+  "requester_owner_peer_id": "owner_...",
+  "provider_peer_id": "peer_...",
+  "provider_owner_peer_id": "owner_...",
+  "ttl_seconds": 300,
+  "max_bytes": 67108864
+}
+```
+
+IPv4 打洞协调会话创建使用 PH01 签名请求包裹以下业务 payload：
+
+```json
+{
+  "schema_version": "ph01.experience.hole_punch_request.v1",
+  "request_id": "req_...",
+  "experience_id": "exp_...",
+  "package_hash": "sha256:...",
+  "requester_peer_id": "peer_...",
+  "requester_owner_peer_id": "owner_...",
+  "requester_addrs": [],
+  "provider_peer_id": "peer_...",
+  "provider_owner_peer_id": "owner_...",
+  "provider_addrs": [],
+  "ttl_seconds": 300
+}
+```
+
+打洞协调状态上报 payload：
+
+```json
+{
+  "peer_id": "peer_...",
+  "role": "requester|provider",
+  "result": "attempting|succeeded|failed",
+  "observed_endpoint": {
+    "network": "udp",
+    "host": "203.0.113.10",
+    "port": 50000
+  },
+  "local_endpoints": []
+}
+```
+
+relay 端点：
+
+```http
+POST /api/v1/package-requests
+GET /api/v1/package-requests?package_hash=sha256:...
+POST /api/v1/package-requests/{request_id}/offers
+GET /api/v1/package-requests/{request_id}/offers
+POST /api/v1/hole-punch/sessions
+POST /api/v1/hole-punch/sessions/{session_id}/reports
+GET /api/v1/hole-punch/sessions/{session_id}
+POST /api/v1/relay/sessions
+PUT /api/v1/relay/sessions/{session_id}/package
+GET /api/v1/relay/sessions/{session_id}/package
+```
+
+说明：
+
+- `requester_public_key` 不能省略，它是请求签名的身份锚点。
+- `review_materials` 是网络导入时必须携带的材料，不是 DHT 的信任来源。
+- `provider_addrs`、`requester_addrs`、`available_transports` 只表达连接和路由能力。
+- DHT package request / offer 端点只作为短 TTL 需求和供给路由表，不搬运 `.hxp` 字节。
+- 供给方发布 offer 或上传 relay 字节前，必须先验证本地 `.hxp` 缓存和审核材料。
+- `ExperienceDhtProviderRecord` 只是一层可连接候选，不等于可信经验包。
+- DHT 打洞协调只交换候选地址、观测公网地址和尝试结果，不直接完成 UDP socket 穿透。
+- DHT relay 只按会话搬运 `.hxp` 字节，不修改包内容，不跳过接收端签名链和 hash 校验。
 
 ---
 
@@ -177,7 +370,7 @@ PH01 Root Private Key
 - 维护轻量索引
 - 向主脑侧 CLI 提供 C/S API
 - 保存审核结果
-- 后续接入签名、评价链、P2P 同步
+- 后续接入签名、评价链和公共 DHT 列表维护
 
 它不负责：
 
@@ -185,6 +378,7 @@ PH01 Root Private Key
 - 自动提炼 Skill
 - 把原始过程压缩成结论
 - 替代子体侧脱敏确认
+- 内置运行 DHT、打洞 socket 或 relay 字节搬运
 
 ---
 
@@ -250,5 +444,4 @@ MVP 阶段遵循 v3 的文件系统检索思路。
 - `publisher.json` 的最终签名字段
 - `metadata.json` 的最小必填字段
 - 管理端是否需要数据库作为后台加速索引；这不能改变文件系统式主入口
-- P2P 节点与管理端是否拆成两个进程
 - 子体侧脱敏 UI 与导出格式

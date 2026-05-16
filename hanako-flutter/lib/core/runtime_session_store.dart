@@ -248,17 +248,23 @@ class RuntimeSessionStore {
       switch (message.role) {
         case 'user':
           flushAssistant();
-          final text = message.visibleText.trim();
-          if (text.isNotEmpty) {
-            out.add(RuntimeDisplayMessage.userText(text));
+          final blocks = _displayBlocksFromContent(message.content);
+          if (blocks.isNotEmpty) {
+            out.add(RuntimeDisplayMessage(role: 'user', blocks: blocks));
           }
         case 'assistant':
+          final messageStartIndex = assistantBlocks.length;
           for (final block in message.content) {
             switch (block) {
               case RuntimeTextBlock(:final text):
-                if (text.trim().isNotEmpty) {
-                  assistantBlocks.add(RuntimeDisplayTextBlock(text));
-                }
+                _appendAssistantDisplayBlocks(
+                  assistantBlocks,
+                  displayBlocksFromMarkdownLinks(text),
+                  messageStartIndex: messageStartIndex,
+                );
+              case RuntimeImageBlock():
+                final display = RuntimeDisplayImageBlock.fromRuntime(block);
+                if (display != null) assistantBlocks.add(display);
               case RuntimeThinkingBlock(:final thinking):
                 if (thinking.trim().isNotEmpty) {
                   assistantBlocks.add(RuntimeDisplayThinkingBlock(thinking));
@@ -284,6 +290,7 @@ class RuntimeSessionStore {
           final resultContent = message.visibleText;
           final resultDetails = _detailsFromMessage(message);
           final existingIndex = toolCallIndices[toolCallId];
+          var attachedToExisting = false;
           if (existingIndex != null && existingIndex < assistantBlocks.length) {
             final existing = assistantBlocks[existingIndex];
             if (existing is RuntimeDisplayToolCallBlock) {
@@ -292,20 +299,22 @@ class RuntimeSessionStore {
                 resultIsError: message.isError,
                 resultDetails: resultDetails,
               );
-              break;
+              attachedToExisting = true;
             }
           }
-          assistantBlocks.add(
-            RuntimeDisplayToolCallBlock(
-              id: toolCallId,
-              name: message.toolName ?? 'unknown_tool',
-              argsJson: '{}',
-              resultContent: resultContent,
-              resultIsError: message.isError,
-              resultDetails: resultDetails,
-            ),
-          );
-          toolCallIndices[toolCallId] = assistantBlocks.length - 1;
+          if (!attachedToExisting) {
+            assistantBlocks.add(
+              RuntimeDisplayToolCallBlock(
+                id: toolCallId,
+                name: message.toolName ?? 'unknown_tool',
+                argsJson: '{}',
+                resultContent: resultContent,
+                resultIsError: message.isError,
+                resultDetails: resultDetails,
+              ),
+            );
+            toolCallIndices[toolCallId] = assistantBlocks.length - 1;
+          }
       }
     }
     flushAssistant();
@@ -356,6 +365,12 @@ class RuntimeDisplayMessage {
     blocks: [RuntimeDisplayTextBlock(text)],
   );
 
+  factory RuntimeDisplayMessage.userBlocks(List<RuntimeContentBlock> blocks) =>
+      RuntimeDisplayMessage(
+        role: 'user',
+        blocks: _displayBlocksFromContent(blocks),
+      );
+
   final String role;
   final List<RuntimeDisplayBlock> blocks;
 
@@ -375,6 +390,17 @@ class RuntimeDisplayMessage {
       switch (block) {
         case RuntimeDisplayTextBlock(:final text):
           if (text.trim().isNotEmpty) parts.add(text.trim());
+        case RuntimeDisplayImageBlock(:final label, :final path):
+          final name = label?.trim().isNotEmpty == true
+              ? label!.trim()
+              : path?.trim().isNotEmpty == true
+              ? p.basename(path!.trim())
+              : '图片';
+          parts.add('[图片：$name]');
+        case RuntimeDisplayFileBlock(:final label, :final path, :final exists):
+          parts.add('[文件：$label]\n$path${exists ? '' : '\n状态：文件不存在'}');
+        case RuntimeDisplayLinkBlock(:final label, :final url):
+          parts.add('[链接：$label]\n$url');
         case RuntimeDisplayThinkingBlock(:final text):
           if (text.trim().isNotEmpty) parts.add('思考：\n${text.trim()}');
         case RuntimeDisplayToolCallBlock(
@@ -413,9 +439,227 @@ class RuntimeDisplayTextBlock extends RuntimeDisplayBlock {
   final String text;
 }
 
+class RuntimeDisplayImageBlock extends RuntimeDisplayBlock {
+  const RuntimeDisplayImageBlock({
+    this.dataUrl,
+    this.imageUrl,
+    this.path,
+    this.mimeType,
+    this.label,
+  });
+
+  final String? dataUrl;
+  final String? imageUrl;
+  final String? path;
+  final String? mimeType;
+  final String? label;
+
+  factory RuntimeDisplayImageBlock.fromAttachment({
+    required String dataUrl,
+    required String mimeType,
+    required String label,
+    String? path,
+  }) => RuntimeDisplayImageBlock(
+    dataUrl: dataUrl,
+    mimeType: mimeType,
+    label: label,
+    path: path,
+  );
+
+  static RuntimeDisplayImageBlock? fromRuntime(RuntimeImageBlock block) {
+    if (block.dataUrl?.trim().isNotEmpty != true &&
+        block.imageUrl?.trim().isNotEmpty != true &&
+        block.path?.trim().isNotEmpty != true) {
+      return null;
+    }
+    return RuntimeDisplayImageBlock(
+      dataUrl: block.dataUrl,
+      imageUrl: block.imageUrl,
+      path: block.path,
+      mimeType: block.mimeType,
+      label: block.label,
+    );
+  }
+}
+
+class RuntimeDisplayFileBlock extends RuntimeDisplayBlock {
+  const RuntimeDisplayFileBlock({
+    required this.path,
+    required this.label,
+    this.mimeType,
+    this.sizeBytes,
+    this.exists = true,
+  });
+
+  final String path;
+  final String label;
+  final String? mimeType;
+  final int? sizeBytes;
+  final bool exists;
+}
+
+class RuntimeDisplayLinkBlock extends RuntimeDisplayBlock {
+  const RuntimeDisplayLinkBlock({required this.url, required this.label});
+
+  final String url;
+  final String label;
+}
+
 class RuntimeDisplayThinkingBlock extends RuntimeDisplayBlock {
   const RuntimeDisplayThinkingBlock(this.text);
   final String text;
+}
+
+List<RuntimeDisplayBlock> displayBlocksFromMarkdownLinks(String text) {
+  if (text.trim().isEmpty) return const [];
+  final matches = _markdownLinks(text).toList(growable: false);
+  if (matches.isEmpty) return [RuntimeDisplayTextBlock(text)];
+
+  final out = <RuntimeDisplayBlock>[];
+  var cursor = 0;
+  var converted = false;
+  for (final match in matches) {
+    final card = _displayBlockFromMarkdownLink(match.label, match.target);
+    if (card == null) continue;
+    _appendTextSegment(out, text.substring(cursor, match.start));
+    out.add(card);
+    cursor = match.end;
+    converted = true;
+  }
+  if (!converted) return [RuntimeDisplayTextBlock(text)];
+  _appendTextSegment(out, text.substring(cursor));
+  return out;
+}
+
+void _appendAssistantDisplayBlocks(
+  List<RuntimeDisplayBlock> out,
+  List<RuntimeDisplayBlock> blocks, {
+  required int messageStartIndex,
+}) {
+  for (final block in blocks) {
+    if (block is RuntimeDisplayTextBlock &&
+        _mergeBufferedToolTextTail(out, block, messageStartIndex)) {
+      continue;
+    }
+    out.add(block);
+  }
+}
+
+bool _mergeBufferedToolTextTail(
+  List<RuntimeDisplayBlock> out,
+  RuntimeDisplayTextBlock block,
+  int messageStartIndex,
+) {
+  if (out.length < messageStartIndex + 2) return false;
+  final previous = out[out.length - 2];
+  final divider = out.last;
+  if (previous is! RuntimeDisplayTextBlock ||
+      divider is! RuntimeDisplayToolCallBlock) {
+    return false;
+  }
+  final tail = block.text.trimRight();
+  if (tail.isEmpty || tail.length > 11) return false;
+  final before = previous.text.trimRight();
+  if (before.isEmpty || RegExp(r'[\n。！？!?；;：:]$').hasMatch(before)) {
+    return false;
+  }
+  out[out.length - 2] = RuntimeDisplayTextBlock(
+    '${previous.text}${block.text}',
+  );
+  return true;
+}
+
+Iterable<_MarkdownLinkMatch> _markdownLinks(String text) sync* {
+  final pattern = RegExp(r'\[([^\]\n]+)\]\((<[^>\n]+>|[^)\n]+)\)');
+  for (final match in pattern.allMatches(text)) {
+    if (match.start > 0 && text[match.start - 1] == '!') continue;
+    final label = match.group(1)?.trim();
+    final target = match.group(2)?.trim();
+    if (label == null ||
+        label.isEmpty ||
+        target == null ||
+        target.isEmpty ||
+        label.startsWith('!')) {
+      continue;
+    }
+    yield _MarkdownLinkMatch(
+      start: match.start,
+      end: match.end,
+      label: label,
+      target: _normalizeMarkdownTarget(target),
+    );
+  }
+}
+
+String _normalizeMarkdownTarget(String target) {
+  final trimmed = target.trim();
+  if (trimmed.length >= 2 && trimmed.startsWith('<') && trimmed.endsWith('>')) {
+    return trimmed.substring(1, trimmed.length - 1).trim();
+  }
+  return trimmed;
+}
+
+RuntimeDisplayBlock? _displayBlockFromMarkdownLink(
+  String label,
+  String target,
+) {
+  final filePath = _localFilePathFromLinkTarget(target);
+  if (filePath != null) {
+    return _fileBlockFromPath(filePath, label: label);
+  }
+  final uri = Uri.tryParse(target);
+  if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+    return null;
+  }
+  if (uri.host.trim().isEmpty) return null;
+  return RuntimeDisplayLinkBlock(url: uri.toString(), label: label);
+}
+
+String? _localFilePathFromLinkTarget(String target) {
+  final value = target.trim();
+  if (value.isEmpty) return null;
+  if (p.isAbsolute(value)) return p.normalize(value);
+  final uri = Uri.tryParse(value);
+  if (uri == null || uri.scheme != 'file') return null;
+  try {
+    return p.normalize(uri.toFilePath(windows: Platform.isWindows));
+  } catch (_) {
+    return null;
+  }
+}
+
+void _appendTextSegment(List<RuntimeDisplayBlock> out, String text) {
+  final cleaned = _cleanMarkdownLinkTextSegment(text);
+  if (cleaned.isNotEmpty) {
+    out.add(RuntimeDisplayTextBlock(cleaned));
+  }
+}
+
+String _cleanMarkdownLinkTextSegment(String text) {
+  var value = text.trimRight();
+  value = value.replaceFirstMapped(
+    RegExp(r'(^|\n)\s*[-*+]\s*$'),
+    (match) => match.group(1) ?? '',
+  );
+  value = value.replaceFirstMapped(
+    RegExp(r'(^|\n)\s*\d+[.)]\s*$'),
+    (match) => match.group(1) ?? '',
+  );
+  return value.trim();
+}
+
+class _MarkdownLinkMatch {
+  const _MarkdownLinkMatch({
+    required this.start,
+    required this.end,
+    required this.label,
+    required this.target,
+  });
+
+  final int start;
+  final int end;
+  final String label;
+  final String target;
 }
 
 class RuntimeDisplayToolCallBlock extends RuntimeDisplayBlock {
@@ -456,4 +700,49 @@ Map<String, dynamic>? _detailsFromMessage(RuntimeMessage message) {
     if (block is RuntimeDetailsBlock) return block.details;
   }
   return null;
+}
+
+RuntimeDisplayFileBlock? _fileBlockFromPath(
+  String rawPath, {
+  String? label,
+  String? mimeType,
+  int? sizeBytes,
+}) {
+  final path = rawPath.trim();
+  if (path.isEmpty || !p.isAbsolute(path)) return null;
+  final type = FileSystemEntity.typeSync(path);
+  final exists = type != FileSystemEntityType.notFound;
+  final statSize = type == FileSystemEntityType.file
+      ? File(path).lengthSync()
+      : null;
+  return RuntimeDisplayFileBlock(
+    path: p.normalize(path),
+    label: label?.trim().isNotEmpty == true ? label!.trim() : p.basename(path),
+    mimeType: mimeType,
+    sizeBytes: sizeBytes ?? statSize,
+    exists: exists,
+  );
+}
+
+List<RuntimeDisplayBlock> _displayBlocksFromContent(
+  List<RuntimeContentBlock> content,
+) {
+  final blocks = <RuntimeDisplayBlock>[];
+  for (final block in content) {
+    switch (block) {
+      case RuntimeTextBlock(:final text):
+        if (text.trim().isNotEmpty) blocks.add(RuntimeDisplayTextBlock(text));
+      case RuntimeImageBlock():
+        final display = RuntimeDisplayImageBlock.fromRuntime(block);
+        if (display != null) blocks.add(display);
+      case RuntimeThinkingBlock(:final thinking):
+        if (thinking.trim().isNotEmpty) {
+          blocks.add(RuntimeDisplayThinkingBlock(thinking));
+        }
+      case RuntimeToolCallBlock():
+      case RuntimeDetailsBlock():
+        break;
+    }
+  }
+  return blocks;
 }

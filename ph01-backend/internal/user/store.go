@@ -46,12 +46,17 @@ type User struct {
 
 // Pubkey 公钥表（一用户多公钥，支持轮换）。
 type Pubkey struct {
-	ID         uint64     `gorm:"primaryKey;autoIncrement" json:"id"`
-	UserID     uint64     `gorm:"index;not null" json:"user_id"`
-	PubkeyHex  string     `gorm:"size:130;not null" json:"pubkey_hex"`
-	PubkeyHash string     `gorm:"size:64;uniqueIndex;not null" json:"pubkey_hash"`
-	CreatedAt  time.Time  `json:"created_at"`
-	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	ID            uint64     `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID        uint64     `gorm:"index;not null" json:"user_id"`
+	PubkeyHex     string     `gorm:"size:130;not null" json:"pubkey_hex"`
+	PubkeyHash    string     `gorm:"size:64;uniqueIndex;not null" json:"pubkey_hash"`
+	PowVerified   bool       `gorm:"default:false;not null" json:"pow_verified"`
+	PowAlgorithm  string     `gorm:"size:64" json:"pow_algorithm,omitempty"`
+	PowScore      int        `gorm:"default:0;not null" json:"pow_score"`
+	PowVerifiedAt *time.Time `json:"pow_verified_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	RevokedAt     *time.Time `json:"revoked_at,omitempty"`
 
 	User *User `gorm:"foreignKey:UserID" json:"-"`
 }
@@ -67,6 +72,21 @@ type PubkeyBindingAt struct {
 	UserID     uint64
 	PubkeyHash string
 	SignedAt   time.Time
+}
+
+// PubkeyStatus 是认证中心对公钥和用户状态的内部视图。
+type PubkeyStatus struct {
+	Valid         bool
+	UserID        uint64
+	Username      string
+	Tier          string
+	Disabled      bool
+	PubkeyHash    string
+	PowVerified   bool
+	PowAlgorithm  string
+	PowScore      int
+	PowVerifiedAt *time.Time
+	UpdatedAt     time.Time
 }
 
 // AutoMigrate 创建用户与公钥表（幂等）。
@@ -146,6 +166,19 @@ func IsAdminRole(role string) bool {
 func IsRootRole(role string) bool {
 	normalized, ok := NormalizeRole(role)
 	return ok && normalized == RoleRoot
+}
+
+// EmailExists 判断邮箱是否已被任意用户绑定。注册邮箱已在 auth 层归一化为小写。
+func (s *Store) EmailExists(email string) (bool, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return false, nil
+	}
+	var count int64
+	err := s.DB.Model(&User{}).
+		Where("LOWER(email) = ?", email).
+		Count(&count).Error
+	return count > 0, err
 }
 
 func NormalizeTier(tier string) (Tier, bool) {
@@ -376,14 +409,175 @@ func (s *Store) VerifyPubkeyBindingsAt(items []PubkeyBindingAt) ([]PubkeyBinding
 	return missing, nil
 }
 
+// MarkPubkeyPoWVerified 把一次通过的用户 PoW 固化到当前有效公钥上。
+func (s *Store) MarkPubkeyPoWVerified(pubkeyHash, algorithm string, score int, verifiedAt time.Time) (PubkeyStatus, error) {
+	hash := strings.ToLower(strings.TrimSpace(pubkeyHash))
+	now := verifiedAt.UTC().Truncate(time.Second)
+	result := s.DB.Model(&Pubkey{}).
+		Where("pubkey_hash = ? AND revoked_at IS NULL", hash).
+		Updates(map[string]any{
+			"pow_verified":    true,
+			"pow_algorithm":   strings.TrimSpace(algorithm),
+			"pow_score":       score,
+			"pow_verified_at": now,
+			"updated_at":      now,
+		})
+	if result.Error != nil {
+		return PubkeyStatus{}, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return PubkeyStatus{}, gorm.ErrRecordNotFound
+	}
+	return s.GetPubkeyStatus(hash)
+}
+
+// GetPubkeyStatus 查询单个当前有效公钥状态。
+func (s *Store) GetPubkeyStatus(pubkeyHash string) (PubkeyStatus, error) {
+	hash := strings.ToLower(strings.TrimSpace(pubkeyHash))
+	items, err := s.GetPubkeyStatuses([]string{hash})
+	if err != nil {
+		return PubkeyStatus{}, err
+	}
+	if len(items) == 0 {
+		return PubkeyStatus{PubkeyHash: hash}, gorm.ErrRecordNotFound
+	}
+	return items[0], nil
+}
+
+// GetPubkeyStatuses 批量查询当前有效公钥状态。缺失项由调用方按原始请求补齐。
+func (s *Store) GetPubkeyStatuses(pubkeyHashes []string) ([]PubkeyStatus, error) {
+	hashes := normalizePubkeyHashSet(pubkeyHashes)
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	type statusRow struct {
+		UserID        uint64
+		Username      string
+		Tier          string
+		Disabled      bool
+		PubkeyHash    string
+		PowVerified   bool
+		PowAlgorithm  string
+		PowScore      int
+		PowVerifiedAt *time.Time
+		PubkeyUpdated time.Time
+		UserUpdated   time.Time
+	}
+	var rows []statusRow
+	err := s.DB.Table("pubkeys").
+		Select("users.id AS user_id, users.username, users.tier, users.disabled, pubkeys.pubkey_hash, pubkeys.pow_verified, pubkeys.pow_algorithm, pubkeys.pow_score, pubkeys.pow_verified_at, pubkeys.updated_at AS pubkey_updated, users.updated_at AS user_updated").
+		Joins("JOIN users ON users.id = pubkeys.user_id").
+		Where("pubkeys.pubkey_hash IN ? AND pubkeys.revoked_at IS NULL", hashes).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	items := make([]PubkeyStatus, 0, len(rows))
+	for _, row := range rows {
+		updatedAt := row.PubkeyUpdated
+		if row.UserUpdated.After(updatedAt) {
+			updatedAt = row.UserUpdated
+		}
+		items = append(items, PubkeyStatus{
+			Valid:         !row.Disabled,
+			UserID:        row.UserID,
+			Username:      row.Username,
+			Tier:          row.Tier,
+			Disabled:      row.Disabled,
+			PubkeyHash:    row.PubkeyHash,
+			PowVerified:   row.PowVerified,
+			PowAlgorithm:  row.PowAlgorithm,
+			PowScore:      row.PowScore,
+			PowVerifiedAt: row.PowVerifiedAt,
+			UpdatedAt:     updatedAt,
+		})
+	}
+	return items, nil
+}
+
+// ListPubkeyStatesSince 按时间戳列出认证中心用户/公钥状态增量，供 AI 网关拉取。
+func (s *Store) ListPubkeyStatesSince(since time.Time, limit int) ([]PubkeyStatus, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	type statusRow struct {
+		UserID        uint64
+		Username      string
+		Tier          string
+		Disabled      bool
+		PubkeyHash    string
+		PowVerified   bool
+		PowAlgorithm  string
+		PowScore      int
+		PowVerifiedAt *time.Time
+		PubkeyUpdated time.Time
+		UserUpdated   time.Time
+	}
+	query := s.DB.Table("pubkeys").
+		Select("users.id AS user_id, users.username, users.tier, users.disabled, pubkeys.pubkey_hash, pubkeys.pow_verified, pubkeys.pow_algorithm, pubkeys.pow_score, pubkeys.pow_verified_at, pubkeys.updated_at AS pubkey_updated, users.updated_at AS user_updated").
+		Joins("JOIN users ON users.id = pubkeys.user_id").
+		Where("pubkeys.revoked_at IS NULL")
+	if !since.IsZero() {
+		query = query.Where("(pubkeys.updated_at > ? OR users.updated_at > ?)", since.UTC(), since.UTC())
+	}
+	var rows []statusRow
+	if err := query.Order("pubkeys.updated_at ASC, users.updated_at ASC, pubkeys.id ASC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	items := make([]PubkeyStatus, 0, len(rows))
+	for _, row := range rows {
+		updatedAt := row.PubkeyUpdated
+		if row.UserUpdated.After(updatedAt) {
+			updatedAt = row.UserUpdated
+		}
+		items = append(items, PubkeyStatus{
+			Valid:         !row.Disabled,
+			UserID:        row.UserID,
+			Username:      row.Username,
+			Tier:          row.Tier,
+			Disabled:      row.Disabled,
+			PubkeyHash:    row.PubkeyHash,
+			PowVerified:   row.PowVerified,
+			PowAlgorithm:  row.PowAlgorithm,
+			PowScore:      row.PowScore,
+			PowVerifiedAt: row.PowVerifiedAt,
+			UpdatedAt:     updatedAt,
+		})
+	}
+	return items, nil
+}
+
 func bindingKey(userID uint64, pubkeyHash string) string {
 	return strconv.FormatUint(userID, 10) + "\x00" + pubkeyHash
+}
+
+func normalizePubkeyHashSet(pubkeyHashes []string) []string {
+	hashes := make([]string, 0, len(pubkeyHashes))
+	seen := make(map[string]struct{}, len(pubkeyHashes))
+	for _, hash := range pubkeyHashes {
+		hash = strings.ToLower(strings.TrimSpace(hash))
+		if len(hash) != 64 {
+			continue
+		}
+		if _, ok := seen[hash]; ok {
+			continue
+		}
+		seen[hash] = struct{}{}
+		hashes = append(hashes, hash)
+	}
+	return hashes
 }
 
 // SetTier 修改用户等级。
 func (s *Store) SetTier(userID uint64, tier Tier) error {
 	return s.DB.Model(&User{}).Where("id = ?", userID).
 		Update("tier", string(tier)).Error
+}
+
+// SetNickname 修改用户昵称。
+func (s *Store) SetNickname(userID uint64, nickname string) error {
+	return s.DB.Model(&User{}).Where("id = ?", userID).
+		Update("nickname", nickname).Error
 }
 
 // SetRole 修改用户管理权限。

@@ -14,6 +14,7 @@
 //	server "auth_gateway" {
 //	  listen       = ":8080"
 //	  admin_token  = "..."
+//	  public_base_url = "https://auth.xn--lbtx0e.cn"
 //	  cors_origins = ["*"]
 //	}
 //
@@ -33,6 +34,13 @@
 //	  internal_token = "..."
 //	  timeout_ms     = 5000
 //	}
+//
+//	user_pow "default" {
+//	  difficulty_bits = 4
+//	  memory_kib      = 1048576
+//	  round_count     = 2
+//	  ttl_seconds     = 600
+//	}
 package config
 
 import (
@@ -47,6 +55,7 @@ type Config struct {
 	Servers       map[string]*Server
 	SMTP          map[string]*SMTP
 	AIGatewaySync map[string]*AIGatewaySync
+	UserPow       map[string]*UserPow
 }
 
 type fileConfig struct {
@@ -55,6 +64,7 @@ type fileConfig struct {
 	Servers       []*Server        `hcl:"server,block"`
 	SMTP          []*SMTP          `hcl:"smtp,block"`
 	AIGatewaySync []*AIGatewaySync `hcl:"ai_gateway_sync,block"`
+	UserPow       []*UserPow       `hcl:"user_pow,block"`
 }
 
 type Database struct {
@@ -74,6 +84,7 @@ type Server struct {
 	JWTSecret   string   `hcl:"jwt_secret,optional"` // deprecated: ignored, only for old local config compatibility
 	AdminToken  string   `hcl:"admin_token"`
 	AuthBase    string   `hcl:"auth_base,optional"`
+	PublicBase  string   `hcl:"public_base_url,optional"`
 	CORSOrigins []string `hcl:"cors_origins,optional"`
 	TLS         *TLS     `hcl:"tls,block"`
 }
@@ -112,6 +123,14 @@ type AIGatewaySync struct {
 	TimeoutMS     int    `hcl:"timeout_ms,optional"`
 }
 
+type UserPow struct {
+	Name           string `hcl:",label"`
+	DifficultyBits int    `hcl:"difficulty_bits,optional"`
+	MemoryKiB      int    `hcl:"memory_kib,optional"`
+	RoundCount     int    `hcl:"round_count,optional"`
+	TTLSeconds     int    `hcl:"ttl_seconds,optional"`
+}
+
 func Load(path string) (*Config, error) {
 	var raw fileConfig
 	if err := hclsimple.DecodeFile(path, nil, &raw); err != nil {
@@ -123,6 +142,7 @@ func Load(path string) (*Config, error) {
 		Servers:       map[string]*Server{},
 		SMTP:          map[string]*SMTP{},
 		AIGatewaySync: map[string]*AIGatewaySync{},
+		UserPow:       map[string]*UserPow{},
 	}
 	for _, item := range raw.Databases {
 		if _, exists := cfg.Databases[item.Name]; exists {
@@ -153,6 +173,12 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("duplicate ai_gateway_sync block: %s", item.Name)
 		}
 		cfg.AIGatewaySync[item.Name] = item
+	}
+	for _, item := range raw.UserPow {
+		if _, exists := cfg.UserPow[item.Name]; exists {
+			return nil, fmt.Errorf("duplicate user_pow block: %s", item.Name)
+		}
+		cfg.UserPow[item.Name] = item
 	}
 	return cfg, nil
 }

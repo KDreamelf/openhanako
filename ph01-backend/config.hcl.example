@@ -41,10 +41,22 @@ ai_gateway_sync "default" {
   timeout_ms     = 5000
 }
 
+# ============== User PoW ==============
+
+# Default target: one 1GiB memory workspace, refreshed for every serial stage.
+# If real client telemetry drifts, tune this block without rebuilding the backend.
+user_pow "default" {
+  difficulty_bits = 4
+  memory_kib      = 1048576
+  round_count     = 2
+  ttl_seconds     = 600
+}
+
 # ============== 服务配置 ==============
 
 server "auth_gateway" {
   listen       = ":8080"
   admin_token  = "CHANGE_ME_ADMIN_TOKEN_FOR_AUTH_GATEWAY"
+  public_base_url = "https://auth.xn--lbtx0e.cn"
   cors_origins = ["*"]  # 生产环境改成明确域名
 }

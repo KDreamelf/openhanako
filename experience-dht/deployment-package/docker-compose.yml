@@ -1,0 +1,21 @@
+services:
+  experience-dht:
+    image: ${EXPERIENCE_DHT_IMAGE:-dreamelf6174/experience-dht:latest}
+    container_name: ${EXPERIENCE_DHT_CONTAINER_NAME:-experience-dht}
+    restart: unless-stopped
+    environment:
+      EXPERIENCE_DHT_INIT_PASSWORD: ${EXPERIENCE_DHT_INIT_PASSWORD:?set EXPERIENCE_DHT_INIT_PASSWORD before deployment}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    ports:
+      - "${EXPERIENCE_DHT_BIND_ADDR:-0.0.0.0}:${EXPERIENCE_DHT_HTTP_PORT:-8091}:8091"
+      - "${EXPERIENCE_DHT_BIND_ADDR:-0.0.0.0}:${EXPERIENCE_DHT_PUBLIC_PORT:-41001}:41001/udp"
+      - "${EXPERIENCE_DHT_BIND_ADDR:-0.0.0.0}:${EXPERIENCE_DHT_QUIC_PORT:-41002}:41002/udp"
+    volumes:
+      - ${EXPERIENCE_DHT_DATA_DIR:-./data}:/data/experience-dht
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8091/healthz | grep 'experience-dht'"]
+      start_period: 15s
+      interval: 30s
+      timeout: 10s
+      retries: 3

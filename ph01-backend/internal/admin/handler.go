@@ -3,15 +3,19 @@ package admin
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,7 +27,16 @@ import (
 	"gorm.io/gorm"
 )
 
-const defaultSessionTTL = 12 * time.Hour
+const (
+	defaultSessionTTL = 12 * time.Hour
+
+	adminLoginPurpose          = "ph01_auth_admin_login"
+	adminLoginChallengeTTL     = 5 * time.Minute
+	adminLoginChallengeMaxAge  = 30 * time.Minute
+	adminLoginChallengeNonceN  = 32
+	adminLoginProtocolCallback = "/admin/session/protocol/complete"
+	defaultAuthPublicBaseURL   = "https://auth.xn--lbtx0e.cn"
+)
 
 type Handler struct {
 	UserStore   *user.Store
@@ -31,6 +44,11 @@ type Handler struct {
 	Verifier    *hcrypto.SignedRequestVerifier
 	AdminToken  string
 	SessionTTL  time.Duration
+	PublicBase  string
+
+	challenges       sync.Map
+	challengeCleanup sync.Mutex
+	lastCleanupUnix  int64
 }
 
 type sessionClaims struct {
@@ -42,9 +60,25 @@ type sessionClaims struct {
 	IssuedAt  int64  `json:"iat"`
 }
 
+type pendingLoginChallenge struct {
+	mu              sync.Mutex
+	Challenge       api.AdminLoginChallenge `json:"challenge"`
+	Encoded         string                  `json:"encoded"`
+	Completed       bool                    `json:"completed"`
+	Token           string                  `json:"token,omitempty"`
+	ExpiresAt       int64                   `json:"expires_at,omitempty"`
+	User            api.AdminSessionUser    `json:"user"`
+	CompletedAt     int64                   `json:"completed_at,omitempty"`
+	CompletionError string                  `json:"completion_error,omitempty"`
+}
+
 // Register 把 admin routes 挂到 group（/admin 前缀）。
 func (h *Handler) Register(r *gin.RouterGroup) {
+	r.GET("/session/challenge", h.HandleCreateLoginChallenge)
+	r.GET("/session/challenge/:id/status", h.HandleLoginChallengeStatus)
 	r.POST("/session/login", h.HandleLogin)
+	r.POST("/session/login_code", h.HandleLoginCode)
+	r.POST("/session/protocol/complete", h.HandleProtocolComplete)
 
 	r.Use(h.authMiddleware)
 	r.GET("/session/self", h.HandleSelf)
@@ -56,6 +90,113 @@ func (h *Handler) Register(r *gin.RouterGroup) {
 	r.PATCH("/config/smtp", h.HandleUpdateSMTP)
 	r.POST("/config/smtp/test", h.HandleTestSMTP)
 	r.GET("/logs", h.HandleListLogs)
+}
+
+func (h *Handler) HandleCreateLoginChallenge(c *gin.Context) {
+	now := time.Now().Unix()
+	h.cleanupExpiredChallenges(now)
+
+	nonce, err := randomNonce()
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	}
+	clientIP := clientIP(c)
+	challenge := api.AdminLoginChallenge{
+		Version:     1,
+		Purpose:     adminLoginPurpose,
+		ChallengeID: nonce,
+		Nonce:       nonce,
+		IP:          clientIP,
+		IPLocation:  ipLocation(clientIP),
+		UserAgent:   c.Request.UserAgent(),
+		IssuedAt:    now,
+		ExpiresAt:   now + int64(adminLoginChallengeTTL/time.Second),
+	}
+	encoded, err := encodeLoginChallenge(challenge)
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	}
+	record := &pendingLoginChallenge{
+		Challenge: challenge,
+		Encoded:   encoded,
+	}
+	h.challenges.Store(nonce, record)
+
+	c.JSON(http.StatusOK, api.AdminLoginChallengeResponse{
+		Challenge:   encoded,
+		ChallengeID: nonce,
+		Nonce:       nonce,
+		ExpiresAt:   challenge.ExpiresAt,
+		Detail:      challenge,
+		ProtocolURL: h.buildProtocolURL(encoded, nonce),
+	})
+}
+
+func (h *Handler) HandleLoginChallengeStatus(c *gin.Context) {
+	record, err := h.getPendingChallenge(c.Param("id"))
+	if err != nil {
+		errorJSON(c, http.StatusNotFound, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	record.mu.Lock()
+	completed := record.Completed
+	completionError := record.CompletionError
+	resp := api.AdminLoginResponse{
+		Token:     record.Token,
+		ExpiresAt: record.ExpiresAt,
+		User:      record.User,
+	}
+	record.mu.Unlock()
+
+	if completionError != "" {
+		errorJSON(c, http.StatusUnauthorized, api.ErrInvalidSignature, completionError)
+		return
+	}
+	if !completed {
+		c.JSON(http.StatusOK, gin.H{"status": "pending"})
+		return
+	}
+	h.challenges.Delete(record.Challenge.Nonce)
+	c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) HandleLoginCode(c *gin.Context) {
+	var req api.AdminSignedLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	resp, record, err := h.completeLoginChallenge(&req)
+	if err != nil {
+		loginAuthErrorJSON(c, err)
+		return
+	}
+	h.challenges.Delete(record.Challenge.Nonce)
+	c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) HandleProtocolComplete(c *gin.Context) {
+	var req api.AdminSignedLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	_, record, err := h.completeLoginChallenge(&req)
+	if err != nil {
+		if record != nil {
+			record.mu.Lock()
+			record.CompletionError = err.Error()
+			record.mu.Unlock()
+		}
+		loginAuthErrorJSON(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":       "accepted",
+		"challenge_id": record.Challenge.ChallengeID,
+	})
 }
 
 func (h *Handler) HandleLogin(c *gin.Context) {
@@ -111,6 +252,73 @@ func (h *Handler) HandleLogin(c *gin.Context) {
 		ExpiresAt: claims.ExpiresAt,
 		User:      sessionUserFromClaims(claims),
 	})
+}
+
+func (h *Handler) completeLoginChallenge(req *api.AdminSignedLoginRequest) (api.AdminLoginResponse, *pendingLoginChallenge, error) {
+	var empty api.AdminLoginResponse
+	signatureHex := strings.ToLower(strings.TrimSpace(req.Signature))
+	if signatureHex == "" {
+		signatureHex = strings.ToLower(strings.TrimSpace(req.SignatureHex))
+	}
+	req.Nonce = strings.TrimSpace(req.Nonce)
+	req.Challenge = strings.TrimSpace(req.Challenge)
+	if req.UserID == 0 || req.Nonce == "" || signatureHex == "" {
+		return empty, nil, errors.New("invalid PH01 admin login authorization")
+	}
+
+	record, err := h.resolvePendingChallenge(req.Nonce, req.Challenge)
+	if err != nil {
+		return empty, record, err
+	}
+	record.mu.Lock()
+	if record.Completed {
+		record.mu.Unlock()
+		return empty, record, errors.New("PH01 admin login challenge already completed")
+	}
+	record.mu.Unlock()
+
+	u, err := h.UserStore.GetByID(req.UserID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return empty, record, errors.New(api.ErrPubkeyNotFound)
+		}
+		return empty, record, err
+	}
+	if u.Disabled {
+		return empty, record, errors.New(api.ErrUserDisabled)
+	}
+	if !user.IsAdminRole(u.Role) {
+		return empty, record, errors.New(api.ErrAdminRequired)
+	}
+	if !hasValidChallengeSignature(*u, record.Encoded, signatureHex) {
+		return empty, record, errors.New(api.ErrInvalidSignature)
+	}
+
+	token, claims, err := h.issueSession(*u)
+	if err != nil {
+		return empty, record, err
+	}
+	resp := api.AdminLoginResponse{
+		Token:     token,
+		ExpiresAt: claims.ExpiresAt,
+		User:      sessionUserFromClaims(claims),
+	}
+
+	record.mu.Lock()
+	if record.Completed {
+		record.mu.Unlock()
+		return empty, record, errors.New("PH01 admin login challenge already completed")
+	}
+	record.Completed = true
+	record.Token = resp.Token
+	record.ExpiresAt = resp.ExpiresAt
+	record.User = resp.User
+	record.CompletedAt = time.Now().Unix()
+	record.CompletionError = ""
+	record.mu.Unlock()
+
+	h.audit(system.AuditActor{ID: u.ID, Username: u.Username, Role: u.Role}, "admin.login", "session", "challenge")
+	return resp, record, nil
 }
 
 func (h *Handler) HandleSelf(c *gin.Context) {
@@ -215,6 +423,17 @@ func (h *Handler) HandleUpdateUser(c *gin.Context) {
 			return
 		}
 		if err := h.UserStore.SetTier(id, tier); err != nil {
+			errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+			return
+		}
+	}
+	if req.Nickname != nil {
+		nickname := strings.TrimSpace(*req.Nickname)
+		if len(nickname) > 64 {
+			errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "nickname invalid")
+			return
+		}
+		if err := h.UserStore.SetNickname(id, nickname); err != nil {
 			errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
 			return
 		}
@@ -403,6 +622,180 @@ func (h *Handler) HandleListLogs(c *gin.Context) {
 
 // ----- helpers -----
 
+func randomNonce() (string, error) {
+	buf := make([]byte, adminLoginChallengeNonceN)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func encodeLoginChallenge(challenge api.AdminLoginChallenge) (string, error) {
+	raw, err := json.Marshal(challenge)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func decodeLoginChallenge(encoded string) (api.AdminLoginChallenge, error) {
+	var challenge api.AdminLoginChallenge
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(encoded))
+	if err != nil {
+		return challenge, err
+	}
+	if err := json.Unmarshal(raw, &challenge); err != nil {
+		return challenge, err
+	}
+	if challenge.Version != 1 || challenge.Purpose != adminLoginPurpose || strings.TrimSpace(challenge.Nonce) == "" {
+		return challenge, errors.New("invalid PH01 admin login challenge")
+	}
+	return challenge, nil
+}
+
+func (h *Handler) resolvePendingChallenge(nonce, encoded string) (*pendingLoginChallenge, error) {
+	challengeID := strings.TrimSpace(nonce)
+	encoded = strings.TrimSpace(encoded)
+	if encoded != "" {
+		challenge, err := decodeLoginChallenge(encoded)
+		if err != nil {
+			return nil, err
+		}
+		if challengeID == "" {
+			challengeID = challenge.Nonce
+		}
+		if challenge.Nonce != challengeID {
+			return nil, errors.New("PH01 admin challenge nonce mismatch")
+		}
+	}
+	record, err := h.getPendingChallenge(challengeID)
+	if err != nil {
+		return nil, err
+	}
+	if encoded != "" && encoded != record.Encoded {
+		return record, errors.New("PH01 admin challenge mismatch")
+	}
+	return record, nil
+}
+
+func (h *Handler) getPendingChallenge(nonce string) (*pendingLoginChallenge, error) {
+	nonce = strings.TrimSpace(nonce)
+	if nonce == "" {
+		return nil, errors.New("missing PH01 admin challenge nonce")
+	}
+	value, ok := h.challenges.Load(nonce)
+	if !ok {
+		return nil, errors.New("PH01 admin challenge not found")
+	}
+	record, ok := value.(*pendingLoginChallenge)
+	if !ok || record == nil {
+		h.challenges.Delete(nonce)
+		return nil, errors.New("PH01 admin challenge store corrupted")
+	}
+	if time.Now().Unix() > record.Challenge.ExpiresAt {
+		h.challenges.Delete(nonce)
+		return nil, errors.New("PH01 admin challenge expired")
+	}
+	return record, nil
+}
+
+func (h *Handler) cleanupExpiredChallenges(now int64) {
+	h.challengeCleanup.Lock()
+	defer h.challengeCleanup.Unlock()
+	if now-h.lastCleanupUnix < 60 {
+		return
+	}
+	h.lastCleanupUnix = now
+	h.challenges.Range(func(key, value any) bool {
+		record, ok := value.(*pendingLoginChallenge)
+		if !ok || record == nil || now > record.Challenge.ExpiresAt+int64(adminLoginChallengeMaxAge/time.Second) {
+			h.challenges.Delete(key)
+		}
+		return true
+	})
+}
+
+func hasValidChallengeSignature(u user.User, challenge string, signatureHex string) bool {
+	for _, pk := range u.Pubkeys {
+		if hcrypto.VerifySignature(pk.PubkeyHex, []byte(challenge), signatureHex) == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) buildProtocolURL(challenge, nonce string) string {
+	base := normalizePublicBaseURL(h.PublicBase)
+	if base == nil {
+		base = normalizePublicBaseURL(defaultAuthPublicBaseURL)
+	}
+	callback := url.URL{
+		Scheme: base.Scheme,
+		Host:   base.Host,
+		Path:   adminLoginProtocolCallback,
+	}
+	q := callback.Query()
+	q.Set("nonce", nonce)
+	callback.RawQuery = q.Encode()
+
+	protocol := url.URL{
+		Scheme: "ph01",
+		Host:   "login",
+	}
+	pq := protocol.Query()
+	pq.Set("challenge", challenge)
+	pq.Set("callback", callback.String())
+	protocol.RawQuery = pq.Encode()
+	return protocol.String()
+}
+
+func normalizePublicBaseURL(value string) *url.URL {
+	raw := strings.TrimRight(strings.TrimSpace(value), "/")
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !isHTTPURLScheme(strings.ToLower(u.Scheme)) || u.Host == "" {
+		return nil
+	}
+	return &url.URL{Scheme: strings.ToLower(u.Scheme), Host: u.Host}
+}
+
+func isHTTPURLScheme(scheme string) bool {
+	return scheme == "https" || scheme == "http"
+}
+
+func clientIP(c *gin.Context) string {
+	if ip := firstIP(c.GetHeader("X-Forwarded-For")); ip != "" {
+		return ip
+	}
+	if ip := firstIP(c.GetHeader("X-Real-IP")); ip != "" {
+		return ip
+	}
+	return c.ClientIP()
+}
+
+func firstIP(value string) string {
+	for _, part := range strings.Split(value, ",") {
+		ip := strings.TrimSpace(part)
+		if parsed := net.ParseIP(ip); parsed != nil {
+			return parsed.String()
+		}
+	}
+	return ""
+}
+
+func ipLocation(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return "unknown"
+	}
+	if parsed.IsLoopback() || parsed.IsPrivate() || parsed.IsUnspecified() {
+		return "local/private"
+	}
+	return "unknown"
+}
+
 func (h *Handler) issueSession(u user.User) (string, *sessionClaims, error) {
 	if strings.TrimSpace(h.AdminToken) == "" {
 		return "", nil, errors.New("admin_token is required for session signing")
@@ -475,11 +868,15 @@ func toAdminUser(u user.User) api.AdminUser {
 			revAt = &s
 		}
 		pks = append(pks, api.AdminPubkey{
-			ID:         p.ID,
-			PubkeyHash: p.PubkeyHash,
-			PubkeyHex:  p.PubkeyHex,
-			CreatedAt:  p.CreatedAt.Format(time.RFC3339),
-			RevokedAt:  revAt,
+			ID:            p.ID,
+			PubkeyHash:    p.PubkeyHash,
+			PubkeyHex:     p.PubkeyHex,
+			PowVerified:   p.PowVerified,
+			PowAlgorithm:  p.PowAlgorithm,
+			PowScore:      p.PowScore,
+			PowVerifiedAt: unixPtr(p.PowVerifiedAt),
+			CreatedAt:     p.CreatedAt.Format(time.RFC3339),
+			RevokedAt:     revAt,
 		})
 	}
 	role := u.Role
@@ -567,6 +964,13 @@ func sessionUserFromActor(actor system.AuditActor) api.AdminSessionUser {
 	}
 }
 
+func unixPtr(t *time.Time) int64 {
+	if t == nil {
+		return 0
+	}
+	return t.UTC().Unix()
+}
+
 func (h *Handler) audit(actor system.AuditActor, action, target, detail string) {
 	if h.SystemStore != nil {
 		h.SystemStore.AppendAudit(actor, action, target, detail)
@@ -587,6 +991,22 @@ func contextKey() string {
 
 func errorJSON(c *gin.Context, status int, code, msg string) {
 	c.JSON(status, api.ErrorResponse{Error: code, Message: msg})
+}
+
+func loginAuthErrorJSON(c *gin.Context, err error) {
+	code := strings.TrimSpace(err.Error())
+	switch code {
+	case api.ErrAdminRequired:
+		errorJSON(c, http.StatusForbidden, api.ErrAdminRequired, "")
+	case api.ErrUserDisabled:
+		errorJSON(c, http.StatusForbidden, api.ErrUserDisabled, "")
+	case api.ErrPubkeyNotFound:
+		errorJSON(c, http.StatusUnauthorized, api.ErrPubkeyNotFound, "")
+	case api.ErrInvalidSignature:
+		errorJSON(c, http.StatusUnauthorized, api.ErrInvalidSignature, "")
+	default:
+		errorJSON(c, http.StatusUnauthorized, api.ErrInvalidSignature, code)
+	}
 }
 
 func atoi(s string) int {

@@ -1,0 +1,6 @@
+config.json
+data/
+release/
+.gocache/
+*.test
+*.log

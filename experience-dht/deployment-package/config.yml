@@ -1,0 +1,14 @@
+# experience-dht 可选配置
+# Docker Hub / docker-compose 默认使用环境变量，不需要挂载这个文件。
+# 只有在你明确想用 -config 挂载文件启动时，才需要编辑这里。
+# 这个文件只保留部署方真正需要填写的字段。
+# 节点 ID、状态文件路径、公网访问 URL、QUIC/UDP 地址、relay 策略、公开状态、管理端地址，都由程序或客户端管理。
+
+# HTTP API 监听地址。
+# Docker 容器内保持 :8091 即可；宿主机端口通过 docker-compose.yml 或环境变量映射。
+listen: ":8091"
+
+# 首次绑定密码。
+# 客户端第一次绑定 DHT 管理公钥时输入，只用于初始化绑定。
+# 绑定后，公网地址、公开开关、管理端地址等配置都由绑定账号签名管理。
+init_password: "CHANGE_ME_DHT_INIT_PASSWORD"

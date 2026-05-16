@@ -1,23 +1,48 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../app/protocol_login_service.dart';
 import '../../app/providers.dart';
 import '../../core/browser_manager.dart';
 import '../../core/bridge_source_manager.dart';
-import '../../core/collaboration_manager.dart';
 import '../../core/heartbeat_runtime.dart';
+import '../../experience/experience.dart';
 import '../../identity/identity.dart';
 import '../../local_tools/local_tools.dart';
+import '../../windows_ops/windows_ops.dart';
 import '../onboarding/onboarding_page.dart';
 import '../widgets/recovery_matrix_table.dart';
+import '../widgets/status_cluster.dart';
 
 /// SharedPreferences key（与主窗口启动读取共用）。
 const String kPrefThemeMode = 'hanako.theme.mode';
 const String kPrefFontScale = 'hanako.theme.fontScale';
+const List<String> _codexStandardToolNames = [
+  'exec_command',
+  'write_stdin',
+  'apply_patch',
+  'request_user_input',
+  'request_permissions',
+  'view_image',
+  'tool_search',
+  'update_plan',
+  'spawn_agent',
+  'send_message',
+  'followup_task',
+  'wait_agent',
+  'close_agent',
+  'list_agents',
+  'get_goal',
+  'create_goal',
+  'update_goal',
+];
 
 /// Settings 主窗口页面。
 ///
@@ -35,19 +60,30 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
   Map<String, dynamic>? _prefs;
   Map<String, dynamic>? _authConfig;
   Map<String, dynamic>? _userConfig;
+  ExperienceDhtClientConfig? _dhtClientConfig;
+  List<ExperienceDhtNode> _publicDhtNodes = const [];
   Map<String, String>? _paths;
   Map<String, dynamic>? _runtime;
   HeartbeatConfig? _heartbeatConfig;
   List<Map<String, dynamic>> _cronJobs = const [];
   List<Map<String, dynamic>> _activities = const [];
+  List<ExperienceListItem> _experienceItems = const [];
   List<BridgeSourceConfig> _bridgeSources = const [];
   Map<String, BridgeSourceStatus> _bridgeStatuses = const {};
   BrowserStatus? _browserStatus;
-  CollaborationSettings? _collaborationSettings;
+  String? _experienceRedactingId;
+  String? _experienceSyncingId;
+  String? _experienceSubmittingId;
+  double? _experienceSubmitProgress;
+  String? _experienceSubmitProgressText;
+  String? _dhtError;
   bool _hasSavedIdentity = false;
   bool _identityReady = false;
   bool _accountBusy = false;
+  bool _userPowBusy = false;
   String? _identityPublicKeyHash;
+  UserPowStatus? _userPowStatus;
+  String? _userPowError;
   String _themeMode = 'system';
   double _fontScale = 1.0;
   String? _error;
@@ -90,6 +126,36 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     setState(() => _fontScale = scale);
   }
 
+  String _codexPermissionMode() {
+    final codex = _stringKeyMap(_prefs?['codex']);
+    final raw =
+        (codex['permission_mode'] ??
+                codex['permissionMode'] ??
+                codex['permissions'])
+            ?.toString()
+            .trim()
+            .toLowerCase();
+    return switch (raw) {
+      'auto_approve' || 'autoapprove' || 'full' || 'always' => 'auto_approve',
+      'deny' || 'never' => 'deny',
+      _ => 'prompt',
+    };
+  }
+
+  Future<void> _setCodexPermissionMode(String mode) async {
+    final eng = ref.read(engineProvider);
+    final prefs = eng.preferences.getPreferences();
+    final codex = _stringKeyMap(prefs['codex']);
+    codex['permission_mode'] = mode;
+    prefs['codex'] = codex;
+    eng.preferences.savePreferences(prefs);
+    await _refresh();
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Codex 权限模式已更新')));
+  }
+
   Future<void> _refresh() async {
     try {
       final eng = ref.read(engineProvider);
@@ -112,11 +178,39 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
           .list(limit: 20)
           .map((entry) => entry.toJson())
           .toList(growable: false);
+      final experienceItems = await ExperienceStore(
+        agentDir: eng.home.agentDir(eng.config.agentId),
+      ).list();
+      final dhtConfig = ExperienceDhtClientConfig.fromJson(
+        _stringKeyMap(_stringKeyMap(cfg['experience'])['dht_client']),
+      );
+      List<ExperienceDhtNode> publicDhtNodes = const [];
+      String? dhtError;
+      try {
+        publicDhtNodes = await ExperienceNetworkManagerClient()
+            .fetchPublicDhtNodes();
+      } catch (e) {
+        dhtError = '$e';
+      }
       final bridgeSources = eng.bridgeSourceManager.listSources();
       final bridgeStatuses = eng.bridgeSourceManager.statuses();
       final browserStatus = eng.browserManager.status();
-      final collaborationSettings = eng.collaborationManager.readSettings();
       final identity = repo.current;
+      final authConfig = _stringKeyMap(cfg['auth']);
+      final userConfig = _stringKeyMap(cfg['user']);
+      final currentPubkeyHash =
+          identity?.publicKeyHash ?? _textValue(authConfig['pubkey_hash']);
+      UserPowStatus? userPowStatus;
+      String? userPowError;
+      if (currentPubkeyHash != null) {
+        try {
+          userPowStatus = await eng.backendClient.fetchUserPowStatus(
+            pubkeyHash: currentPubkeyHash,
+          );
+        } catch (e) {
+          userPowError = '$e';
+        }
+      }
       final hasSavedIdentity = await repo.hasSavedIdentity();
       final paths = {
         'root': eng.home.root.path,
@@ -139,18 +233,23 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       setState(() {
         _agents = agents.map((a) => a.toJson()).toList();
         _prefs = prefs;
-        _authConfig = _stringKeyMap(cfg['auth']);
-        _userConfig = _stringKeyMap(cfg['user']);
+        _authConfig = authConfig;
+        _userConfig = userConfig;
+        _dhtClientConfig = dhtConfig;
+        _publicDhtNodes = publicDhtNodes;
+        _dhtError = dhtError;
         _heartbeatConfig = heartbeatConfig;
         _cronJobs = cronJobs;
         _activities = activities;
+        _experienceItems = experienceItems;
         _bridgeSources = bridgeSources;
         _bridgeStatuses = bridgeStatuses;
         _browserStatus = browserStatus;
-        _collaborationSettings = collaborationSettings;
         _hasSavedIdentity = hasSavedIdentity;
         _identityReady = identity != null;
         _identityPublicKeyHash = identity?.publicKeyHash;
+        _userPowStatus = userPowStatus;
+        _userPowError = userPowError;
         _paths = paths;
         _runtime = runtime;
         _error = null;
@@ -159,6 +258,12 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       if (!mounted) return;
       setState(() => _error = '$e');
     }
+  }
+
+  void _refreshAll() {
+    ref.invalidate(experienceNetworkStatusProvider);
+    ref.invalidate(windowsOpsStatusProvider);
+    unawaited(_refresh());
   }
 
   Future<void> _openAccountSetup() async {
@@ -238,6 +343,124 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('同步失败：$e')));
+    } finally {
+      if (mounted) setState(() => _accountBusy = false);
+    }
+  }
+
+  Future<void> _completeUserPow() async {
+    if (_accountBusy || _userPowBusy) return;
+    final progressNotifier = ValueNotifier<UserPowProgress>(
+      const UserPowProgress(
+        stage: UserPowProgressStage.challenge,
+        message: '准备发起账号工作量证明',
+        completed: 0,
+        total: 1,
+        fraction: 0,
+      ),
+    );
+    var dialogOpen = true;
+    BuildContext? dialogContext;
+    setState(() {
+      _accountBusy = true;
+      _userPowBusy = true;
+    });
+    unawaited(
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) {
+          dialogContext = context;
+          return _UserPowProgressDialog(progress: progressNotifier);
+        },
+      ).whenComplete(() => dialogOpen = false),
+    );
+    await Future<void>.delayed(Duration.zero);
+    try {
+      final eng = ref.read(engineProvider);
+      final identity = await _loadIdentityForAccountAction();
+      final status = await eng.backendClient.completeUserPowWithProgress(
+        keyPair: identity.keyPair,
+        onProgress: (progress) => progressNotifier.value = progress,
+      );
+      eng.config.writeAt(['auth', 'pow_verified'], status.powVerified);
+      eng.config.writeAt(['auth', 'pow_algorithm'], status.powAlgorithm);
+      eng.config.writeAt(['auth', 'pow_score'], status.powScore);
+      eng.config.writeAt(['auth', 'pow_verified_at'], status.powVerifiedAt);
+      if (!mounted) return;
+      setState(() {
+        _userPowStatus = status;
+        _userPowError = null;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('账号工作量证明已完成：强度 ${status.powScore}')),
+      );
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _userPowError = '$e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('工作量证明失败：$e')));
+    } finally {
+      final activeDialogContext = dialogContext;
+      if (dialogOpen &&
+          activeDialogContext != null &&
+          activeDialogContext.mounted) {
+        Navigator.of(activeDialogContext).pop();
+      }
+      progressNotifier.dispose();
+      if (mounted) {
+        setState(() {
+          _accountBusy = false;
+          _userPowBusy = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _openProtocolLoginCodeDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) =>
+          _ProtocolLoginCodeDialog(onGenerate: _generateProtocolLoginCode),
+    );
+    await _refresh();
+  }
+
+  Future<_ProtocolLoginCodeResult> _generateProtocolLoginCode(
+    String challenge,
+  ) async {
+    if (_accountBusy) {
+      throw StateError('当前已有账号操作正在执行');
+    }
+    final normalized = challenge.trim();
+    final detail = ProtocolLoginChallengeDetail.decode(normalized);
+    if (detail.version != 1 || !detail.isSupportedPurpose) {
+      throw FormatException('不支持的 PH01 登录挑战：${detail.purpose}');
+    }
+    if (detail.nonce.isEmpty) {
+      throw const FormatException('PH01 登录挑战缺少 nonce');
+    }
+    if (detail.isExpired(DateTime.now())) {
+      throw const FormatException('PH01 登录挑战已过期');
+    }
+    setState(() => _accountBusy = true);
+    try {
+      final eng = ref.read(engineProvider);
+      final identity = await _loadIdentityForAccountAction();
+      final userId = await resolveProtocolLoginUserId(eng, identity);
+      final code = eng.backendClient.buildProtocolLoginCode(
+        keyPair: identity.keyPair,
+        userId: userId,
+        challenge: normalized,
+      );
+      await Clipboard.setData(ClipboardData(text: code));
+      return _ProtocolLoginCodeResult(
+        code: code,
+        detail: detail,
+        userId: userId,
+      );
     } finally {
       if (mounted) setState(() => _accountBusy = false);
     }
@@ -529,6 +752,321 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
         context,
       ).showSnackBar(SnackBar(content: Text('打开失败：$e')));
     }
+  }
+
+  String _defaultExperienceManagerBaseUrl() {
+    return ExperienceNetworkManagerClient.defaultManagerBaseUrl;
+  }
+
+  Future<void> _syncExperienceReviewMaterials(ExperienceListItem item) async {
+    if (_experienceSyncingId != null) return;
+    if (item.scope != ExperienceScope.private) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('只有私有经验需要取回审核签名')));
+      return;
+    }
+    final input = await showDialog<_ExperienceReviewSyncInput>(
+      context: context,
+      builder: (_) => const _ExperienceReviewSyncDialog(),
+    );
+    if (input == null) return;
+    setState(() => _experienceSyncingId = item.experienceId);
+    try {
+      final eng = ref.read(engineProvider);
+      final client = ExperienceNetworkManagerClient();
+      final store = ExperienceStore(
+        agentDir: eng.home.agentDir(eng.config.agentId),
+      );
+      final materials = await client.fetchReviewMaterials(
+        experienceId: item.experienceId,
+        bearerToken: input.bearerToken,
+      );
+      final attached = await store.attachReviewMaterialsToPrivatePackage(
+        experienceId: item.experienceId,
+        reviewMaterials: materials,
+      );
+      if (attached.ok) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('审核签名已附加到本地包')));
+        await _refresh();
+        return;
+      }
+      if (!attached.needsFullPackage) {
+        throw StateError(attached.message);
+      }
+      if (!mounted) return;
+      final replace = await _confirmExperienceFullPackageReplace(
+        item,
+        attached.message,
+      );
+      if (replace != true) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('已取消完整包覆盖')));
+        return;
+      }
+      final packageBytes = await client.fetchPackage(
+        experienceId: item.experienceId,
+        bearerToken: input.bearerToken,
+      );
+      final replaced = await store.replacePrivatePackageFromNetworkPackage(
+        packageBytes,
+      );
+      if (!replaced.ok) {
+        throw StateError(replaced.message);
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('完整包已覆盖本地私有副本')));
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('同步审核签名失败：$e')));
+    } finally {
+      if (mounted) setState(() => _experienceSyncingId = null);
+    }
+  }
+
+  Future<void> _submitExperienceForReview(ExperienceListItem item) async {
+    if (_experienceSubmittingId != null) return;
+    if (item.scope != ExperienceScope.private) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('只有本地私有经验需要提交审核')));
+      return;
+    }
+    final input = await showDialog<_ExperienceSubmitInput>(
+      context: context,
+      builder: (_) => _ExperienceSubmitDialog(title: item.title),
+    );
+    if (input == null) return;
+    setState(() {
+      _experienceSubmittingId = item.experienceId;
+      _experienceSubmitProgress = 0.02;
+      _experienceSubmitProgressText = '正在打包本地经验';
+    });
+    try {
+      final eng = ref.read(engineProvider);
+      final identity = await _loadIdentityForAccountAction();
+      final store = ExperienceStore(
+        agentDir: eng.home.agentDir(eng.config.agentId),
+      );
+      final package = await store.packagePrivateExperienceForReview(
+        experienceId: item.experienceId,
+        keyPair: identity.keyPair,
+      );
+      if (mounted) {
+        setState(() {
+          _experienceSubmitProgress = 0.08;
+          _experienceSubmitProgressText = '正在向经验管理端申请静默验证码';
+        });
+      }
+      final client = ExperienceNetworkManagerClient();
+      final packagePowChallenge = await client.startPackagePowChallenge(
+        packageSha256: package.packageHash,
+        pubkeyHash: identity.keyPair.publicKeyHash,
+      );
+      final powStatus = await eng.backendClient
+          .completeDelegatedPowWithProgress(
+            keyPair: identity.keyPair,
+            challengeId: packagePowChallenge.challengeId,
+            onProgress: (progress) {
+              if (!mounted) return;
+              setState(() {
+                _experienceSubmitProgress = (0.08 + progress.fraction * 0.82)
+                    .clamp(0.08, 0.9)
+                    .toDouble();
+                _experienceSubmitProgressText = progress.message;
+              });
+            },
+          );
+      if (!powStatus.verified) {
+        throw StateError('经验包工作量证明未通过认证中心确认');
+      }
+      if (mounted) {
+        setState(() {
+          _experienceSubmitProgress = 0.94;
+          _experienceSubmitProgressText = '正在提交经验包';
+        });
+      }
+      final result = await client.submitPackageForReview(
+        packageBytes: package.packageBytes,
+        keyPair: identity.keyPair,
+        packagePow: ExperiencePackagePowProof(
+          challengeId: packagePowChallenge.challengeId,
+          packageSha256: package.packageHash,
+          pubkeyHash: identity.keyPair.publicKeyHash,
+        ),
+        filename: '${item.experienceId}.hxp',
+      );
+      if (result.approved) {
+        try {
+          final materials = await client.fetchReviewMaterials(
+            experienceId: result.experienceId.isEmpty
+                ? item.experienceId
+                : result.experienceId,
+          );
+          await store.attachReviewMaterialsToPrivatePackage(
+            experienceId: item.experienceId,
+            reviewMaterials: materials,
+          );
+        } catch (_) {}
+      }
+      if (!mounted) return;
+      final message = result.approved
+          ? '经验已通过审核并进入网络'
+          : result.pendingReview
+          ? '经验已提交审核，等待主脑审核'
+          : '经验已提交，当前状态：${result.status.isEmpty ? "未知" : result.status}';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('提交审核失败：$e')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _experienceSubmittingId = null;
+          _experienceSubmitProgress = null;
+          _experienceSubmitProgressText = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _previewExperience(ExperienceListItem item) async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _ExperiencePreviewDialog(item: item),
+    );
+  }
+
+  Future<void> _startExperienceRedactionTask(ExperienceListItem item) async {
+    if (_experienceRedactingId != null) return;
+    if (item.scope != ExperienceScope.private) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('只有本地私有经验需要脱敏')));
+      return;
+    }
+    final input = await showDialog<_ExperienceRedactionInput>(
+      context: context,
+      builder: (_) => _ExperienceRedactionDialog(title: item.title),
+    );
+    if (input == null) return;
+    setState(() => _experienceRedactingId = item.experienceId);
+    try {
+      final eng = ref.read(engineProvider);
+      final agentDir = eng.home.agentDir(eng.config.agentId);
+      final sourceContentDir = p.join(item.path, 'content');
+      final workDir = Directory(
+        p.join(
+          agentDir.path,
+          'experience',
+          'work',
+          'redaction',
+          '${item.experienceId}_${DateTime.now().toUtc().millisecondsSinceEpoch}',
+        ),
+      );
+      await workDir.create(recursive: true);
+      await Directory(p.join(workDir.path, 'raw')).create(recursive: true);
+      await Directory(
+        p.join(workDir.path, 'tool-calls'),
+      ).create(recursive: true);
+      await Directory(
+        p.join(workDir.path, 'attachments'),
+      ).create(recursive: true);
+      final title = input.title.trim().isEmpty
+          ? '${item.title}（脱敏版）'
+          : input.title.trim();
+      final prompt =
+          '''
+你正在执行 PH01 经验脱敏任务。
+不要把源经验一次性读入上下文，也不要在正文里输出完整脱敏稿；请使用可用文件工具分块读取、分块修改输出目录。
+源经验内容目录：$sourceContentDir
+输出目录：${workDir.path}
+
+任务要求：
+1. 只在输出目录中写入脱敏后的原始经验文件，不要写总结稿、教程稿或摘要。
+2. 保留原始结构和过程，conversation.md 仍应像聊天记录那样分段记录。
+3. 工具调用与返回请尽量整理进 raw/events.md，保持机械转录风格。
+4. 如发现图片、附件或日志有敏感信息，请在保留结构的前提下做脱敏替换。
+5. 输出目录根部必须写入 metadata.json，并保留 raw/、tool-calls/、attachments/ 目录。
+6. metadata.json 里请写入合适的 title、brief、keywords，schema_version 使用 ph01.experience.raw.v1。
+7. 完成后调用 create_experience，参数固定为：
+   - source: raw_directory
+   - raw_directory: ${workDir.path}
+   - title: $title
+8. 不要提交网络审核；只生成本地私有经验副本。
+
+用户的脱敏要求：
+${input.instructions.trim()}
+''';
+      await eng.sessionCoordinator.runIsolatedPrompt(
+        agentId: eng.config.agentId,
+        prompt: prompt,
+        cwd: sourceContentDir,
+        source: 'experience_redaction:${item.experienceId}',
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('脱敏任务完成，已生成本地私有经验')));
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('脱敏任务失败：$e')));
+    } finally {
+      if (mounted) setState(() => _experienceRedactingId = null);
+    }
+  }
+
+  Future<bool?> _confirmExperienceFullPackageReplace(
+    ExperienceListItem item,
+    String reason,
+  ) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('覆盖本地完整包？'),
+        content: SizedBox(
+          width: 520,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(item.title),
+              const SizedBox(height: 8),
+              Text(reason),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.download_done_outlined, size: 18),
+            label: const Text('下载并覆盖'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _createAgent() async {
@@ -949,24 +1487,6 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     await _refresh();
   }
 
-  Future<void> _toggleDmAutoReply(bool enabled) async {
-    final eng = ref.read(engineProvider);
-    eng.collaborationManager.saveSettings(
-      eng.collaborationManager.readSettings().copyWith(dmAutoReply: enabled),
-    );
-    await _refresh();
-  }
-
-  Future<void> _toggleChannelAutoTriage(bool enabled) async {
-    final eng = ref.read(engineProvider);
-    eng.collaborationManager.saveSettings(
-      eng.collaborationManager.readSettings().copyWith(
-        channelAutoTriage: enabled,
-      ),
-    );
-    await _refresh();
-  }
-
   Future<void> _toggleCronJob(String id, bool enabled) async {
     ref.read(engineProvider).cronStore.toggleJob(id, enabled: enabled);
     await _refresh();
@@ -990,6 +1510,18 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
 
   @override
   Widget build(BuildContext context) {
+    final networkStatusValue = ref.watch(experienceNetworkStatusProvider);
+    final networkStatus = networkStatusValue.asData?.value;
+    final networkStatusError = networkStatusValue.maybeWhen(
+      error: (error, _) => '$error',
+      orElse: () => null,
+    );
+    final windowsOpsStatusValue = ref.watch(windowsOpsStatusProvider);
+    final windowsOpsStatus = windowsOpsStatusValue.asData?.value;
+    final windowsOpsStatusError = windowsOpsStatusValue.maybeWhen(
+      error: (error, _) => '$error',
+      orElse: () => null,
+    );
     final content = _error != null
         ? Center(child: Text('Error: $_error'))
         : _agents == null
@@ -1007,13 +1539,17 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
                       const SizedBox(height: 24),
                       _buildAgentsSection(),
                       const SizedBox(height: 24),
+                      _buildCodexRuntimeSection(),
+                      const SizedBox(height: 24),
+                      _buildExperienceSection(),
+                      const SizedBox(height: 24),
+                      _buildDhtSection(),
+                      const SizedBox(height: 24),
                       _buildWorkSection(),
                       const SizedBox(height: 24),
                       _buildBridgeSection(),
                       const SizedBox(height: 24),
                       _buildBrowserSection(),
-                      const SizedBox(height: 24),
-                      _buildCollaborationSection(),
                       const SizedBox(height: 24),
                       _buildAppearanceSection(),
                       const SizedBox(height: 24),
@@ -1036,8 +1572,15 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
         child: Column(
           children: [
             _SettingsHeader(
-              onRefresh: _refresh,
+              onRefresh: _refreshAll,
               onClose: () => Navigator.of(context).maybePop(),
+              networkStatus: networkStatus,
+              networkStatusLoading: networkStatusValue.isLoading,
+              networkStatusError: networkStatusError,
+              dhtClientConfig: _dhtClientConfig,
+              windowsOpsStatus: windowsOpsStatus,
+              windowsOpsStatusLoading: windowsOpsStatusValue.isLoading,
+              windowsOpsStatusError: windowsOpsStatusError,
             ),
             Expanded(child: content),
           ],
@@ -1058,6 +1601,34 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     final currentHash = _identityPublicKeyHash ?? configPubkeyHash;
     final vaultLabel = _hasSavedIdentity ? '本机密钥已保存' : '本机密钥未创建';
     final identityLabel = _identityReady ? '身份已解锁' : '身份未解锁';
+    final localPowVerified =
+        auth['pow_verified'] == true ||
+        auth['pow_verified']?.toString().toLowerCase() == 'true';
+    final powVerified = _userPowStatus?.powVerified ?? localPowVerified;
+    final powScore =
+        _userPowStatus?.powScore ??
+        int.tryParse(_textValue(auth['pow_score']) ?? '') ??
+        0;
+    final powAlgorithm =
+        _userPowStatus?.powAlgorithm ?? _textValue(auth['pow_algorithm']) ?? '';
+    final powVerifiedAt =
+        _userPowStatus?.powVerifiedAt ??
+        int.tryParse(_textValue(auth['pow_verified_at']) ?? '') ??
+        0;
+    final powSubtitle = _userPowError != null
+        ? '状态查询失败：$_userPowError'
+        : currentHash == null
+        ? '创建或登录账号后可发起账号工作量证明'
+        : powVerified
+        ? [
+            if (powScore > 0) '强度 $powScore',
+            if (powAlgorithm.isNotEmpty) powAlgorithm,
+            if (powVerifiedAt > 0)
+              _formatDialogTime(
+                DateTime.fromMillisecondsSinceEpoch(powVerifiedAt * 1000),
+              ),
+          ].join(' · ')
+        : '用于初始套餐赠送与网络置信度增强；在本机计算后提交认证中心';
     final accountParts = [
       if (userId != null) 'ID $userId',
       if (tier != null) '等级 $tier',
@@ -1150,6 +1721,14 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
                           icon: const Icon(Icons.sync, size: 18),
                           label: const Text('同步模型'),
                         ),
+                      if (_identityReady || _hasSavedIdentity)
+                        OutlinedButton.icon(
+                          onPressed: _accountBusy
+                              ? null
+                              : _openProtocolLoginCodeDialog,
+                          icon: const Icon(Icons.qr_code_2, size: 18),
+                          label: const Text('网页登录授权'),
+                        ),
                       if (_identityReady)
                         OutlinedButton.icon(
                           onPressed: _accountBusy ? null : _lockIdentity,
@@ -1166,6 +1745,37 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
                   ),
                 ],
               ),
+            ),
+            const Divider(height: 0),
+            ListTile(
+              leading: Icon(
+                powVerified ? Icons.task_alt : Icons.memory_outlined,
+                color: powVerified
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
+              ),
+              title: Text(powVerified ? '账号工作量证明：已完成' : '账号工作量证明：未完成'),
+              subtitle: Text(powSubtitle.isEmpty ? '-' : powSubtitle),
+              trailing: currentHash == null
+                  ? null
+                  : OutlinedButton.icon(
+                      onPressed: (_accountBusy || _userPowBusy)
+                          ? null
+                          : _completeUserPow,
+                      icon: Icon(
+                        _userPowBusy
+                            ? Icons.hourglass_empty
+                            : Icons.play_circle_outline,
+                        size: 18,
+                      ),
+                      label: Text(
+                        _userPowBusy
+                            ? '计算中'
+                            : powVerified
+                            ? '重新证明'
+                            : '开始证明',
+                      ),
+                    ),
             ),
             const Divider(height: 0),
             ListTile(
@@ -1262,6 +1872,72 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
               title: const Text('新建 Agent'),
               onTap: _createAgent,
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCodexRuntimeSection() {
+    final mode = _codexPermissionMode();
+    return _Section(
+      title: 'Codex 引擎',
+      subtitle: 'Agent 执行引擎、工具授权与本地权限策略。',
+      child: Card(
+        child: Column(
+          children: [
+            const ListTile(
+              leading: Icon(Icons.hub_outlined),
+              title: Text('底层 Agent 执行引擎'),
+              subtitle: Text('工具注册、路由、并行策略和提示词组织已切到 Codex 风格运行时。'),
+            ),
+            const Divider(height: 0),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('权限模式', style: Theme.of(context).textTheme.titleSmall),
+                  const SizedBox(height: 8),
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: SegmentedButton<String>(
+                      segments: const [
+                        ButtonSegment(
+                          value: 'prompt',
+                          icon: Icon(Icons.rule_outlined, size: 18),
+                          label: Text('每次询问'),
+                        ),
+                        ButtonSegment(
+                          value: 'auto_approve',
+                          icon: Icon(Icons.verified_outlined, size: 18),
+                          label: Text('完全授权'),
+                        ),
+                        ButtonSegment(
+                          value: 'deny',
+                          icon: Icon(Icons.block_outlined, size: 18),
+                          label: Text('全部拒绝'),
+                        ),
+                      ],
+                      selected: {mode},
+                      onSelectionChanged: (selected) =>
+                          _setCodexPermissionMode(selected.first),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    switch (mode) {
+                      'auto_approve' => '模型请求额外权限时会自动批准，适合信任本机 Agent 的用户。',
+                      'deny' => '模型请求额外权限时会自动拒绝，适合只允许默认工具能力的场景。',
+                      _ => '模型请求额外权限时弹出确认框，由用户决定是否授权。',
+                    },
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
             const Divider(height: 0),
             _buildToolCapabilitiesTile(),
           ],
@@ -1271,9 +1947,10 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
   }
 
   Widget _buildToolCapabilitiesTile() {
-    final names = LocalToolRegistry.buildTools()
-        .map((tool) => tool.name)
-        .toList(growable: false);
+    final names = {
+      ...LocalToolRegistry.buildTools().map((tool) => tool.name),
+      ..._codexStandardToolNames,
+    }.toList(growable: false)..sort();
     return ExpansionTile(
       leading: const Icon(Icons.extension_outlined),
       title: const Text('工具能力'),
@@ -1345,6 +2022,500 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     );
   }
 
+  Widget _buildExperienceSection() {
+    return _Section(
+      title: '经验',
+      subtitle: '本地文件树、元数据与网络经验入口。',
+      child: Card(
+        child: Column(
+          children: [
+            if (_experienceItems.isEmpty)
+              const ListTile(
+                leading: Icon(Icons.auto_stories_outlined),
+                title: Text('暂无 PH01 经验'),
+                subtitle: Text('经验生成或导入后会显示 metadata.json 与文件树路径。'),
+              )
+            else
+              for (final item in _experienceItems) _buildExperienceTile(item),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildExperienceTile(ExperienceListItem item) {
+    final metadataPath = p.join(item.path, 'content', 'metadata.json');
+    final meta = item.metadata;
+    final keywords = meta?.keywords.join(', ') ?? '';
+    final syncing = _experienceSyncingId == item.experienceId;
+    final submitting = _experienceSubmittingId == item.experienceId;
+    final subtitle = [
+      item.scope.wireName,
+      if (meta?.createdAt.trim().isNotEmpty == true) meta!.createdAt,
+      if (keywords.isNotEmpty) keywords,
+      metadataPath,
+    ].join('\n');
+    final progress = _experienceSubmitProgress;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ListTile(
+          leading: Icon(
+            item.scope == ExperienceScope.network
+                ? Icons.hub_outlined
+                : Icons.folder_open_outlined,
+          ),
+          title: Text(item.title),
+          subtitle: Text(subtitle),
+          isThreeLine: true,
+          trailing: Wrap(
+            alignment: WrapAlignment.end,
+            spacing: 0,
+            runSpacing: 0,
+            children: [
+              IconButton(
+                tooltip: '预览经验',
+                icon: const Icon(Icons.visibility_outlined),
+                onPressed: () => _previewExperience(item),
+              ),
+              if (item.scope == ExperienceScope.private)
+                IconButton(
+                  tooltip: '启动脱敏任务',
+                  icon: _experienceRedactingId == item.experienceId
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.auto_fix_high_outlined),
+                  onPressed:
+                      _experienceRedactingId == null &&
+                          _experienceSubmittingId == null &&
+                          _experienceSyncingId == null
+                      ? () => _startExperienceRedactionTask(item)
+                      : null,
+                ),
+              if (item.scope == ExperienceScope.private)
+                IconButton(
+                  tooltip: '提交审核',
+                  icon: submitting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.cloud_upload_outlined),
+                  onPressed:
+                      _experienceSubmittingId == null &&
+                          _experienceSyncingId == null &&
+                          _experienceRedactingId == null
+                      ? () => _submitExperienceForReview(item)
+                      : null,
+                ),
+              if (item.scope == ExperienceScope.private)
+                IconButton(
+                  tooltip: '取回审核签名',
+                  icon: syncing
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.verified_outlined),
+                  onPressed:
+                      _experienceSyncingId == null &&
+                          _experienceSubmittingId == null &&
+                          _experienceRedactingId == null
+                      ? () => _syncExperienceReviewMaterials(item)
+                      : null,
+                ),
+              IconButton(
+                tooltip: '复制元数据路径',
+                icon: const Icon(Icons.copy_outlined),
+                onPressed: () async {
+                  await Clipboard.setData(ClipboardData(text: metadataPath));
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(const SnackBar(content: Text('元数据路径已复制')));
+                },
+              ),
+            ],
+          ),
+        ),
+        if (submitting && progress != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(999),
+                  child: LinearProgressIndicator(
+                    value: progress.clamp(0, 1).toDouble(),
+                    minHeight: 6,
+                  ),
+                ),
+                if ((_experienceSubmitProgressText ?? '').isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    _experienceSubmitProgressText!,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  bool _hasConfiguredDhtNode(ExperienceDhtClientConfig cfg) {
+    return cfg.isCustomPrivate && cfg.adminBaseUrl.trim().isNotEmpty;
+  }
+
+  Widget _buildDhtSection() {
+    final cfg = _dhtClientConfig ?? const ExperienceDhtClientConfig();
+    final c = Theme.of(context).colorScheme;
+    final candidateEndpoints = cfg.effectiveCandidateEndpoints;
+    final candidateText = candidateEndpoints
+        .map(
+          (endpoint) =>
+              '${endpoint.network}://${endpoint.host}:${endpoint.port}',
+        )
+        .join(' · ');
+    final hasNode = _hasConfiguredDhtNode(cfg);
+    final canManageNode = hasNode && cfg.adminBaseUrl.trim().isNotEmpty;
+    final managerBaseUrl = _defaultExperienceManagerBaseUrl();
+    final nodeSubtitle = hasNode
+        ? <String>[
+            if (cfg.adminBaseUrl.trim().isNotEmpty)
+              '公网访问 URL=${cfg.adminBaseUrl.trim()}',
+            if (candidateText.isNotEmpty) '候选端点=$candidateText',
+            '转发策略=${cfg.relayPolicy.wireName}',
+            cfg.publicRegistrationEnabled ? '公开状态=已开启' : '公开状态=未开启',
+            '官方经验管理端=$managerBaseUrl',
+          ].join('\n')
+        : '添加 DHT 节点后，客户端可用它进行连接、预探测、绑定与公开状态管理。';
+    final publicListSubtitle = '公开列表来源：$managerBaseUrl';
+    const emptyPublicListTitle = '暂无公开 DHT';
+    const emptyPublicListSubtitle = '当前官方经验管理端没有返回可用公开节点。';
+    return _Section(
+      title: 'DHT 节点',
+      subtitle: '添加本地节点、查看公开列表、切换公开状态。',
+      child: Card(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ListTile(
+              leading: Icon(
+                hasNode ? Icons.hub_outlined : Icons.add_circle_outline,
+                color: hasNode ? c.primary : c.onSurfaceVariant,
+              ),
+              title: Text(hasNode ? '本地 DHT 节点' : '尚未添加 DHT 节点'),
+              subtitle: Text(nodeSubtitle),
+              isThreeLine: hasNode,
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.icon(
+                    onPressed: _editDhtClientConfig,
+                    icon: Icon(
+                      hasNode ? Icons.edit_outlined : Icons.add_outlined,
+                      size: 18,
+                    ),
+                    label: Text(hasNode ? '编辑 DHT 节点' : '添加 DHT 节点'),
+                  ),
+                  if (hasNode) ...[
+                    OutlinedButton.icon(
+                      onPressed: canManageNode ? _bindDhtAdmin : null,
+                      icon: const Icon(Icons.key_outlined, size: 18),
+                      label: const Text('绑定管理公钥'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: canManageNode ? _syncDhtRuntimeConfig : null,
+                      icon: const Icon(Icons.sync_alt_outlined, size: 18),
+                      label: const Text('同步运行配置'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: canManageNode ? _showDhtAdminStatus : null,
+                      icon: const Icon(Icons.fact_check_outlined, size: 18),
+                      label: const Text('查询状态'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: canManageNode
+                          ? () => _setDhtPublicMode(
+                              !cfg.publicRegistrationEnabled,
+                            )
+                          : null,
+                      icon: Icon(
+                        cfg.publicRegistrationEnabled
+                            ? Icons.public_off_outlined
+                            : Icons.public_outlined,
+                        size: 18,
+                      ),
+                      label: Text(
+                        cfg.publicRegistrationEnabled ? '关闭公开' : '开启公开',
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (hasNode && cfg.publicRegistrationEnabled)
+              const ListTile(
+                leading: Icon(Icons.public_outlined),
+                title: Text('DHT 公开状态已开启'),
+                subtitle: Text('该状态来自最近一次 DHT 管理 API 操作或查询。'),
+              ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.public_outlined),
+              title: const Text('公开 DHT 列表'),
+              subtitle: Text(publicListSubtitle),
+            ),
+            if (_dhtError != null)
+              ListTile(
+                leading: Icon(
+                  Icons.error_outline,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+                title: const Text('公开 DHT 列表读取失败'),
+                subtitle: Text(_dhtError!),
+              ),
+            if (_publicDhtNodes.isEmpty && _dhtError == null)
+              ListTile(
+                leading: const Icon(Icons.view_list_outlined),
+                title: Text(emptyPublicListTitle),
+                subtitle: Text(emptyPublicListSubtitle),
+              )
+            else
+              for (final node in _publicDhtNodes) _buildPublicDhtTile(node),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPublicDhtTile(ExperienceDhtNode node) {
+    final endpointText = node.endpoints
+        .map(
+          (endpoint) =>
+              '${endpoint.network}://${endpoint.host}:${endpoint.port}',
+        )
+        .join(' · ');
+    final subtitle = <String>[
+      if (node.region.trim().isNotEmpty) 'region=${node.region.trim()}',
+      if (endpointText.isNotEmpty) endpointText,
+      'relay=${node.relayPolicy.wireName}',
+      'health=${node.healthStatus.wireName}',
+      if (node.expiresAt != null)
+        'expires=${node.expiresAt!.toLocal().toIso8601String()}',
+    ].join('\n');
+    return ListTile(
+      leading: Icon(
+        node.healthStatus == ExperienceDhtHealthStatus.healthy
+            ? Icons.hub_outlined
+            : Icons.warning_amber_outlined,
+      ),
+      title: Text(node.nodeId),
+      subtitle: Text(subtitle),
+      isThreeLine: true,
+    );
+  }
+
+  Future<void> _editDhtClientConfig() async {
+    final current = _dhtClientConfig ?? const ExperienceDhtClientConfig();
+    final input = await showDialog<_ExperienceDhtConfigInput>(
+      context: context,
+      builder: (_) => _ExperienceDhtConfigDialog(
+        current: current,
+        isCreating: !_hasConfiguredDhtNode(current),
+      ),
+    );
+    if (input == null) return;
+    final eng = ref.read(engineProvider);
+    eng.config.writeAt(['experience', 'dht_client'], input.config.toJson());
+    await _refresh();
+  }
+
+  String? _requireDhtAdminBaseUrl() {
+    final baseUrl = _dhtClientConfig?.adminBaseUrl.trim() ?? '';
+    if (baseUrl.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先添加 DHT 节点并填写公网访问 URL')));
+      return null;
+    }
+    return baseUrl;
+  }
+
+  ExperienceDhtRuntimeConfig _dhtRuntimeConfigFor(
+    ExperienceDhtClientConfig cfg,
+  ) {
+    return ExperienceDhtRuntimeConfig(
+      publicApiBaseUrl: cfg.adminBaseUrl,
+      candidateEndpoints: cfg.effectiveCandidateEndpoints,
+      relayPolicy: cfg.relayPolicy,
+    );
+  }
+
+  Future<void> _bindDhtAdmin() async {
+    if (_accountBusy) return;
+    final baseUrl = _requireDhtAdminBaseUrl();
+    if (baseUrl == null) return;
+    final initPassword = await showDialog<String>(
+      context: context,
+      builder: (_) => const _DhtBindDialog(),
+    );
+    if (initPassword == null || initPassword.trim().isEmpty) return;
+    setState(() => _accountBusy = true);
+    try {
+      final identity = await _loadIdentityForAccountAction();
+      final managerBaseUrl = _defaultExperienceManagerBaseUrl();
+      final state = await ExperienceDhtHttpClient(dhtBaseUrl: baseUrl)
+          .bindAdmin(
+            initPassword: initPassword,
+            pubkeyHex: identity.keyPair.publicKeyHex,
+            managerBaseUrl: managerBaseUrl,
+            runtimeConfig: _dhtRuntimeConfigFor(
+              _dhtClientConfig ?? const ExperienceDhtClientConfig(),
+            ),
+          );
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('DHT 管理公钥已绑定：${state.nodeId}')));
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('DHT 绑定失败：$e')));
+    } finally {
+      if (mounted) setState(() => _accountBusy = false);
+    }
+  }
+
+  Future<void> _syncDhtRuntimeConfig() async {
+    if (_accountBusy) return;
+    final baseUrl = _requireDhtAdminBaseUrl();
+    if (baseUrl == null) return;
+    setState(() => _accountBusy = true);
+    try {
+      final identity = await _loadIdentityForAccountAction();
+      final current = _dhtClientConfig ?? const ExperienceDhtClientConfig();
+      await ExperienceDhtHttpClient(dhtBaseUrl: baseUrl).setRuntimeConfig(
+        keyPair: identity.keyPair,
+        runtimeConfig: _dhtRuntimeConfigFor(current),
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('DHT 运行配置已同步')));
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('DHT 配置同步失败：$e')));
+    } finally {
+      if (mounted) setState(() => _accountBusy = false);
+    }
+  }
+
+  Future<void> _showDhtAdminStatus() async {
+    if (_accountBusy) return;
+    final baseUrl = _requireDhtAdminBaseUrl();
+    if (baseUrl == null) return;
+    setState(() => _accountBusy = true);
+    try {
+      final identity = await _loadIdentityForAccountAction();
+      final status = await ExperienceDhtHttpClient(
+        dhtBaseUrl: baseUrl,
+      ).fetchAdminStatus(keyPair: identity.keyPair);
+      final current = _dhtClientConfig ?? const ExperienceDhtClientConfig();
+      if (current.publicRegistrationEnabled != status.state.publicEnabled) {
+        ref.read(engineProvider).config.writeAt(
+          ['experience', 'dht_client'],
+          ExperienceDhtClientConfig(
+            mode: current.mode,
+            candidateEndpoints: current.effectiveCandidateEndpoints,
+            relayPolicy: current.relayPolicy,
+            publicRegistrationEnabled: status.state.publicEnabled,
+            adminBaseUrl: current.adminBaseUrl,
+          ).toJson(),
+        );
+      }
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (_) => _DhtStatusDialog(status: status),
+      );
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('DHT 状态查询失败：$e')));
+    } finally {
+      if (mounted) setState(() => _accountBusy = false);
+    }
+  }
+
+  Future<void> _setDhtPublicMode(bool enabled) async {
+    if (_accountBusy) return;
+    final baseUrl = _requireDhtAdminBaseUrl();
+    if (baseUrl == null) return;
+    final managerBaseUrl = enabled ? _defaultExperienceManagerBaseUrl() : '';
+    setState(() => _accountBusy = true);
+    try {
+      final identity = await _loadIdentityForAccountAction();
+      final dhtClient = ExperienceDhtHttpClient(dhtBaseUrl: baseUrl);
+      final current = _dhtClientConfig ?? const ExperienceDhtClientConfig();
+      await dhtClient.setRuntimeConfig(
+        keyPair: identity.keyPair,
+        runtimeConfig: _dhtRuntimeConfigFor(current),
+      );
+      final result = await dhtClient.setPublicMode(
+        enabled: enabled,
+        keyPair: identity.keyPair,
+        managerBaseUrl: managerBaseUrl,
+      );
+      final updated = ExperienceDhtClientConfig(
+        mode: current.mode,
+        candidateEndpoints: current.effectiveCandidateEndpoints,
+        relayPolicy: current.relayPolicy,
+        publicRegistrationEnabled: result.state.publicEnabled,
+        adminBaseUrl: current.adminBaseUrl,
+      );
+      ref.read(engineProvider).config.writeAt([
+        'experience',
+        'dht_client',
+      ], updated.toJson());
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            result.state.publicEnabled ? 'DHT 已开启公开注册' : 'DHT 已关闭公开注册',
+          ),
+        ),
+      );
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('DHT 公开模式切换失败：$e')));
+    } finally {
+      if (mounted) setState(() => _accountBusy = false);
+    }
+  }
+
   String _bridgeSubtitle(BridgeSourceConfig source) {
     final status = _bridgeStatuses[source.platform];
     final parts = <String>[
@@ -1411,35 +2582,6 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
                 title: const Text('最近错误'),
                 subtitle: Text(status!.lastError!),
               ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCollaborationSection() {
-    final settings = _collaborationSettings ?? const CollaborationSettings();
-    return _Section(
-      title: '多 Agent 协作',
-      subtitle: 'Delegate、DM 自动回复和频道 triage。',
-      child: Card(
-        child: Column(
-          children: [
-            SwitchListTile(
-              secondary: const Icon(Icons.mark_chat_unread_outlined),
-              title: const Text('DM 自动回复'),
-              subtitle: const Text('关闭后只保留显式 message_agent / dm 工具调用'),
-              value: settings.dmAutoReply,
-              onChanged: _toggleDmAutoReply,
-            ),
-            const Divider(height: 0),
-            SwitchListTile(
-              secondary: const Icon(Icons.hub_outlined),
-              title: const Text('Channel 自动 triage'),
-              subtitle: Text('最大协作深度 ${settings.maxDepth}'),
-              value: settings.channelAutoTriage,
-              onChanged: _toggleChannelAutoTriage,
-            ),
           ],
         ),
       ),
@@ -1777,35 +2919,33 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
   Widget _buildAboutSection() {
     return _Section(
       title: '关于',
-      subtitle: '当前子体实现与上游项目引用。',
+      subtitle: '当前子体实现与底层引擎来源。',
       child: Card(
         child: Column(
           children: [
             const ListTile(
               leading: Icon(Icons.info_outline, size: 22),
               title: Text('幻宙01 / PH01 子体'),
-              subtitle: Text('个人 AI 子体 · Flutter Desktop · 二次设计版本'),
+              subtitle: Text('个人 AI 子体 · Flutter Desktop · PH01 重构实现'),
             ),
             const Divider(height: 0),
             const ListTile(
-              title: Text('原始开源项目'),
+              title: Text('底层 Agent 执行引擎来源'),
               subtitle: SelectableText(
-                'liliMozi/openhanako\nhttps://github.com/liliMozi/openhanako',
+                'OpenAI Codex\nhttps://github.com/openai/codex',
               ),
             ),
             const Divider(height: 0),
             const ListTile(
-              title: Text('原项目许可证'),
+              title: Text('许可证'),
               subtitle: SelectableText(
-                'Apache License 2.0\n本客户端保留对原始 openhanako 项目的来源引用；当前上游仓库标注为 Apache-2.0。',
+                'Apache License 2.0\n本客户端仅迁入 Codex Agent 执行引擎逻辑，不引入 Codex CLI/TUI、登录、配置文件体系或云端状态。',
               ),
             ),
             const Divider(height: 0),
             const ListTile(
-              title: Text('二次设计说明'),
-              subtitle: Text(
-                '当前界面面向 PH01 子体重新设计，Hanako / openhanako 仅作为原始开源项目来源引用，不作为 PH01 系统品牌归属。',
-              ),
+              title: Text('实现边界'),
+              subtitle: Text('界面、身份体系、经验网络、Windows 操作链和客户端业务能力均为 PH01 当前实现。'),
             ),
             const Divider(height: 0),
             ListTile(
@@ -1828,9 +2968,26 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
 }
 
 class _SettingsHeader extends StatelessWidget {
-  const _SettingsHeader({required this.onRefresh, required this.onClose});
+  const _SettingsHeader({
+    required this.onRefresh,
+    required this.onClose,
+    required this.networkStatus,
+    required this.networkStatusLoading,
+    required this.networkStatusError,
+    required this.dhtClientConfig,
+    required this.windowsOpsStatus,
+    required this.windowsOpsStatusLoading,
+    required this.windowsOpsStatusError,
+  });
   final VoidCallback onRefresh;
   final VoidCallback onClose;
+  final ExperienceNetworkStatus? networkStatus;
+  final bool networkStatusLoading;
+  final String? networkStatusError;
+  final ExperienceDhtClientConfig? dhtClientConfig;
+  final WindowsOpsCapabilities? windowsOpsStatus;
+  final bool windowsOpsStatusLoading;
+  final String? windowsOpsStatusError;
 
   @override
   Widget build(BuildContext context) {
@@ -1842,73 +2999,336 @@ class _SettingsHeader extends StatelessWidget {
       ),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(24, 18, 24, 18),
-        child: Row(
-          children: [
-            IconButton.filledTonal(
-              icon: const Icon(Icons.arrow_back),
-              onPressed: onClose,
-              tooltip: '返回',
-              style: IconButton.styleFrom(
-                fixedSize: const Size(40, 40),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
+        child: LayoutBuilder(
+          builder: (context, box) {
+            final compact = box.maxWidth < 1020;
+            final title = Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '子体设置',
+                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    height: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '管理本地 Agent、外观、路径和项目来源信息。',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(color: c.onSurfaceVariant),
+                ),
+              ],
+            );
+            final statusItems = <StatusClusterItem>[
+              StatusClusterItem(
+                icon: Icons.lan_outlined,
+                label: _networkStatusLabel(
+                  networkStatus,
+                  loading: networkStatusLoading,
+                  error: networkStatusError,
+                ),
+                color: _networkStatusColor(
+                  c,
+                  networkStatus,
+                  loading: networkStatusLoading,
+                  error: networkStatusError,
+                ),
+                tooltip: _networkStatusTooltip(
+                  networkStatus,
+                  loading: networkStatusLoading,
+                  error: networkStatusError,
                 ),
               ),
-            ),
-            const SizedBox(width: 12),
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: c.primaryContainer,
-                borderRadius: BorderRadius.circular(8),
+              StatusClusterItem(
+                icon: Icons.sync_alt_outlined,
+                label: _experienceRelayStatusLabel(dhtClientConfig),
+                color: _experienceRelayStatusColor(c, dhtClientConfig),
+                tooltip: _experienceRelayStatusTooltip(dhtClientConfig),
               ),
-              child: Icon(Icons.tune, color: c.onPrimaryContainer),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '子体设置',
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      height: 1.2,
+              StatusClusterItem(
+                icon: Icons.ads_click_outlined,
+                label: _windowsOpsStatusLabel(
+                  windowsOpsStatus,
+                  loading: windowsOpsStatusLoading,
+                  error: windowsOpsStatusError,
+                ),
+                color: _windowsOpsStatusColor(
+                  c,
+                  windowsOpsStatus,
+                  loading: windowsOpsStatusLoading,
+                  error: windowsOpsStatusError,
+                ),
+                tooltip: _windowsOpsStatusTooltip(
+                  windowsOpsStatus,
+                  loading: windowsOpsStatusLoading,
+                  error: windowsOpsStatusError,
+                ),
+              ),
+            ];
+            final status = StatusCluster(
+              items: statusItems,
+              expandLeft: !compact,
+            );
+            final leading = <Widget>[
+              IconButton.filledTonal(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: onClose,
+                tooltip: '返回',
+                style: IconButton.styleFrom(
+                  fixedSize: const Size(40, 40),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: c.primaryContainer,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(Icons.tune, color: c.onPrimaryContainer),
+              ),
+              const SizedBox(width: 16),
+            ];
+            final actions = Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton.filledTonal(
+                  icon: const Icon(Icons.refresh),
+                  onPressed: onRefresh,
+                  tooltip: '刷新',
+                  style: IconButton.styleFrom(
+                    fixedSize: const Size(40, 40),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    '管理本地 Agent、外观、路径和项目来源信息。',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodyMedium?.copyWith(color: c.onSurfaceVariant),
-                  ),
-                ],
-              ),
-            ),
-            IconButton.filledTonal(
-              icon: const Icon(Icons.refresh),
-              onPressed: onRefresh,
-              tooltip: '刷新',
-              style: IconButton.styleFrom(
-                fixedSize: const Size(40, 40),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
                 ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            FilledButton.icon(
-              icon: const Icon(Icons.check),
-              label: const Text('完成'),
-              onPressed: onClose,
-            ),
-          ],
+                const SizedBox(width: 12),
+                FilledButton.icon(
+                  icon: const Icon(Icons.check),
+                  label: const Text('完成'),
+                  onPressed: onClose,
+                ),
+              ],
+            );
+
+            if (compact) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      ...leading,
+                      Expanded(child: title),
+                      const SizedBox(width: 12),
+                      actions,
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  status,
+                ],
+              );
+            }
+
+            return Row(
+              children: [
+                ...leading,
+                Expanded(child: title),
+                const SizedBox(width: 16),
+                Flexible(
+                  child: Align(alignment: Alignment.centerRight, child: status),
+                ),
+                const SizedBox(width: 16),
+                actions,
+              ],
+            );
+          },
         ),
       ),
     );
   }
+}
+
+String _networkStatusLabel(
+  ExperienceNetworkStatus? status, {
+  required bool loading,
+  String? error,
+}) {
+  if (status == null) {
+    return loading ? 'DHT 探测中' : 'DHT 未连接';
+  }
+  final parts = <String>[
+    'DHT ${status.connectedDhtCount}/${status.configuredDhtCount}',
+  ];
+  if (status.ipv6Status == ExperienceNetworkPathStatus.direct) {
+    parts.add('IPv6 可以直连');
+  }
+  if (status.ipv4Status == ExperienceNetworkPathStatus.holePunchable) {
+    parts.add('IPv4 打洞成功');
+  } else if (status.ipv4Status == ExperienceNetworkPathStatus.notPunchable) {
+    parts.add('IPv4 不可打洞');
+  }
+  if (parts.length == 1) parts.add(status.bestModeLabel);
+  return parts.join(' · ');
+}
+
+Color _networkStatusColor(
+  ColorScheme c,
+  ExperienceNetworkStatus? status, {
+  required bool loading,
+  String? error,
+}) {
+  if (status == null) return loading ? c.secondary : c.error;
+  if (error != null || status.error != null || status.connectedDhtCount == 0) {
+    return c.error;
+  }
+  if (status.ipv6Status == ExperienceNetworkPathStatus.direct) {
+    return Colors.green.shade700;
+  }
+  if (status.ipv4Status == ExperienceNetworkPathStatus.holePunchable) {
+    return c.primary;
+  }
+  if (status.ipv4Status == ExperienceNetworkPathStatus.notPunchable) {
+    return c.tertiary;
+  }
+  return c.error;
+}
+
+String _networkStatusTooltip(
+  ExperienceNetworkStatus? status, {
+  required bool loading,
+  String? error,
+}) {
+  if (status == null) {
+    return error == null || error.isEmpty ? '正在探测经验网络 DHT' : error;
+  }
+  final lines = <String>[
+    '已连接 DHT：${status.connectedDhtCount}/${status.configuredDhtCount}',
+    '公开 DHT：${status.publicDhtCount}',
+    'IPv6：${status.ipv6Status.label}',
+    'IPv4：${status.ipv4Status.label}',
+    '当前模式：${status.bestModeLabel}',
+  ];
+  if (status.managerBaseUrl.trim().isNotEmpty) {
+    lines.add('官方经验管理端：${status.managerBaseUrl}');
+  }
+  for (final connection in status.connections.take(5)) {
+    final state = connection.connected ? '已连接' : '未连接';
+    final reason = connection.error == null ? '' : ' · ${connection.error}';
+    lines.add('${connection.node.nodeId}：$state$reason');
+  }
+  if (error != null && error.isNotEmpty) lines.add(error);
+  if (status.error != null && status.error!.isNotEmpty) {
+    lines.add(status.error!);
+  }
+  return lines.join('\n');
+}
+
+String _experienceRelayStatusLabel(ExperienceDhtClientConfig? config) {
+  if (config == null) return '经验转发待加载';
+  return switch (config.relayPolicy) {
+    ExperienceRelayPolicy.public => '经验转发可响应',
+    ExperienceRelayPolicy.ownerOnly => '经验转发仅自己',
+    ExperienceRelayPolicy.disabled => '经验转发关闭',
+  };
+}
+
+Color _experienceRelayStatusColor(
+  ColorScheme c,
+  ExperienceDhtClientConfig? config,
+) {
+  if (config == null) return c.secondary;
+  return switch (config.relayPolicy) {
+    ExperienceRelayPolicy.public => Colors.green.shade700,
+    ExperienceRelayPolicy.ownerOnly => c.primary,
+    ExperienceRelayPolicy.disabled => c.tertiary,
+  };
+}
+
+String _experienceRelayStatusTooltip(ExperienceDhtClientConfig? config) {
+  if (config == null) return '正在读取 DHT 客户端配置';
+  final publicUrl = config.adminBaseUrl.trim().isEmpty
+      ? '未配置'
+      : config.adminBaseUrl.trim();
+  const managerUrl = ExperienceNetworkManagerClient.defaultManagerBaseUrl;
+  return [
+    '经验转发与交互',
+    '转发策略：${config.relayPolicy.wireName}',
+    '公网访问 URL：$publicUrl',
+    '管理端：$managerUrl',
+    '公开状态：${config.publicRegistrationEnabled ? "已开启" : "未开启"}',
+  ].join('\n');
+}
+
+String _windowsOpsStatusLabel(
+  WindowsOpsCapabilities? status, {
+  required bool loading,
+  String? error,
+}) {
+  if (status == null) {
+    return loading ? '界面模型加载中' : '界面操作未就绪';
+  }
+  if (!status.sidecar) return '界面操作不可用';
+  final ready = <String>[];
+  if (status.inputMouse && status.inputKeyboard) ready.add('输入');
+  if (status.uiParsing) ready.add('界面模型');
+  if (status.ocr) ready.add('OCR');
+  if (ready.isEmpty) return error == null ? '界面操作待准备' : '界面操作异常';
+  return ready.join(' · ');
+}
+
+Color _windowsOpsStatusColor(
+  ColorScheme c,
+  WindowsOpsCapabilities? status, {
+  required bool loading,
+  String? error,
+}) {
+  if (status == null) return loading ? c.secondary : c.error;
+  if (error != null || !status.sidecar) return c.error;
+  if (status.inputMouse &&
+      status.inputKeyboard &&
+      status.uiParsing &&
+      status.ocr) {
+    return Colors.green.shade700;
+  }
+  if (status.inputMouse || status.inputKeyboard || status.uiaTree) {
+    return c.primary;
+  }
+  return c.tertiary;
+}
+
+String _windowsOpsStatusTooltip(
+  WindowsOpsCapabilities? status, {
+  required bool loading,
+  String? error,
+}) {
+  if (status == null) {
+    return error == null || error.isEmpty ? '正在检查 Windows 操作链' : error;
+  }
+  final lines = <String>[
+    'Windows 操作链',
+    '边车：${status.sidecar ? "已启动" : "不可用"}',
+    '截图：${status.screenCapture ? "可用" : "不可用"}',
+    '鼠标输入：${status.inputMouse ? "可用" : "不可用"}',
+    '键盘输入：${status.inputKeyboard ? "可用" : "不可用"}',
+    'UIA 控件树：${status.uiaTree ? "可用" : "不可用"}',
+    'UIA Invoke：${status.uiaInvoke ? "可用" : "不可用"}',
+    'OCR：${status.ocr ? "可用" : "不可用"}',
+    '界面识别模型：${status.uiParsing ? "可用" : "不可用"}',
+  ];
+  if (error != null && error.isNotEmpty) lines.add(error);
+  if (status.unavailableReasons.isNotEmpty) {
+    for (final entry in status.unavailableReasons.entries.take(6)) {
+      lines.add('${entry.key}：${entry.value}');
+    }
+  }
+  return lines.join('\n');
 }
 
 class _Section extends StatelessWidget {
@@ -2017,6 +3437,1147 @@ class _StoryVerificationResult {
   final int candidatesPerColumn;
   final List<String> anchors;
   final String? publicKeyHash;
+}
+
+class _ExperiencePreviewData {
+  const _ExperiencePreviewData({
+    required this.contentPath,
+    required this.messages,
+    required this.eventsText,
+  });
+
+  final String contentPath;
+  final List<_ExperiencePreviewMessage> messages;
+  final String eventsText;
+}
+
+class _ExperiencePreviewMessage {
+  const _ExperiencePreviewMessage({required this.role, required this.text});
+
+  final String role;
+  final String text;
+}
+
+Future<_ExperiencePreviewData> _loadExperiencePreviewData(
+  ExperienceListItem item,
+) async {
+  final contentPath = p.join(item.path, 'content');
+  final conversation = await _readOptionalText(
+    p.join(contentPath, 'raw', 'conversation.md'),
+  );
+  final eventsText = await _readOptionalText(
+    p.join(contentPath, 'raw', 'events.md'),
+  );
+  return _ExperiencePreviewData(
+    contentPath: contentPath,
+    messages: _parseExperienceConversation(conversation),
+    eventsText: eventsText.trimRight(),
+  );
+}
+
+Future<String> _readOptionalText(String path) async {
+  final file = File(path);
+  if (!await file.exists()) return '';
+  return file.readAsString();
+}
+
+List<_ExperiencePreviewMessage> _parseExperienceConversation(String text) {
+  final messages = <_ExperiencePreviewMessage>[];
+  String? role;
+  final buffer = StringBuffer();
+  final heading = RegExp(r'^##\s+\d+\.\s*(.+?)\s*$');
+
+  void flush() {
+    final body = buffer.toString().trim();
+    if (role != null && body.isNotEmpty) {
+      messages.add(_ExperiencePreviewMessage(role: role, text: body));
+    }
+    buffer.clear();
+  }
+
+  for (final line in text.split(RegExp(r'\r?\n'))) {
+    final match = heading.firstMatch(line);
+    if (match != null) {
+      flush();
+      role = match.group(1)?.trim();
+      continue;
+    }
+    if (role == null) continue;
+    buffer.writeln(line);
+  }
+  flush();
+  return messages;
+}
+
+bool _isUserPreviewRole(String role) {
+  final lower = role.trim().toLowerCase();
+  return lower.contains('用户') ||
+      lower.contains('user') ||
+      lower.contains('human');
+}
+
+Widget _buildExperiencePreviewBubble(
+  BuildContext context,
+  _ExperiencePreviewMessage message,
+) {
+  final theme = Theme.of(context);
+  final c = theme.colorScheme;
+  final isUser = _isUserPreviewRole(message.role);
+  final background = isUser ? c.primaryContainer : c.surfaceContainerHighest;
+  final foreground = isUser ? c.onPrimaryContainer : c.onSurfaceVariant;
+  return Align(
+    alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 760),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: c.outlineVariant.withValues(alpha: 0.55)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              message.role,
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: foreground,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 8),
+            SelectableText(
+              message.text,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: foreground,
+                height: 1.5,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+class _ExperienceReviewSyncInput {
+  const _ExperienceReviewSyncInput({this.bearerToken});
+
+  final String? bearerToken;
+}
+
+class _ExperienceSubmitInput {
+  const _ExperienceSubmitInput();
+}
+
+class _ExperienceRedactionInput {
+  const _ExperienceRedactionInput({
+    required this.title,
+    required this.instructions,
+  });
+
+  final String title;
+  final String instructions;
+}
+
+class _ExperienceRedactionDialog extends StatefulWidget {
+  const _ExperienceRedactionDialog({required this.title});
+
+  final String title;
+
+  @override
+  State<_ExperienceRedactionDialog> createState() =>
+      _ExperienceRedactionDialogState();
+}
+
+class _ExperienceRedactionDialogState
+    extends State<_ExperienceRedactionDialog> {
+  late final TextEditingController _titleCtrl;
+  late final TextEditingController _instructionsCtrl;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _titleCtrl = TextEditingController(text: '${widget.title}（脱敏版）');
+    _instructionsCtrl = TextEditingController(
+      text:
+          '保留原始结构和过程，不要写成摘要或教程。隐藏姓名、账号、电话、邮箱、地址、密钥和其他敏感标识；如果附件或图片含敏感信息，也要由 AI 判断后做脱敏处理。先分块读取源目录，再写出独立暂存目录，最后导入为本地私有经验。',
+    );
+  }
+
+  @override
+  void dispose() {
+    _titleCtrl.dispose();
+    _instructionsCtrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final title = _titleCtrl.text.trim();
+    final instructions = _instructionsCtrl.text.trim();
+    if (title.isEmpty) {
+      setState(() => _error = '请填写输出标题');
+      return;
+    }
+    if (instructions.isEmpty) {
+      setState(() => _error = '请填写脱敏要求');
+      return;
+    }
+    Navigator.pop(
+      context,
+      _ExperienceRedactionInput(title: title, instructions: instructions),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: const Text('启动脱敏任务'),
+      content: SizedBox(
+        width: 640,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '这会在独立会话里读取源经验目录，AI 自己生成脱敏副本，然后再导入为新的本地私有经验；不会把整份经验一次性塞进上下文。',
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _titleCtrl,
+              decoration: const InputDecoration(
+                labelText: '输出标题',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (_) => _submit(),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _instructionsCtrl,
+              minLines: 5,
+              maxLines: 8,
+              decoration: const InputDecoration(
+                labelText: '脱敏要求',
+                alignLabelWithHint: true,
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (_) => _submit(),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton.icon(
+          onPressed: _submit,
+          icon: const Icon(Icons.auto_fix_high_outlined, size: 18),
+          label: const Text('开始脱敏'),
+        ),
+      ],
+    );
+  }
+}
+
+class _ExperiencePreviewDialog extends StatefulWidget {
+  const _ExperiencePreviewDialog({required this.item});
+
+  final ExperienceListItem item;
+
+  @override
+  State<_ExperiencePreviewDialog> createState() =>
+      _ExperiencePreviewDialogState();
+}
+
+class _ExperiencePreviewDialogState extends State<_ExperiencePreviewDialog> {
+  late final Future<_ExperiencePreviewData> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _loadExperiencePreviewData(widget.item);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final size = MediaQuery.sizeOf(context);
+    final dialogWidth = (size.width - 96).clamp(420.0, 900.0).toDouble();
+    final dialogHeight = (size.height - 120).clamp(420.0, 760.0).toDouble();
+    return AlertDialog(
+      title: const Text('经验预览'),
+      content: SizedBox(
+        width: dialogWidth,
+        height: dialogHeight,
+        child: FutureBuilder<_ExperiencePreviewData>(
+          future: _future,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState != ConnectionState.done) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (snapshot.hasError) {
+              return Center(
+                child: Text(
+                  '加载经验失败：${snapshot.error}',
+                  style: TextStyle(color: theme.colorScheme.error),
+                ),
+              );
+            }
+            final data = snapshot.data!;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(widget.item.title, style: theme.textTheme.titleSmall),
+                const SizedBox(height: 4),
+                Text(
+                  '内容目录：${data.contentPath}',
+                  style: theme.textTheme.bodySmall,
+                ),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: ListView(
+                    children: [
+                      if (data.messages.isEmpty)
+                        const ListTile(
+                          leading: Icon(Icons.chat_outlined),
+                          title: Text('暂无可显示的对话内容'),
+                        )
+                      else
+                        for (final message in data.messages)
+                          _buildExperiencePreviewBubble(context, message),
+                      const SizedBox(height: 8),
+                      ExpansionTile(
+                        tilePadding: EdgeInsets.zero,
+                        title: const Text('工具调用与返回'),
+                        children: [
+                          Container(
+                            width: double.infinity,
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: theme.colorScheme.surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: theme.colorScheme.outlineVariant
+                                    .withValues(alpha: 0.55),
+                              ),
+                            ),
+                            child: SelectableText(
+                              data.eventsText.isEmpty
+                                  ? '暂无工具事件'
+                                  : data.eventsText,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                height: 1.5,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
+    );
+  }
+}
+
+class _ExperienceSubmitDialog extends StatefulWidget {
+  const _ExperienceSubmitDialog({required this.title});
+
+  final String title;
+
+  @override
+  State<_ExperienceSubmitDialog> createState() =>
+      _ExperienceSubmitDialogState();
+}
+
+class _ExperienceSubmitDialogState extends State<_ExperienceSubmitDialog> {
+  void _submit() {
+    Navigator.pop(context, const _ExperienceSubmitInput());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('提交经验审核'),
+      content: SizedBox(
+        width: 520,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.title, style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 12),
+            const Text(
+              '本操作会提交当前本地经验包。需要脱敏时，请先启动脱敏任务生成本地副本，并预览确认后提交；客户端不会用规则改写或脱敏包内容。',
+            ),
+            const SizedBox(height: 12),
+            Text(
+              '提交目标：${ExperienceNetworkManagerClient.defaultManagerBaseUrl}',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton.icon(
+          onPressed: _submit,
+          icon: const Icon(Icons.cloud_upload_outlined, size: 18),
+          label: const Text('提交审核'),
+        ),
+      ],
+    );
+  }
+}
+
+class _ExperienceReviewSyncDialog extends StatefulWidget {
+  const _ExperienceReviewSyncDialog();
+
+  @override
+  State<_ExperienceReviewSyncDialog> createState() =>
+      _ExperienceReviewSyncDialogState();
+}
+
+class _ExperienceReviewSyncDialogState
+    extends State<_ExperienceReviewSyncDialog> {
+  final _tokenCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _tokenCtrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final token = _textValue(_tokenCtrl.text);
+    Navigator.pop(context, _ExperienceReviewSyncInput(bearerToken: token));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: const Text('取回审核签名'),
+      content: SizedBox(
+        width: 560,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _tokenCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Bearer Token（可选）',
+                border: OutlineInputBorder(),
+              ),
+              obscureText: true,
+              onSubmitted: (_) => _submit(),
+            ),
+            const SizedBox(height: 4),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '来源：${ExperienceNetworkManagerClient.defaultManagerBaseUrl}',
+                style: theme.textTheme.bodySmall,
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton.icon(
+          onPressed: _submit,
+          icon: const Icon(Icons.verified_outlined, size: 18),
+          label: const Text('开始'),
+        ),
+      ],
+    );
+  }
+}
+
+class _DhtBindDialog extends StatefulWidget {
+  const _DhtBindDialog();
+
+  @override
+  State<_DhtBindDialog> createState() => _DhtBindDialogState();
+}
+
+class _DhtBindDialogState extends State<_DhtBindDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final value = _controller.text.trim();
+    if (value.isEmpty) return;
+    Navigator.pop(context, value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('绑定 DHT 管理公钥'),
+      content: SizedBox(
+        width: 480,
+        child: TextField(
+          controller: _controller,
+          decoration: const InputDecoration(
+            labelText: '初始化密码',
+            border: OutlineInputBorder(),
+          ),
+          obscureText: true,
+          onSubmitted: (_) => _submit(),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton.icon(
+          onPressed: _submit,
+          icon: const Icon(Icons.key_outlined, size: 18),
+          label: const Text('绑定'),
+        ),
+      ],
+    );
+  }
+}
+
+class _DhtStatusDialog extends StatelessWidget {
+  const _DhtStatusDialog({required this.status});
+
+  final ExperienceDhtAdminStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = status.state;
+    final publicNode = status.publicConfig?.nodeId ?? '';
+    return AlertDialog(
+      title: const Text('DHT 管理状态'),
+      content: SizedBox(
+        width: 560,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _DhtStatusRow(label: '节点', value: state.nodeId),
+            _DhtStatusRow(label: '绑定', value: state.bound ? '已绑定' : '未绑定'),
+            if (status.boundHash.trim().isNotEmpty)
+              _DhtStatusRow(label: '公钥指纹', value: status.boundHash),
+            _DhtStatusRow(
+              label: '公开模式',
+              value: state.publicEnabled ? '开启' : '关闭',
+            ),
+            _DhtStatusRow(
+              label: '注册状态',
+              value: state.publicRegistered ? '已注册' : '未注册',
+            ),
+            if (state.publicManagerBaseUrl.trim().isNotEmpty)
+              _DhtStatusRow(label: '管理端', value: state.publicManagerBaseUrl),
+            if (state.bootstrapManagerBaseUrl.trim().isNotEmpty)
+              _DhtStatusRow(
+                label: '发现管理端',
+                value: state.bootstrapManagerBaseUrl,
+              ),
+            if (publicNode.isNotEmpty)
+              _DhtStatusRow(label: '公共节点', value: publicNode),
+          ],
+        ),
+      ),
+      actions: [
+        FilledButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
+    );
+  }
+}
+
+class _DhtStatusRow extends StatelessWidget {
+  const _DhtStatusRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 88,
+            child: Text(
+              label,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          Expanded(child: SelectableText(value.isEmpty ? '-' : value)),
+        ],
+      ),
+    );
+  }
+}
+
+class _ExperienceDhtConfigInput {
+  const _ExperienceDhtConfigInput({required this.config});
+
+  final ExperienceDhtClientConfig config;
+}
+
+class _ExperienceDhtConfigDialog extends StatefulWidget {
+  const _ExperienceDhtConfigDialog({
+    required this.current,
+    required this.isCreating,
+  });
+
+  final ExperienceDhtClientConfig current;
+  final bool isCreating;
+
+  @override
+  State<_ExperienceDhtConfigDialog> createState() =>
+      _ExperienceDhtConfigDialogState();
+}
+
+class _ExperienceDhtConfigDialogState
+    extends State<_ExperienceDhtConfigDialog> {
+  late final TextEditingController _adminCtrl;
+  late final TextEditingController _hostCtrl;
+  late final TextEditingController _udpPortCtrl;
+  late final TextEditingController _quicPortCtrl;
+  late String _relayPolicy;
+  late bool _udpEnabled;
+  late bool _quicEnabled;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final current = widget.current;
+    final endpoints = current.effectiveCandidateEndpoints;
+    final udpEndpoints = endpoints.where((endpoint) => endpoint.isUdpCandidate);
+    final quicEndpoints = endpoints.where((endpoint) => endpoint.isQuic);
+    final udpEndpoint = udpEndpoints.isEmpty ? null : udpEndpoints.first;
+    final quicEndpoint = quicEndpoints.isEmpty ? null : quicEndpoints.first;
+    final firstEndpoint = endpoints.isEmpty ? null : endpoints.first;
+    _adminCtrl = TextEditingController(text: current.adminBaseUrl);
+    _hostCtrl = TextEditingController(text: firstEndpoint?.host ?? '');
+    _udpPortCtrl = TextEditingController(
+      text: udpEndpoint?.port.toString() ?? '41001',
+    );
+    _quicPortCtrl = TextEditingController(
+      text: quicEndpoint?.port.toString() ?? '41002',
+    );
+    _udpEnabled = udpEndpoint != null || endpoints.isEmpty;
+    _quicEnabled = quicEndpoint != null || endpoints.isEmpty;
+    _relayPolicy = switch (current.relayPolicy) {
+      ExperienceRelayPolicy.public => 'public',
+      ExperienceRelayPolicy.disabled => 'disabled',
+      ExperienceRelayPolicy.ownerOnly => 'owner_only',
+    };
+  }
+
+  @override
+  void dispose() {
+    _adminCtrl.dispose();
+    _hostCtrl.dispose();
+    _udpPortCtrl.dispose();
+    _quicPortCtrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final adminBaseUrl = _normalizeHttpUrlInput(_adminCtrl.text);
+    if (adminBaseUrl.isEmpty) {
+      setState(() => _error = '添加 DHT 节点需要填写公网访问 URL');
+      return;
+    }
+    final parsedAdminBaseUrl = Uri.tryParse(adminBaseUrl);
+    if (parsedAdminBaseUrl == null ||
+        parsedAdminBaseUrl.host.isEmpty ||
+        (parsedAdminBaseUrl.scheme != 'http' &&
+            parsedAdminBaseUrl.scheme != 'https')) {
+      setState(() => _error = 'DHT 公网访问 URL 必须是 http 或 https URL');
+      return;
+    }
+
+    final host = _hostCtrl.text.trim().isNotEmpty
+        ? _hostCtrl.text.trim()
+        : parsedAdminBaseUrl.host;
+    if (host.isEmpty) {
+      setState(() => _error = '候选端点 Host 不能为空');
+      return;
+    }
+    final candidateEndpoints = <ExperienceNetworkEndpoint>[];
+    if (_quicEnabled) {
+      final port = int.tryParse(_quicPortCtrl.text.trim()) ?? 0;
+      if (port <= 0 || port > 65535) {
+        setState(() => _error = 'QUIC 端口必须在 1-65535');
+        return;
+      }
+      candidateEndpoints.add(
+        ExperienceNetworkEndpoint(network: 'quic', host: host, port: port),
+      );
+    }
+    if (_udpEnabled) {
+      final port = int.tryParse(_udpPortCtrl.text.trim()) ?? 0;
+      if (port <= 0 || port > 65535) {
+        setState(() => _error = 'UDP 端口必须在 1-65535');
+        return;
+      }
+      candidateEndpoints.add(
+        ExperienceNetworkEndpoint(
+          network: _networkNameForHost(host),
+          host: host,
+          port: port,
+          requiresHolePunch: true,
+        ),
+      );
+    }
+
+    Navigator.pop(
+      context,
+      _ExperienceDhtConfigInput(
+        config: ExperienceDhtClientConfig(
+          mode: 'custom_private',
+          candidateEndpoints: candidateEndpoints,
+          relayPolicy: ExperienceRelayPolicy.fromWire(_relayPolicy),
+          publicRegistrationEnabled: widget.current.publicRegistrationEnabled,
+          adminBaseUrl: adminBaseUrl,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final c = theme.colorScheme;
+    return AlertDialog(
+      title: Text(widget.isCreating ? '添加 DHT 节点' : '编辑 DHT 节点'),
+      content: SizedBox(
+        width: 620,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '公网访问 URL 用于客户端连接、绑定、状态查询和公开开关；候选端点用于预探测与打洞。经验管理端使用客户端内置官方地址。',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: c.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _adminCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'DHT 公网访问 URL（http://IP:端口）',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.url,
+                onSubmitted: (_) => _submit(),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: _relayPolicy,
+                decoration: const InputDecoration(
+                  labelText: '转发策略',
+                  border: OutlineInputBorder(),
+                ),
+                items: const [
+                  DropdownMenuItem(value: 'public', child: Text('public')),
+                  DropdownMenuItem(
+                    value: 'owner_only',
+                    child: Text('owner_only'),
+                  ),
+                  DropdownMenuItem(value: 'disabled', child: Text('disabled')),
+                ],
+                onChanged: (value) =>
+                    setState(() => _relayPolicy = value ?? 'owner_only'),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                '候选端点',
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: c.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Host 留空时使用公网访问 URL 的主机名。QUIC 优先尝试，传统 UDP 用于打洞探测，HTTP API 始终作为控制面和 relay 兜底。',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: c.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _hostCtrl,
+                decoration: const InputDecoration(
+                  labelText: '候选端点 Host',
+                  border: OutlineInputBorder(),
+                ),
+                onSubmitted: (_) => _submit(),
+              ),
+              const SizedBox(height: 12),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _quicEnabled,
+                onChanged: (value) =>
+                    setState(() => _quicEnabled = value ?? true),
+                title: const Text('QUIC 候选端点'),
+                subtitle: const Text(
+                  '优先连接；基于 UDP，带加密握手和可靠传输能力，可能被部分企业网络或防火墙阻断。',
+                ),
+                controlAffinity: ListTileControlAffinity.leading,
+              ),
+              TextField(
+                controller: _quicPortCtrl,
+                enabled: _quicEnabled,
+                decoration: const InputDecoration(
+                  labelText: 'QUIC 端口',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.number,
+                onSubmitted: (_) => _submit(),
+              ),
+              const SizedBox(height: 12),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _udpEnabled,
+                onChanged: (value) =>
+                    setState(() => _udpEnabled = value ?? true),
+                title: const Text('传统 UDP 候选端点'),
+                subtitle: const Text(
+                  '用于 NAT 打洞和轻量探测；QUIC 协商失败时降级尝试，仍受 UDP 封锁影响。',
+                ),
+                controlAffinity: ListTileControlAffinity.leading,
+              ),
+              TextField(
+                controller: _udpPortCtrl,
+                enabled: _udpEnabled,
+                decoration: const InputDecoration(
+                  labelText: 'UDP 端口',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.number,
+                onSubmitted: (_) => _submit(),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    _error!,
+                    style: TextStyle(color: theme.colorScheme.error),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton.icon(
+          onPressed: _submit,
+          icon: Icon(
+            widget.isCreating ? Icons.add_outlined : Icons.save_outlined,
+            size: 18,
+          ),
+          label: Text(widget.isCreating ? '添加' : '保存'),
+        ),
+      ],
+    );
+  }
+}
+
+class _ProtocolLoginCodeResult {
+  const _ProtocolLoginCodeResult({
+    required this.code,
+    required this.detail,
+    required this.userId,
+  });
+
+  final String code;
+  final ProtocolLoginChallengeDetail detail;
+  final int userId;
+}
+
+class _ProtocolLoginCodeDialog extends StatefulWidget {
+  const _ProtocolLoginCodeDialog({required this.onGenerate});
+
+  final Future<_ProtocolLoginCodeResult> Function(String challenge) onGenerate;
+
+  @override
+  State<_ProtocolLoginCodeDialog> createState() =>
+      _ProtocolLoginCodeDialogState();
+}
+
+class _ProtocolLoginCodeDialogState extends State<_ProtocolLoginCodeDialog> {
+  final _controller = TextEditingController();
+  _ProtocolLoginCodeResult? _result;
+  String? _error;
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _generate() async {
+    final challenge = _controller.text.trim();
+    if (_busy || challenge.isEmpty) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+      _result = null;
+    });
+    try {
+      final result = await widget.onGenerate(challenge);
+      if (!mounted) return;
+      setState(() => _result = result);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('登录授权 JSON 已复制')));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final result = _result;
+    return AlertDialog(
+      title: const Text('网页登录授权'),
+      content: SizedBox(
+        width: 620,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: _controller,
+                minLines: 4,
+                maxLines: 7,
+                decoration: const InputDecoration(
+                  labelText: '网页挑战码',
+                  border: OutlineInputBorder(),
+                ),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  fontFamily: 'monospace',
+                ),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 12),
+                Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
+              ],
+              if (result != null) ...[
+                const SizedBox(height: 16),
+                _ProtocolLoginInfoRow(
+                  label: '登录目标',
+                  value: result.detail.serviceLabel,
+                ),
+                _ProtocolLoginInfoRow(
+                  label: '用户 ID',
+                  value: result.userId.toString(),
+                ),
+                _ProtocolLoginInfoRow(
+                  label: '挑战 ID',
+                  value: result.detail.challengeId,
+                ),
+                _ProtocolLoginInfoRow(
+                  label: '过期时间',
+                  value: _formatDialogTime(result.detail.expiresAtTime),
+                ),
+                const SizedBox(height: 10),
+                SelectableText(
+                  result.code,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.of(context).pop(),
+          child: const Text('关闭'),
+        ),
+        FilledButton.icon(
+          onPressed: _busy ? null : _generate,
+          icon: _busy
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.copy),
+          label: const Text('生成并复制'),
+        ),
+      ],
+    );
+  }
+}
+
+class _ProtocolLoginInfoRow extends StatelessWidget {
+  const _ProtocolLoginInfoRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 72,
+            child: Text(
+              label,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          Expanded(child: SelectableText(value.isEmpty ? '-' : value)),
+        ],
+      ),
+    );
+  }
+}
+
+String _formatDialogTime(DateTime value) {
+  final local = value.toLocal();
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${local.year}-${two(local.month)}-${two(local.day)} '
+      '${two(local.hour)}:${two(local.minute)}:${two(local.second)}';
+}
+
+String _normalizeHttpUrlInput(String value) {
+  final trimmed = value.trim();
+  if (trimmed.isEmpty || trimmed.contains('://')) return trimmed;
+  return 'http://$trimmed';
+}
+
+String _networkNameForHost(String host) {
+  final parsed = InternetAddress.tryParse(host.trim());
+  if (parsed?.type == InternetAddressType.IPv6) return 'udp6';
+  if (parsed?.type == InternetAddressType.IPv4) return 'udp4';
+  return 'udp';
+}
+
+class _UserPowProgressDialog extends StatelessWidget {
+  const _UserPowProgressDialog({required this.progress});
+
+  final ValueListenable<UserPowProgress> progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: const Text('账号工作量证明'),
+      content: SizedBox(
+        width: 440,
+        child: ValueListenableBuilder<UserPowProgress>(
+          valueListenable: progress,
+          builder: (context, value, _) {
+            final fraction = value.fraction.clamp(0, 1).toDouble();
+            final percent = (fraction * 100).clamp(0, 100).round();
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                LinearProgressIndicator(value: fraction),
+                const SizedBox(height: 12),
+                Text(
+                  '$percent% · ${value.message}',
+                  style: theme.textTheme.bodyMedium,
+                ),
+                if (value.stage == UserPowProgressStage.compute &&
+                    value.total > 1)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      '已完成 ${value.completed}/${value.total} 个工作单位',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: 16),
+                Text(
+                  '这个步骤用于防止黑灰产无限量刷号。正常用户只需要等待一次本机计算，未来难度提高时通常也应在几十秒到一分钟内完成；批量刷号者则需要为每个账号重复承担计算成本。',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '计算在独立任务中进行，界面可以持续显示进度。请不要关闭窗口。',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
 }
 
 class _PubkeyRotationOutcome {

@@ -59,6 +59,7 @@ void main() {
       agentManager: agents,
       modelManager: modelManager,
       config: config,
+      preferences: prefs,
       identityRepository: identityRepository,
       backendClient: backend,
     );

@@ -1,0 +1,6 @@
+bin/experience-dht
+bin/experience-dht.exe
+data/
+config.json
+*.zip
+*.tar.gz

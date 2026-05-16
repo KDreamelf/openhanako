@@ -6,6 +6,7 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hanako/llm/provider.dart';
 import 'package:hanako/local_tools/local_tools.dart';
+import 'package:hanako/memory/claude_memory.dart';
 import 'package:hanako/memory/database.dart';
 import 'package:hanako/memory/fact_store.dart';
 import 'package:hanako/memory/memory_compile.dart';
@@ -169,6 +170,65 @@ void main() {
     );
     final after = jsonDecode(afterRaw) as Map<String, dynamic>;
     expect(after['items'], isEmpty);
+  });
+
+  test('Claude 风格记忆目录会加载 MEMORY.md 并递归扫描 topic 文件', () async {
+    final agentDir = Directory(p.join(tmp.path, 'agents', 'agent_01'))
+      ..createSync(recursive: true);
+    final memoryRoot = getClaudeMemoryRoot(agentDir);
+    final teamRoot = getClaudeTeamMemoryRoot(agentDir);
+    await ensureMemoryDirExists(memoryRoot);
+    await ensureMemoryDirExists(teamRoot);
+
+    File(
+      p.join(memoryRoot.path, 'MEMORY.md'),
+    ).writeAsStringSync('- [用户偏好](user.md) — 天使的中文回复约定\n');
+    File(p.join(memoryRoot.path, 'user.md')).writeAsStringSync(
+      '---\n'
+      'description: 用户偏好\n'
+      'type: user\n'
+      '---\n'
+      '天使喜欢简洁中文回复。\n',
+    );
+    File(
+      p.join(teamRoot.path, 'MEMORY.md'),
+    ).writeAsStringSync('- [团队约定](rule.md) — 不同步全量列表\n');
+    File(p.join(teamRoot.path, 'rule.md')).writeAsStringSync(
+      '---\n'
+      'description: 团队约定\n'
+      'type: project\n'
+      '---\n'
+      '部署时只缓存经手内容，不做全量同步。\n',
+    );
+
+    final headers = await scanMemoryFiles(memoryRoot);
+    expect(
+      headers.map((header) => header.filename),
+      containsAll(['user.md', p.join('team', 'rule.md')]),
+    );
+
+    final results = await searchMemoryFiles(memoryRoot, '中文回复', maxResults: 5);
+    expect(results, hasLength(1));
+    expect(results.single.filename, 'user.md');
+    expect(results.single.description, '用户偏好');
+    expect(
+      results.single.toJson(),
+      containsPair('path', p.join(memoryRoot.path, 'user.md')),
+    );
+
+    final prompt = await buildMemoryPrompt(
+      memoryRoot: memoryRoot,
+      displayName: 'auto memory',
+      teamMode: true,
+      teamMemoryRoot: teamRoot,
+    );
+    expect(prompt, contains(memoryRoot.path));
+    expect(prompt, contains('用户偏好'));
+    expect(prompt, contains('团队约定'));
+    expect(prompt, contains('frontmatter'));
+    expect(prompt, contains('MEMORY.md 只是索引'));
+    expect(prompt, contains('从记忆给出建议前必须验证'));
+    expect(prompt, contains('非平凡实现任务的步骤和进度使用 update_plan'));
   });
 }
 

@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"ph01-experience-hub/internal/governance"
 )
 
 var (
@@ -21,9 +23,23 @@ var (
 )
 
 type PackageInfo struct {
-	Manifest    Manifest
-	PackageData []byte
-	RawPath     string
+	Manifest      Manifest
+	PackageData   []byte
+	PublisherData []byte
+	RatingsData   []byte
+	RawPath       string
+}
+
+type PublisherInfo struct {
+	SchemaVersion        string `json:"schema_version,omitempty"`
+	ExperienceID         string `json:"experience_id,omitempty"`
+	PackageHashAlgorithm string `json:"package_hash_algorithm,omitempty"`
+	PackageHash          string `json:"package_hash,omitempty"`
+	PublisherPubkey      string `json:"publisher_pubkey,omitempty"`
+	PublisherPubkeyHash  string `json:"publisher_pubkey_hash,omitempty"`
+	SignatureAlgorithm   string `json:"signature_algorithm,omitempty"`
+	Signature            string `json:"signature,omitempty"`
+	CreatedAt            string `json:"created_at,omitempty"`
 }
 
 func PackDir(dir string) ([]byte, error) {
@@ -121,9 +137,9 @@ func ReadPackageInfo(zipData []byte) (*PackageInfo, error) {
 		return nil, err
 	}
 	var (
-		packageData  []byte
-		hasPublisher bool
-		hasRatings   bool
+		packageData   []byte
+		publisherData []byte
+		ratingsData   []byte
 	)
 	for _, f := range r.File {
 		name := cleanZipName(f.Name)
@@ -139,18 +155,34 @@ func ReadPackageInfo(zipData []byte) (*PackageInfo, error) {
 				return nil, err
 			}
 		case "publisher.json":
-			hasPublisher = true
+			rc, err := f.Open()
+			if err != nil {
+				return nil, err
+			}
+			publisherData, err = io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				return nil, err
+			}
 		case "ratings.dat":
-			hasRatings = true
+			rc, err := f.Open()
+			if err != nil {
+				return nil, err
+			}
+			ratingsData, err = io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	if len(packageData) == 0 {
 		return nil, ErrMissingPackageZip
 	}
-	if !hasPublisher {
+	if len(publisherData) == 0 {
 		return nil, ErrMissingPublisherJSON
 	}
-	if !hasRatings {
+	if ratingsData == nil {
 		return nil, ErrMissingRatingsDat
 	}
 	if _, err := zip.NewReader(bytes.NewReader(packageData), int64(len(packageData))); err != nil {
@@ -163,6 +195,7 @@ func ReadPackageInfo(zipData []byte) (*PackageInfo, error) {
 	}
 	hash := sha256.Sum256(packageData)
 	hashHex := fmt.Sprintf("%x", hash[:])
+	publisher, _ := DecodePublisherInfo(publisherData)
 	if strings.TrimSpace(manifest.ExperienceID) == "" {
 		manifest.ExperienceID = "exp_" + hashHex[:16]
 	}
@@ -170,11 +203,91 @@ func ReadPackageInfo(zipData []byte) (*PackageInfo, error) {
 		manifest.Title = manifest.ExperienceID
 	}
 	manifest.ContentHash = hashHex
+	if strings.TrimSpace(manifest.PublisherPubkey) == "" {
+		manifest.PublisherPubkey = publisher.PublisherPubkey
+	}
 	return &PackageInfo{
-		Manifest:    manifest,
-		PackageData: packageData,
-		RawPath:     rawPath,
+		Manifest:      manifest,
+		PackageData:   packageData,
+		PublisherData: publisherData,
+		RatingsData:   ratingsData,
+		RawPath:       rawPath,
 	}, nil
+}
+
+func DecodePublisherInfo(data []byte) (PublisherInfo, error) {
+	var publisher PublisherInfo
+	if len(data) == 0 {
+		return publisher, ErrMissingPublisherJSON
+	}
+	if err := json.Unmarshal(data, &publisher); err != nil {
+		return publisher, err
+	}
+	return publisher, nil
+}
+
+func VerifyPublisherInfo(publisher PublisherInfo, packageHash string) error {
+	if strings.TrimSpace(publisher.ExperienceID) == "" {
+		return errors.New("publisher.json missing experience_id")
+	}
+	if publisher.PackageHashAlgorithm != "" && publisher.PackageHashAlgorithm != "sha256" {
+		return errors.New("publisher.json package_hash_algorithm unsupported")
+	}
+	if !strings.EqualFold(strings.TrimSpace(publisher.PackageHash), strings.TrimSpace(packageHash)) {
+		return errors.New("publisher.json package_hash does not match package.zip")
+	}
+	if strings.TrimSpace(publisher.PublisherPubkey) == "" {
+		return errors.New("publisher.json missing publisher_pubkey")
+	}
+	if publisher.SignatureAlgorithm != governance.Algorithm {
+		return errors.New("publisher.json signature_algorithm unsupported")
+	}
+	if strings.TrimSpace(publisher.Signature) == "" {
+		return errors.New("publisher.json missing signature")
+	}
+	payload := strings.Join([]string{
+		"ph01.experience.publisher.v1",
+		strings.TrimSpace(publisher.ExperienceID),
+		strings.TrimSpace(packageHash),
+		strings.TrimSpace(publisher.PublisherPubkey),
+		strings.TrimSpace(publisher.CreatedAt),
+	}, "\n")
+	if err := governance.Verify(publisher.PublisherPubkey, []byte(payload), publisher.Signature); err != nil {
+		return fmt.Errorf("verify publisher signature: %w", err)
+	}
+	return nil
+}
+
+func AddReviewMaterials(zipData, reviewMaterials []byte) ([]byte, error) {
+	info, err := ReadPackageInfo(zipData)
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, entry := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "package.zip", data: info.PackageData},
+		{name: "publisher.json", data: info.PublisherData},
+		{name: "ratings.dat", data: info.RatingsData},
+		{name: "review-materials.json", data: reviewMaterials},
+	} {
+		w, err := zw.Create(entry.name)
+		if err != nil {
+			_ = zw.Close()
+			return nil, err
+		}
+		if _, err := w.Write(entry.data); err != nil {
+			_ = zw.Close()
+			return nil, err
+		}
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func ExtractZip(zipData []byte, dest string) error {

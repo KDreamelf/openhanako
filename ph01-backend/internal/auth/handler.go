@@ -36,15 +36,25 @@ type Handler struct {
 
 	// 注册成功后同步 AI 网关账号。认证中心用户名直接作为 AI 网关用户名。
 	GatewaySyncer GatewayUserSyncer
+
+	// 用户 PoW 挑战缓存。挑战短期保存在内存/进程内，持久状态只写回公钥。
+	Pow *UserPowService
+
+	// 外部委托 PoW 挑战/证明缓存。状态只用于外部系统短期校验，不写用户持久状态。
+	DelegatedPow *DelegatedPowService
 }
 
 type GatewayUserSyncRequest struct {
-	PH01UserID uint64 `json:"ph01_user_id"`
-	Username   string `json:"username"`
-	Nickname   string `json:"nickname,omitempty"`
-	Email      string `json:"email,omitempty"`
-	Tier       string `json:"tier"`
-	PubkeyHash string `json:"pubkey_hash"`
+	PH01UserID    uint64 `json:"ph01_user_id"`
+	Username      string `json:"username"`
+	Nickname      string `json:"nickname,omitempty"`
+	Email         string `json:"email,omitempty"`
+	Tier          string `json:"tier"`
+	PubkeyHash    string `json:"pubkey_hash"`
+	PowVerified   bool   `json:"pow_verified,omitempty"`
+	PowAlgorithm  string `json:"pow_algorithm,omitempty"`
+	PowScore      int    `json:"pow_score,omitempty"`
+	PowVerifiedAt int64  `json:"pow_verified_at,omitempty"`
 }
 
 type GatewayChannelRevokeRequest struct {
@@ -81,6 +91,14 @@ func (h *Handler) Register(r *gin.RouterGroup) {
 	r.POST("/auth/verify_challenge_signature", h.HandleVerifyChallengeSignature)
 	r.POST("/auth/verify_pubkeys", h.HandleVerifyPubkeys)
 	r.POST("/auth/verify_pubkeys_at", h.HandleVerifyPubkeysAt)
+	r.POST("/auth/pow/challenge", h.HandleUserPowChallenge)
+	r.POST("/auth/pow/verify", h.HandleUserPowVerify)
+	r.POST("/auth/pow/delegated/challenge", h.HandleDelegatedPowChallenge)
+	r.GET("/auth/pow/delegated/challenge/:challenge_id", h.HandleDelegatedPowChallengeDetail)
+	r.POST("/auth/pow/delegated/verify", h.HandleDelegatedPowVerify)
+	r.POST("/auth/pow/delegated/status", h.HandleDelegatedPowStatus)
+	r.POST("/auth/pubkeys/status", h.HandlePubkeyStatus)
+	r.GET("/auth/user_state/changes", h.HandleUserStateChanges)
 }
 
 // HandleRegistrationEmailStart 处理 POST /auth/register_email/start。
@@ -172,12 +190,26 @@ func (h *Handler) HandleRegister(c *gin.Context) {
 			"email invalid")
 		return
 	}
+	if taken, err := h.UserStore.EmailExists(email); err != nil {
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	} else if taken {
+		errorJSON(c, http.StatusConflict, api.ErrEmailTaken, "")
+		return
+	}
 	if h.RegistrationEmail == nil {
 		errorJSON(c, http.StatusServiceUnavailable, api.ErrEmailNotConfigured, "registration email service not configured")
 		return
 	}
 	if err := h.RegistrationEmail.Verify(c.Request.Context(), payload.EmailChallengeID, payload.Username, email, payload.EmailCode); err != nil {
 		rfaErrorJSON(c, err)
+		return
+	}
+	if taken, err := h.UserStore.EmailExists(email); err != nil {
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	} else if taken {
+		errorJSON(c, http.StatusConflict, api.ErrEmailTaken, "")
 		return
 	}
 
@@ -566,7 +598,7 @@ func (h *Handler) HandleVerifySignature(c *gin.Context) {
 		})
 		return
 	}
-	u, _, err := h.UserStore.GetByPubkeyHash(verified.PubkeyHash)
+	u, pk, err := h.UserStore.GetByPubkeyHash(verified.PubkeyHash)
 	if err != nil {
 		c.JSON(http.StatusOK, api.VerifySignatureResponse{
 			Valid: false,
@@ -589,11 +621,15 @@ func (h *Handler) HandleVerifySignature(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, api.VerifySignatureResponse{
-		Valid:      true,
-		UserID:     u.ID,
-		Username:   u.Username,
-		Tier:       u.Tier,
-		PubkeyHash: verified.PubkeyHash,
+		Valid:         true,
+		UserID:        u.ID,
+		Username:      u.Username,
+		Tier:          u.Tier,
+		PubkeyHash:    verified.PubkeyHash,
+		PowVerified:   pk.PowVerified,
+		PowAlgorithm:  pk.PowAlgorithm,
+		PowScore:      pk.PowScore,
+		PowVerifiedAt: unixPtr(pk.PowVerifiedAt),
 	})
 }
 
@@ -632,11 +668,15 @@ func (h *Handler) HandleVerifyChallengeSignature(c *gin.Context) {
 	for _, pk := range u.Pubkeys {
 		if err := hcrypto.VerifySignature(pk.PubkeyHex, []byte(req.Challenge), req.SignatureHex); err == nil {
 			c.JSON(http.StatusOK, api.VerifySignatureResponse{
-				Valid:      true,
-				UserID:     u.ID,
-				Username:   u.Username,
-				Tier:       u.Tier,
-				PubkeyHash: pk.PubkeyHash,
+				Valid:         true,
+				UserID:        u.ID,
+				Username:      u.Username,
+				Tier:          u.Tier,
+				PubkeyHash:    pk.PubkeyHash,
+				PowVerified:   pk.PowVerified,
+				PowAlgorithm:  pk.PowAlgorithm,
+				PowScore:      pk.PowScore,
+				PowVerifiedAt: unixPtr(pk.PowVerifiedAt),
 			})
 			return
 		}
@@ -754,7 +794,372 @@ func (h *Handler) HandleVerifyPubkeysAt(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// HandleUserPowChallenge 创建用户 PoW 挑战。它只检查公钥存在，不改变登录/注册流程。
+func (h *Handler) HandleUserPowChallenge(c *gin.Context) {
+	var req api.UserPowChallengeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	hash, err := normalizePubkeyHash(req.PubkeyHash)
+	if err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "pubkey_hash invalid")
+		return
+	}
+	u, _, err := h.UserStore.GetByPubkeyHash(hash)
+	if err != nil {
+		errorJSON(c, http.StatusNotFound, api.ErrPubkeyNotFound, "")
+		return
+	}
+	if u.Disabled {
+		errorJSON(c, http.StatusForbidden, api.ErrUserDisabled, "")
+		return
+	}
+	resp, err := h.powService().Create(hash, timeNowUTC())
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// HandleUserPowVerify 校验 SignedRequest 中的 PoW 结果，并把状态写回公钥。
+func (h *Handler) HandleUserPowVerify(c *gin.Context) {
+	var req api.SignedRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	verified, err := h.Verifier.Verify(c.Request.Context(), &req)
+	if err != nil {
+		errorJSON(c, http.StatusUnauthorized, classifyVerifyErr(err), err.Error())
+		return
+	}
+	var payload api.UserPowVerifyPayload
+	if err := json.Unmarshal([]byte(verified.Payload), &payload); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	hash, err := normalizePubkeyHash(payload.PubkeyHash)
+	if err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "pubkey_hash invalid")
+		return
+	}
+	if !strings.EqualFold(hash, verified.PubkeyHash) {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "payload.pubkey_hash mismatch signed pubkey")
+		return
+	}
+	challenge, err := h.powService().Verify(payload, timeNowUTC())
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrPowChallengeNotFound) {
+			status = http.StatusNotFound
+		}
+		errorJSON(c, status, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	status, err := h.UserStore.MarkPubkeyPoWVerified(hash, challenge.Algorithm, UserPowScore(challenge), timeNowUTC())
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			errorJSON(c, http.StatusNotFound, api.ErrPubkeyNotFound, "")
+			return
+		}
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	}
+	if h.GatewaySyncer != nil {
+		_ = h.GatewaySyncer.SyncUser(c.Request.Context(), GatewayUserSyncRequest{
+			PH01UserID:    status.UserID,
+			Username:      status.Username,
+			Tier:          status.Tier,
+			PubkeyHash:    status.PubkeyHash,
+			PowVerified:   status.PowVerified,
+			PowAlgorithm:  status.PowAlgorithm,
+			PowScore:      status.PowScore,
+			PowVerifiedAt: unixPtr(status.PowVerifiedAt),
+		})
+	}
+	c.JSON(http.StatusOK, pubkeyStatusToAPI(status))
+}
+
+// HandleDelegatedPowChallenge 为外部系统创建通用委托 PoW 挑战。
+func (h *Handler) HandleDelegatedPowChallenge(c *gin.Context) {
+	var req api.DelegatedPowChallengeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	purpose, err := normalizeDelegatedPowPurpose(req.Purpose)
+	if err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "purpose invalid")
+		return
+	}
+	subjectHash, err := normalizeSHA256Hex(req.SubjectHash)
+	if err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "subject_hash invalid")
+		return
+	}
+	pubkeyHash := ""
+	if strings.TrimSpace(req.PubkeyHash) != "" {
+		hash, err := normalizePubkeyHash(req.PubkeyHash)
+		if err != nil {
+			errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "pubkey_hash invalid")
+			return
+		}
+		u, _, err := h.UserStore.GetByPubkeyHash(hash)
+		if err != nil {
+			errorJSON(c, http.StatusNotFound, api.ErrPubkeyNotFound, "")
+			return
+		}
+		if u.Disabled {
+			errorJSON(c, http.StatusForbidden, api.ErrUserDisabled, "")
+			return
+		}
+		pubkeyHash = hash
+	}
+	resp, err := h.delegatedPowService().Create(purpose, subjectHash, pubkeyHash, timeNowUTC())
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// HandleDelegatedPowChallengeDetail 让客户端通过 challenge_id 从认证中心取得具体计算参数。
+func (h *Handler) HandleDelegatedPowChallengeDetail(c *gin.Context) {
+	challengeID := strings.TrimSpace(c.Param("challenge_id"))
+	if challengeID == "" {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "challenge_id required")
+		return
+	}
+	challenge, ok := h.delegatedPowService().Challenge(challengeID, timeNowUTC())
+	if !ok {
+		errorJSON(c, http.StatusNotFound, api.ErrInvalidPayload, ErrPowChallengeNotFound.Error())
+		return
+	}
+	c.JSON(http.StatusOK, challenge)
+}
+
+// HandleDelegatedPowVerify 校验委托 PoW，并把结果留存在短期缓存中供外部系统查询。
+func (h *Handler) HandleDelegatedPowVerify(c *gin.Context) {
+	var req api.SignedRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	verified, err := h.Verifier.Verify(c.Request.Context(), &req)
+	if err != nil {
+		errorJSON(c, http.StatusUnauthorized, classifyVerifyErr(err), err.Error())
+		return
+	}
+	var payload api.DelegatedPowVerifyPayload
+	if err := json.Unmarshal([]byte(verified.Payload), &payload); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	purpose, err := normalizeDelegatedPowPurpose(payload.Purpose)
+	if err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "purpose invalid")
+		return
+	}
+	subjectHash, err := normalizeSHA256Hex(payload.SubjectHash)
+	if err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "subject_hash invalid")
+		return
+	}
+	hash := strings.TrimSpace(payload.PubkeyHash)
+	if hash == "" {
+		hash = verified.PubkeyHash
+	}
+	hash, err = normalizePubkeyHash(hash)
+	if err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "pubkey_hash invalid")
+		return
+	}
+	if !strings.EqualFold(hash, verified.PubkeyHash) {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "payload.pubkey_hash mismatch signed pubkey")
+		return
+	}
+	u, _, err := h.UserStore.GetByPubkeyHash(hash)
+	if err != nil {
+		errorJSON(c, http.StatusNotFound, api.ErrPubkeyNotFound, "")
+		return
+	}
+	if u.Disabled {
+		errorJSON(c, http.StatusForbidden, api.ErrUserDisabled, "")
+		return
+	}
+	payload.Purpose = purpose
+	payload.SubjectHash = subjectHash
+	payload.PubkeyHash = hash
+	status, err := h.delegatedPowService().Verify(payload, timeNowUTC())
+	if err != nil {
+		statusCode := http.StatusBadRequest
+		if errors.Is(err, ErrPowChallengeNotFound) {
+			statusCode = http.StatusNotFound
+		}
+		errorJSON(c, statusCode, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, status)
+}
+
+// HandleDelegatedPowStatus 给外部系统查询某个委托 PoW 是否已完成。
+func (h *Handler) HandleDelegatedPowStatus(c *gin.Context) {
+	var req api.DelegatedPowStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.ChallengeID) == "" {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "challenge_id required")
+		return
+	}
+	if strings.TrimSpace(req.Purpose) != "" {
+		purpose, err := normalizeDelegatedPowPurpose(req.Purpose)
+		if err != nil {
+			errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "purpose invalid")
+			return
+		}
+		req.Purpose = purpose
+	}
+	if strings.TrimSpace(req.SubjectHash) != "" {
+		subjectHash, err := normalizeSHA256Hex(req.SubjectHash)
+		if err != nil {
+			errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "subject_hash invalid")
+			return
+		}
+		req.SubjectHash = subjectHash
+	}
+	if strings.TrimSpace(req.PubkeyHash) != "" {
+		hash, err := normalizePubkeyHash(req.PubkeyHash)
+		if err != nil {
+			errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "pubkey_hash invalid")
+			return
+		}
+		req.PubkeyHash = hash
+	}
+	c.JSON(http.StatusOK, h.delegatedPowService().Status(req, timeNowUTC()))
+}
+
+// HandlePubkeyStatus 批量查询公钥状态，给经验网络握手时校验散花用户使用。
+func (h *Handler) HandlePubkeyStatus(c *gin.Context) {
+	var req api.PubkeyStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, err.Error())
+		return
+	}
+	if len(req.PubkeyHashes) == 0 {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "pubkey_hashes required")
+		return
+	}
+	if len(req.PubkeyHashes) > maxVerifyPubkeyItems {
+		errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "too many items")
+		return
+	}
+	statuses, err := h.UserStore.GetPubkeyStatuses(req.PubkeyHashes)
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	}
+	byHash := make(map[string]user.PubkeyStatus, len(statuses))
+	for _, status := range statuses {
+		byHash[status.PubkeyHash] = status
+	}
+	items := make([]api.UserPubkeyStatus, 0, len(req.PubkeyHashes))
+	seen := map[string]struct{}{}
+	for _, raw := range req.PubkeyHashes {
+		hash := strings.ToLower(strings.TrimSpace(raw))
+		if _, ok := seen[hash]; ok {
+			continue
+		}
+		seen[hash] = struct{}{}
+		if status, ok := byHash[hash]; ok {
+			items = append(items, pubkeyStatusToAPI(status))
+			continue
+		}
+		items = append(items, api.UserPubkeyStatus{Valid: false, PubkeyHash: hash})
+	}
+	c.JSON(http.StatusOK, api.PubkeyStatusResponse{Items: items})
+}
+
+// HandleUserStateChanges 供 AI 网关按时间戳拉取用户状态增量。
+func (h *Handler) HandleUserStateChanges(c *gin.Context) {
+	sinceUnix, _ := strconv.ParseInt(strings.TrimSpace(c.Query("since")), 10, 64)
+	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
+	var since time.Time
+	if sinceUnix > 0 {
+		since = time.Unix(sinceUnix, 0).UTC()
+	}
+	statuses, err := h.UserStore.ListPubkeyStatesSince(since, limit)
+	if err != nil {
+		errorJSON(c, http.StatusInternalServerError, api.ErrInternalError, err.Error())
+		return
+	}
+	items := make([]api.UserPubkeyStatus, 0, len(statuses))
+	nextSince := sinceUnix
+	for _, status := range statuses {
+		item := pubkeyStatusToAPI(status)
+		items = append(items, item)
+		if item.UpdatedAt > nextSince {
+			nextSince = item.UpdatedAt
+		}
+	}
+	c.JSON(http.StatusOK, api.UserStateChangesResponse{
+		Items:     items,
+		NextSince: nextSince,
+	})
+}
+
 // ----- helpers -----
+
+func (h *Handler) powService() *UserPowService {
+	if h.Pow == nil {
+		h.Pow = NewUserPowService()
+	}
+	return h.Pow
+}
+
+func (h *Handler) delegatedPowService() *DelegatedPowService {
+	if h.DelegatedPow == nil {
+		h.DelegatedPow = NewDelegatedPowService()
+	}
+	return h.DelegatedPow
+}
+
+func pubkeyStatusToAPI(status user.PubkeyStatus) api.UserPubkeyStatus {
+	return api.UserPubkeyStatus{
+		Valid:         status.Valid,
+		UserID:        status.UserID,
+		Username:      status.Username,
+		Tier:          status.Tier,
+		Disabled:      status.Disabled,
+		PubkeyHash:    status.PubkeyHash,
+		PowVerified:   status.PowVerified,
+		PowAlgorithm:  status.PowAlgorithm,
+		PowScore:      status.PowScore,
+		PowVerifiedAt: unixPtr(status.PowVerifiedAt),
+		UpdatedAt:     unixTime(status.UpdatedAt),
+	}
+}
+
+func unixPtr(t *time.Time) int64 {
+	if t == nil || t.IsZero() {
+		return 0
+	}
+	return t.UTC().Unix()
+}
+
+func unixTime(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UTC().Unix()
+}
+
+func timeNowUTC() time.Time {
+	return time.Now().UTC()
+}
 
 func errorJSON(c *gin.Context, status int, code, msg string) {
 	c.JSON(status, api.ErrorResponse{Error: code, Message: msg})
@@ -801,6 +1206,8 @@ func classifyRFAErr(err error) (int, string) {
 		return http.StatusBadRequest, api.ErrEmailVerificationRequired
 	case strings.Contains(err.Error(), api.ErrUsernameTaken):
 		return http.StatusConflict, api.ErrUsernameTaken
+	case strings.Contains(err.Error(), api.ErrEmailTaken):
+		return http.StatusConflict, api.ErrEmailTaken
 	case errors.Is(err, ErrRFAChallengeNotFound):
 		return http.StatusNotFound, api.ErrRFAChallengeNotFound
 	case errors.Is(err, ErrRFACodeExpired):
@@ -856,4 +1263,38 @@ func normalizePubkeyHash(hash string) (string, error) {
 		return "", err
 	}
 	return hash, nil
+}
+
+func normalizeSHA256Hex(hash string) (string, error) {
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	if len(hash) != 64 {
+		return "", errors.New("sha256 must be 64 hex chars")
+	}
+	if _, err := hex.DecodeString(hash); err != nil {
+		return "", err
+	}
+	return hash, nil
+}
+
+func normalizeDelegatedPowPurpose(purpose string) (string, error) {
+	purpose = strings.TrimSpace(purpose)
+	if purpose == "" || len(purpose) > 128 {
+		return "", errors.New("purpose required")
+	}
+	for _, ch := range purpose {
+		if ch >= 'a' && ch <= 'z' {
+			continue
+		}
+		if ch >= 'A' && ch <= 'Z' {
+			continue
+		}
+		if ch >= '0' && ch <= '9' {
+			continue
+		}
+		if ch == '.' || ch == '_' || ch == '-' || ch == ':' {
+			continue
+		}
+		return "", errors.New("purpose contains invalid characters")
+	}
+	return purpose, nil
 }

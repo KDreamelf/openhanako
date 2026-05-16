@@ -51,7 +51,7 @@ func SetApiRouter(router *gin.Engine) {
 		ph01Route := apiRouter.Group("/ph01")
 		{
 			ph01Route.GET("/auth/challenge", middleware.CriticalRateLimit(), controller.PH01CreateChallenge)
-			ph01Route.GET("/auth/challenge/:id/status", middleware.CriticalRateLimit(), controller.PH01ChallengeStatus)
+			ph01Route.GET("/auth/challenge/:id/status", controller.PH01ChallengeStatus)
 			ph01Route.POST("/auth/login", middleware.CriticalRateLimit(), controller.PH01Login)
 			ph01Route.POST("/auth/protocol/complete", middleware.CriticalRateLimit(), controller.PH01ProtocolComplete)
 			ph01Route.POST("/auth/pubkeys/verify", middleware.AdminAuth(), controller.PH01VerifyPubkeys)

@@ -45,9 +45,14 @@ func (s *Store) Init() error {
 		}
 	}
 	if _, err := os.Stat(s.indexPath()); os.IsNotExist(err) {
-		return s.writeIndex(Index{UpdatedAt: nowRFC3339(), Items: []IndexEntry{}})
+		if err := s.writeIndex(Index{UpdatedAt: nowRFC3339(), Items: []IndexEntry{}}); err != nil {
+			return err
+		}
 	}
-	return nil
+	if err := s.initDHTIndex(); err != nil {
+		return err
+	}
+	return s.initDHTTrustIndexes()
 }
 
 func (s *Store) ImportZip(zipData []byte, status string) (IndexEntry, error) {
@@ -253,7 +258,52 @@ func (s *Store) PackageBytes(id string) ([]byte, error) {
 	return os.ReadFile(s.packagePath(id))
 }
 
-func (s *Store) Review(id string, req ReviewRequest) (IndexEntry, error) {
+func (s *Store) ReviewedPackageBytes(id string) ([]byte, error) {
+	item, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	data, err := s.PackageBytes(id)
+	if err != nil {
+		return nil, err
+	}
+	if item.Status != StatusNetwork {
+		return data, nil
+	}
+	materials, err := s.ReviewMaterials(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return data, nil
+		}
+		return nil, err
+	}
+	return AddReviewMaterials(data, materials)
+}
+
+func (s *Store) PackageInfo(id string) (*PackageInfo, error) {
+	data, err := s.PackageBytes(id)
+	if err != nil {
+		return nil, err
+	}
+	return ReadPackageInfo(data)
+}
+
+func (s *Store) ReviewMaterials(id string) ([]byte, error) {
+	item, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if item.Status != StatusNetwork {
+		return nil, ErrNotFound
+	}
+	data, err := os.ReadFile(filepath.Join(s.root, filepath.FromSlash(item.Path), "review", "review-materials.json"))
+	if os.IsNotExist(err) {
+		return nil, ErrNotFound
+	}
+	return data, err
+}
+
+func (s *Store) Review(id string, req ReviewRequest, reviewMaterials []byte) (IndexEntry, error) {
 	if !idPattern.MatchString(id) {
 		return IndexEntry{}, ErrInvalidID
 	}
@@ -301,6 +351,11 @@ func (s *Store) Review(id string, req ReviewRequest) (IndexEntry, error) {
 	idx.UpdatedAt = nowRFC3339()
 	if err := s.writeReviewFile(newDir, req); err != nil {
 		return IndexEntry{}, err
+	}
+	if targetStatus == StatusNetwork && len(reviewMaterials) > 0 {
+		if err := s.writeReviewMaterialsFile(newDir, reviewMaterials); err != nil {
+			return IndexEntry{}, err
+		}
 	}
 	if err := s.writeIndex(idx); err != nil {
 		return IndexEntry{}, err
@@ -402,18 +457,32 @@ func (s *Store) writeReviewFile(dir string, req ReviewRequest) error {
 		return err
 	}
 	data, err := json.MarshalIndent(struct {
-		Status    string `json:"status"`
-		Reason    string `json:"reason,omitempty"`
-		UpdatedAt string `json:"updated_at"`
+		Status       string `json:"status"`
+		Reason       string `json:"reason,omitempty"`
+		ReviewMode   string `json:"review_mode,omitempty"`
+		ReviewedBy   string `json:"reviewed_by,omitempty"`
+		ReviewedRole string `json:"reviewed_role,omitempty"`
+		UpdatedAt    string `json:"updated_at"`
 	}{
-		Status:    req.Status,
-		Reason:    req.Reason,
-		UpdatedAt: nowRFC3339(),
+		Status:       req.Status,
+		Reason:       req.Reason,
+		ReviewMode:   req.ReviewMode,
+		ReviewedBy:   req.ReviewedBy,
+		ReviewedRole: req.ReviewedRole,
+		UpdatedAt:    nowRFC3339(),
 	}, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(reviewDir, "local-review.json"), data, 0o644)
+}
+
+func (s *Store) writeReviewMaterialsFile(dir string, data []byte) error {
+	reviewDir := filepath.Join(dir, "review")
+	if err := os.MkdirAll(reviewDir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(reviewDir, "review-materials.json"), data, 0o644)
 }
 
 func findEntry(items []IndexEntry, id string) (IndexEntry, bool) {

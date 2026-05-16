@@ -12,7 +12,6 @@ import 'package:path_provider/path_provider.dart';
 ///   agents/{id}/{config.yaml, identity.md, ishiki.md, sessions/, memory/, ...}
 ///   desk/{cron-jobs.json, cron-runs/}
 ///   models.json, auth.json
-///   channels/{id}.md
 ///   skills/
 class HanaHome {
   HanaHome._(this.root);
@@ -53,7 +52,6 @@ class HanaHome {
 
   Directory get userDir => _ensure(p.join(root.path, 'user'));
   Directory get agentsDir => _ensure(p.join(root.path, 'agents'));
-  Directory get channelsDir => _ensure(p.join(root.path, 'channels'));
   Directory get deskDir => _ensure(p.join(root.path, 'desk'));
   Directory get skillsDir => _ensure(p.join(root.path, 'skills'));
   Directory get logsDir => _ensure(p.join(root.path, 'logs'));

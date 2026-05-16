@@ -41,12 +41,16 @@ type VerifySignatureRequest struct {
 }
 
 type VerifySignatureResponse struct {
-	Valid      bool   `json:"valid"`
-	UserID     uint64 `json:"user_id,omitempty"`
-	Username   string `json:"username,omitempty"`
-	Tier       string `json:"tier,omitempty"`
-	PubkeyHash string `json:"pubkey_hash,omitempty"`
-	Error      string `json:"error,omitempty"`
+	Valid         bool   `json:"valid"`
+	UserID        uint64 `json:"user_id,omitempty"`
+	Username      string `json:"username,omitempty"`
+	Tier          string `json:"tier,omitempty"`
+	PubkeyHash    string `json:"pubkey_hash,omitempty"`
+	PowVerified   bool   `json:"pow_verified,omitempty"`
+	PowAlgorithm  string `json:"pow_algorithm,omitempty"`
+	PowScore      int    `json:"pow_score,omitempty"`
+	PowVerifiedAt int64  `json:"pow_verified_at,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 type VerifyChallengeSignatureRequest struct {

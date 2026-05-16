@@ -7,6 +7,8 @@ class WindowsOpsCapabilities {
   const WindowsOpsCapabilities({
     required this.sidecar,
     required this.screenCapture,
+    required this.inputMouse,
+    required this.inputKeyboard,
     required this.uiaTree,
     required this.uiaInvoke,
     required this.ocr,
@@ -19,6 +21,8 @@ class WindowsOpsCapabilities {
   }) : this(
          sidecar: false,
          screenCapture: false,
+         inputMouse: false,
+         inputKeyboard: false,
          uiaTree: false,
          uiaInvoke: false,
          ocr: false,
@@ -28,6 +32,8 @@ class WindowsOpsCapabilities {
 
   final bool sidecar;
   final bool screenCapture;
+  final bool inputMouse;
+  final bool inputKeyboard;
   final bool uiaTree;
   final bool uiaInvoke;
   final bool ocr;
@@ -35,11 +41,18 @@ class WindowsOpsCapabilities {
   final Map<String, String> unavailableReasons;
 
   bool get hasAnyTool =>
-      screenCapture || uiaTree || uiaInvoke || ocr || uiParsing;
+      screenCapture ||
+      inputMouse ||
+      inputKeyboard ||
+      uiaTree ||
+      uiaInvoke ||
+      ocr ||
+      uiParsing;
 
   List<String> get availableToolGroups {
     final groups = <String>[];
     if (screenCapture) groups.add('screen_capture');
+    if (inputMouse || inputKeyboard) groups.add('input');
     if (uiaTree || uiaInvoke) groups.add('uia');
     if (ocr) groups.add('ocr');
     if (uiParsing) groups.add('ui_parsing');
@@ -112,6 +125,22 @@ class WindowsOpsCapabilityProbe {
     if (!uiaInvoke && uiaTree) {
       reasons['uia.invoke'] = '边车未声明 UIA InvokePattern 能力';
     }
+    final inputMouse = _nestedBool(ping, const [
+      'capabilities',
+      'input',
+      'mouse',
+    ]);
+    final inputKeyboard = _nestedBool(ping, const [
+      'capabilities',
+      'input',
+      'keyboard',
+    ]);
+    if (!inputMouse) {
+      reasons['input.mouse'] = '边车未声明鼠标输入能力';
+    }
+    if (!inputKeyboard) {
+      reasons['input.keyboard'] = '边车未声明键盘输入能力';
+    }
 
     final ocr = await _probeOcr(ocrRoot, reasons);
     final uiParsing = await _probeUiParser(reasons);
@@ -119,6 +148,8 @@ class WindowsOpsCapabilityProbe {
     return WindowsOpsCapabilities(
       sidecar: true,
       screenCapture: screenCapture,
+      inputMouse: inputMouse,
+      inputKeyboard: inputKeyboard,
       uiaTree: uiaTree,
       uiaInvoke: uiaInvoke,
       ocr: ocr,

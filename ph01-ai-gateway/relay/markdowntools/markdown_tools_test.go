@@ -67,6 +67,128 @@ func TestApplyRequestConvertsNativeToolsToMarkdownProtocol(t *testing.T) {
 	}
 }
 
+func TestApplyRequestUnpacksFailedToolResultFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	stream := true
+	request := &dto.GeneralOpenAIRequest{
+		Model:  "gpt-4",
+		Stream: &stream,
+		Tools: []dto.ToolCallRequest{
+			{
+				Type: "function",
+				Function: dto.FunctionRequest{
+					Name:        "windows_uia_invoke",
+					Description: "Invoke a Windows UIA element",
+				},
+			},
+		},
+		Messages: []dto.Message{
+			{Role: "user", Content: "close the dialog"},
+			{
+				Role:    "assistant",
+				Content: "",
+				ToolCalls: json.RawMessage(`[
+					{"id":"call_1","type":"function","function":{"name":"windows_uia_invoke","arguments":"{\"name\":\"确定\"}"}}
+				]`),
+			},
+			{
+				Role:       "tool",
+				ToolCallId: "call_1",
+				Content:    `{"ok":false,"tool":"windows_uia_invoke","error":"windows_ops_failed","message":"uia_not_ready","details":"{\"selector\":{\"name\":\"OK\"},\"status\":\"failed\"}"}`,
+			},
+		},
+	}
+
+	if err := ApplyRequest(c, request); err != nil {
+		t.Fatalf("ApplyRequest returned error: %v", err)
+	}
+
+	if len(request.Messages) != 4 {
+		t.Fatalf("unexpected message count: %d", len(request.Messages))
+	}
+	converted := request.Messages[3].StringContent()
+	for _, want := range []string{
+		"# ok\nfalse",
+		"# error\nwindows_ops_failed",
+		"# message\nuia_not_ready",
+		"# details\n## selector\n### name\nOK",
+		"## status\nfailed",
+	} {
+		if !strings.Contains(converted, want) {
+			t.Fatalf("failed tool result field %q was not unpacked:\n%s", want, converted)
+		}
+	}
+	if strings.Contains(converted, "# status\nsuccess") {
+		t.Fatalf("tool result wrapper must not synthesize success:\n%s", converted)
+	}
+	if strings.Contains(converted, "\n# status\nfailed") {
+		t.Fatalf("tool result wrapper must not synthesize failed status:\n%s", converted)
+	}
+}
+
+func TestBuildPromptUsesHeadingStyleToolTemplates(t *testing.T) {
+	registry := BuildRegistry([]dto.ToolCallRequest{
+		{
+			Type: "function",
+			Function: dto.FunctionRequest{
+				Name:        "nested_tool",
+				Description: "带嵌套参数的工具",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"point": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"x": map[string]any{"type": "integer"},
+								"y": map[string]any{"type": "integer"},
+							},
+							"required": []any{"x"},
+						},
+					},
+					"required": []any{"point"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: dto.FunctionRequest{
+				Name:        "empty_tool",
+				Description: "没有结构化参数",
+				Parameters:  map[string]any{},
+			},
+		},
+	})
+
+	prompt := BuildPrompt(registry)
+	for _, want := range []string{
+		"Tool return conversion contract",
+		"工具调用协议：当前渠道启用了 Markdown AST 工具调用。",
+		"每个工具的调用模板都已在下方列出。",
+		"# nested_tool",
+		"## 调用模板",
+		"<----工具调用开始：nested_tool---->",
+		"# point",
+		"（object，必填）",
+		"## x",
+		"（integer，必填）",
+		"## y",
+		"（integer，非必填）",
+		"# empty_tool",
+		"（无参数）",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "parameter_name") || strings.Contains(prompt, "parameter value") || strings.Contains(prompt, "- 参数：无结构化 schema") {
+		t.Fatalf("prompt still contains legacy template text:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "```") {
+		t.Fatalf("prompt should not wrap tool templates in code fences:\n%s", prompt)
+	}
+}
+
 func TestParseToolCallsFromMarkdownAST(t *testing.T) {
 	registry := BuildRegistry([]dto.ToolCallRequest{
 		{
@@ -93,13 +215,17 @@ func TestParseToolCallsFromMarkdownAST(t *testing.T) {
 	calls, cleaned, ok := ParseToolCallsFromText(`先处理
 <----工具调用开始：run_command---->
 # command
+（string，非必填）
 git status --short
 
 # options
+（object，非必填）
 ## workdir
+（string，非必填）
 E:\CodeProgram\AI_Project\openhanako
 
 ## timeout
+（integer，非必填）
 30
 <----工具调用结束---->`, registry)
 

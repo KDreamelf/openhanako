@@ -10,7 +10,7 @@ import '../shared/yaml_io.dart';
 ///
 /// Skill 是一个文件夹，根目录有 `SKILL.md` 作为入口。SKILL.md 顶部 YAML
 /// frontmatter 描述 skill 的元信息，Markdown 主体是给模型阅读的 instructions。
-/// 文件夹内可放 scripts / resources，模型用通用工具（read_file / bash 等）按
+/// 文件夹内可放 scripts / resources，模型用通用工具（读取文件、执行命令等）按
 /// 需要读取并执行——SkillManager **不负责 "执行" skill**，只负责发现 + 解析 +
 /// 把可用列表注入 system prompt。
 ///
@@ -197,18 +197,17 @@ class SkillManager {
   }
 
   /// 把 enabled skills 列表格式化为 system prompt 段，让模型知道有哪些 skill
-  /// 可用、做什么、文件在哪。模型决定要用时自己 `read_file` 加载完整 SKILL.md。
+  /// 可用、做什么、文件在哪。模型决定要用时自己通过 `read_file` 读取完整 SKILL.md。
   ///
   /// 这是 Anthropic Agent Skills 推荐的"懒加载"模式——避免一次性把所有 skill
   /// 全文塞进 context。
   static String formatForPrompt(List<SkillSpec> skills) {
     if (skills.isEmpty) return '';
     final buf = StringBuffer()
-      ..writeln('## Available Skills')
+      ..writeln('## 可用 Skill')
       ..writeln()
       ..writeln(
-        'Read the SKILL.md file at the listed path to load the skill\'s '
-        'full instructions before using it.',
+        '使用某个 Skill 前，先通过 `read_file` 读取下方路径里的 SKILL.md 文件，加载该 Skill 的完整说明。',
       )
       ..writeln();
     for (final s in skills) {
@@ -216,15 +215,15 @@ class SkillManager {
         ..write('- **${s.name}**')
         ..write(s.displayName != s.name ? ' (${s.displayName})' : '')
         ..writeln(' — ${s.description}')
-        ..writeln('  path: `${s.filePath}`');
+        ..writeln('  路径：`${s.filePath}`');
       if (s.allowedTools.isNotEmpty) {
-        buf.writeln('  allowed tools: ${s.allowedTools.join(", ")}');
+        buf.writeln('  允许使用的工具：${s.allowedTools.join(", ")}');
       }
     }
     return buf.toString();
   }
 
-  /// 加载某个 skill 的完整 SKILL.md 内容（在 model 触发时由 read_file tool 调用，
+  /// 加载某个 skill 的完整 SKILL.md 内容（在 model 触发时由 read_file 读取，
   /// 这里也直接暴露一个 helper 用于内部需要的场景）。
   String? readSkillContent(String name, {String? agentId}) {
     final s = _allSkills.firstWhere(

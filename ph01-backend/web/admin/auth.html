@@ -38,6 +38,10 @@ button {
   border: 0;
   cursor: pointer;
 }
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
 input, select, textarea {
   width: 100%;
   border: 1px solid var(--line);
@@ -258,7 +262,7 @@ th {
   place-items: center;
 }
 .login-card {
-  width: min(760px, 100%);
+  width: min(860px, 100%);
   border-radius: 14px;
   padding: 28px;
 }
@@ -268,6 +272,31 @@ th {
 }
 .login-card p {
   margin: 0 0 18px;
+  color: var(--muted);
+}
+.login-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 0 18px;
+}
+.login-actions .inline {
+  flex-wrap: wrap;
+}
+.challenge-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -4px 0 12px;
+}
+details.legacy-login {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+details.legacy-login summary {
+  cursor: pointer;
   color: var(--muted);
 }
 .modal {
@@ -296,6 +325,18 @@ th {
   justify-content: space-between;
   padding: 16px 18px;
   border-bottom: 1px solid var(--line);
+}
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 18px;
+  border-top: 1px solid var(--line);
+}
+.muted-line {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 .pubkey {
   margin: 12px 0;
@@ -336,12 +377,41 @@ th {
   <main id="loginView" class="login-wrap">
     <section class="login-card">
       <h2>管理端登录</h2>
-      <p>粘贴由子体客户端生成的签名登录 JSON。</p>
+      <p>使用 PH01 子体授权进入认证中心。</p>
       <div id="loginToast" class="toast"></div>
-      <textarea id="loginJson" spellcheck="false" placeholder='{"payload":"{\"username\":\"root\"}","pubkey":"04...","signature":"...","timestamp":...,"nonce":"..."}'></textarea>
-      <div class="inline" style="margin-top:14px; justify-content:flex-end;">
-        <button id="loginBtn" class="btn">登录</button>
+      <div class="field">
+        <label>网页登录挑战码</label>
+        <textarea id="loginChallenge" class="mono" spellcheck="false" readonly></textarea>
       </div>
+      <div class="challenge-meta">
+        <span id="challengeState" class="badge">等待生成</span>
+        <span id="challengeExpire" class="badge">-</span>
+      </div>
+      <div class="login-actions">
+        <div class="inline">
+          <button id="refreshChallengeBtn" class="btn secondary">刷新挑战码</button>
+          <button id="copyChallengeBtn" class="btn secondary">复制挑战码</button>
+        </div>
+        <button id="protocolLoginBtn" class="btn">一键授权</button>
+      </div>
+
+      <div class="field">
+        <label>登录授权 JSON</label>
+        <textarea id="loginCode" spellcheck="false" placeholder='{"user_id":1,"nonce":"...","signature":"..."}'></textarea>
+      </div>
+      <div class="inline" style="margin-top:14px; justify-content:flex-end;">
+        <button id="loginCodeBtn" class="btn">使用登录码进入</button>
+      </div>
+
+      <details class="legacy-login">
+        <summary>旧 SignedRequest 登录</summary>
+        <div style="margin-top:12px;">
+          <textarea id="legacyLoginJson" spellcheck="false" placeholder='{"payload":"{\"username\":\"root\"}","pubkey":"04...","signature":"...","timestamp":...,"nonce":"..."}'></textarea>
+          <div class="inline" style="margin-top:14px; justify-content:flex-end;">
+            <button id="legacyLoginBtn" class="btn secondary">旧方式登录</button>
+          </div>
+        </div>
+      </details>
     </section>
   </main>
 
@@ -373,6 +443,7 @@ th {
                 <th>套餐</th>
                 <th>角色</th>
                 <th>公钥</th>
+                <th>工作量证明</th>
                 <th>状态</th>
                 <th>注册时间</th>
                 <th>操作</th>
@@ -482,21 +553,93 @@ th {
   </div>
 </div>
 
+<div id="userEditModal" class="modal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <strong id="userEditTitle">编辑用户</strong>
+      <button id="closeUserEditBtn" class="btn ghost">关闭</button>
+    </div>
+    <div class="panel-body">
+      <div id="userEditToast" class="toast"></div>
+      <div class="grid">
+        <div class="field">
+          <label>用户名</label>
+          <input id="userEditUsername" disabled />
+        </div>
+        <div class="field">
+          <label>账户昵称</label>
+          <input id="userEditNickname" maxlength="64" />
+        </div>
+        <div class="field">
+          <label>邮箱</label>
+          <input id="userEditEmail" placeholder="未绑定" />
+        </div>
+        <div class="field">
+          <label>套餐</label>
+          <select id="userEditTier">
+            <option value="free">free</option>
+            <option value="pro">pro</option>
+            <option value="enterprise">enterprise</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>角色</label>
+          <select id="userEditRole">
+            <option value="user">user</option>
+            <option value="admin">admin</option>
+            <option value="root" disabled>root</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>状态</label>
+          <select id="userEditDisabled">
+            <option value="false">活跃</option>
+            <option value="true">禁用</option>
+          </select>
+        </div>
+      </div>
+      <p id="userEditRoleHint" class="muted-line"></p>
+    </div>
+    <div class="modal-foot">
+      <button id="cancelUserEditBtn" class="btn ghost">取消</button>
+      <button id="saveUserEditBtn" class="btn">保存修改</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const state = {
   token: localStorage.getItem('auth_admin_token') || '',
   me: null,
+  challenge: null,
+  pollTimer: null,
+  protocolPollStartedAt: 0,
+  protocolPollAttempts: 0,
   users: [],
+  editingUserID: null,
   smtp: null,
   logs: [],
 };
+
+const protocolPollMaxMs = 60 * 1000;
+const protocolPollMaxIntervalMs = 5000;
+
+function nextProtocolPollDelay() {
+  const delay = Math.min(1500 + state.protocolPollAttempts * 500, protocolPollMaxIntervalMs);
+  state.protocolPollAttempts += 1;
+  return delay;
+}
 
 const els = {
   loginView: document.getElementById('loginView'),
   appView: document.getElementById('appView'),
   sessionBar: document.getElementById('sessionBar'),
   sessionUser: document.getElementById('sessionUser'),
-  loginJson: document.getElementById('loginJson'),
+  loginChallenge: document.getElementById('loginChallenge'),
+  challengeState: document.getElementById('challengeState'),
+  challengeExpire: document.getElementById('challengeExpire'),
+  loginCode: document.getElementById('loginCode'),
+  legacyLoginJson: document.getElementById('legacyLoginJson'),
   loginToast: document.getElementById('loginToast'),
   usersToast: document.getElementById('usersToast'),
   smtpToast: document.getElementById('smtpToast'),
@@ -506,6 +649,16 @@ const els = {
   pubkeyModal: document.getElementById('pubkeyModal'),
   pubkeyTitle: document.getElementById('pubkeyTitle'),
   pubkeyBody: document.getElementById('pubkeyBody'),
+  userEditModal: document.getElementById('userEditModal'),
+  userEditTitle: document.getElementById('userEditTitle'),
+  userEditToast: document.getElementById('userEditToast'),
+  userEditUsername: document.getElementById('userEditUsername'),
+  userEditNickname: document.getElementById('userEditNickname'),
+  userEditEmail: document.getElementById('userEditEmail'),
+  userEditTier: document.getElementById('userEditTier'),
+  userEditRole: document.getElementById('userEditRole'),
+  userEditDisabled: document.getElementById('userEditDisabled'),
+  userEditRoleHint: document.getElementById('userEditRoleHint'),
 };
 
 function escapeHTML(value) {
@@ -520,12 +673,7 @@ function setToast(id, msg, ok = false) {
   el.classList.toggle('ok', ok);
 }
 
-async function api(path, opts = {}) {
-  const headers = Object.assign({
-    'Content-Type': 'application/json',
-    'Authorization': 'Bearer ' + state.token,
-  }, opts.headers || {});
-  const resp = await fetch(path, Object.assign({}, opts, { headers }));
+async function parseResponse(resp) {
   const text = await resp.text();
   let data = {};
   if (text) {
@@ -539,6 +687,15 @@ async function api(path, opts = {}) {
   return data;
 }
 
+async function api(path, opts = {}) {
+  const headers = Object.assign({
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + state.token,
+  }, opts.headers || {});
+  const resp = await fetch(path, Object.assign({}, opts, { headers }));
+  return parseResponse(resp);
+}
+
 function showApp(show) {
   els.loginView.classList.toggle('hidden', show);
   els.appView.classList.toggle('hidden', !show);
@@ -548,13 +705,84 @@ function showApp(show) {
   }
 }
 
-async function login() {
+function formatUnixTime(value) {
+  if (!value) return '-';
+  const d = new Date(value * 1000);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function stopChallengePolling() {
+  if (state.pollTimer) {
+    clearTimeout(state.pollTimer);
+    state.pollTimer = null;
+  }
+  state.protocolPollStartedAt = 0;
+  state.protocolPollAttempts = 0;
+}
+
+function setLoginChallenge(data) {
+  state.challenge = data;
+  els.loginChallenge.value = data.challenge || '';
+  els.challengeState.textContent = data.challenge_id ? `挑战 ${data.challenge_id.slice(0, 10)}...` : '已生成';
+  els.challengeExpire.textContent = `过期 ${formatUnixTime(data.expires_at)}`;
+}
+
+async function refreshChallenge() {
+  stopChallengePolling();
+  setToast(els.loginToast, '');
+  try {
+    const resp = await fetch('/admin/session/challenge');
+    const data = await parseResponse(resp);
+    setLoginChallenge(data);
+    setToast(els.loginToast, '挑战码已刷新', true);
+  } catch (err) {
+    setToast(els.loginToast, err.message);
+  }
+}
+
+async function copyChallenge() {
+  if (!state.challenge?.challenge) {
+    await refreshChallenge();
+  }
+  if (!state.challenge?.challenge) return;
+  try {
+    await navigator.clipboard.writeText(state.challenge.challenge);
+    setToast(els.loginToast, '挑战码已复制', true);
+  } catch (err) {
+    setToast(els.loginToast, '复制失败：' + err.message);
+  }
+}
+
+async function submitLoginCode() {
   setToast(els.loginToast, '');
   let body;
   try {
-    body = JSON.parse(els.loginJson.value.trim());
+    body = JSON.parse(els.loginCode.value.trim());
   } catch (_) {
     setToast(els.loginToast, '登录 JSON 不是合法 JSON');
+    return;
+  }
+  try {
+    const resp = await fetch('/admin/session/login_code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await parseResponse(resp);
+    await acceptLogin(data);
+  } catch (err) {
+    setToast(els.loginToast, err.message);
+  }
+}
+
+async function legacyLogin() {
+  setToast(els.loginToast, '');
+  let body;
+  try {
+    body = JSON.parse(els.legacyLoginJson.value.trim());
+  } catch (_) {
+    setToast(els.loginToast, '旧登录 JSON 不是合法 JSON');
     return;
   }
   try {
@@ -563,20 +791,72 @@ async function login() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error((data.error || resp.status) + (data.message ? ': ' + data.message : ''));
-    state.token = data.token;
-    state.me = data.user;
-    localStorage.setItem('auth_admin_token', state.token);
-    showApp(true);
-    await Promise.all([loadUsers(), loadSMTP(), loadLogs()]);
+    const data = await parseResponse(resp);
+    await acceptLogin(data);
   } catch (err) {
     setToast(els.loginToast, err.message);
   }
 }
 
+async function acceptLogin(data) {
+  stopChallengePolling();
+  if (!data.token) throw new Error('认证中心未返回后台 session');
+  state.token = data.token;
+  state.me = data.user;
+  localStorage.setItem('auth_admin_token', state.token);
+  showApp(true);
+  await Promise.all([loadUsers(), loadSMTP(), loadLogs()]);
+}
+
+async function protocolLogin() {
+  setToast(els.loginToast, '');
+  if (!state.challenge?.protocol_url) {
+    await refreshChallenge();
+  }
+  if (!state.challenge?.protocol_url) return;
+  try {
+    window.location.href = state.challenge.protocol_url;
+    pollChallengeStatus(state.challenge.challenge_id);
+  } catch (err) {
+    setToast(els.loginToast, err.message);
+  }
+}
+
+async function pollChallengeStatus(challengeId) {
+  stopChallengePolling();
+  if (!challengeId) return;
+  state.protocolPollStartedAt = Date.now();
+  state.protocolPollAttempts = 0;
+  const poll = async () => {
+    if (state.protocolPollStartedAt && Date.now() - state.protocolPollStartedAt >= protocolPollMaxMs) {
+      stopChallengePolling();
+      els.challengeState.textContent = '等待登录码';
+      setToast(els.loginToast, '未检测到子体授权。请复制挑战码，在子体客户端生成登录码后粘贴到下方。');
+      return;
+    }
+    try {
+      const resp = await fetch(`/admin/session/challenge/${encodeURIComponent(challengeId)}/status`);
+      const data = await parseResponse(resp);
+      if (data.status === 'pending') {
+        els.challengeState.textContent = '等待子体授权';
+        state.pollTimer = setTimeout(poll, nextProtocolPollDelay());
+        return;
+      }
+      await acceptLogin(data);
+    } catch (err) {
+      stopChallengePolling();
+      setToast(els.loginToast, err.message);
+    }
+  };
+  els.challengeState.textContent = '等待子体授权';
+  state.pollTimer = setTimeout(poll, 900);
+}
+
 async function restoreSession() {
-  if (!state.token) return;
+  if (!state.token) {
+    await refreshChallenge();
+    return;
+  }
   try {
     state.me = await api('/admin/session/self');
     showApp(true);
@@ -587,10 +867,12 @@ async function restoreSession() {
 }
 
 function logout() {
+  stopChallengePolling();
   state.token = '';
   state.me = null;
   localStorage.removeItem('auth_admin_token');
   showApp(false);
+  refreshChallenge();
 }
 
 async function loadUsers() {
@@ -605,39 +887,27 @@ async function loadUsers() {
 }
 
 function renderUsers() {
-  const canSetRole = state.me && state.me.role === 'root';
   els.usersBody.innerHTML = state.users.map(u => {
-    const roleCell = canSetRole && u.role !== 'root'
-      ? `<select data-action="role" data-id="${u.id}">
-          <option value="user" ${u.role === 'user' ? 'selected' : ''}>user</option>
-          <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>admin</option>
-        </select>`
-      : `<span class="badge">${escapeHTML(u.role || 'user')}</span>`;
+    const protectedRoot = isProtectedRootUser(u);
+    const pow = userPowSummary(u);
     return `<tr>
       <td class="mono">${u.id}</td>
       <td><strong>${escapeHTML(u.username)}</strong></td>
-      <td>${escapeHTML(u.nickname)}</td>
-      <td>
-        <div class="inline">
-          <input class="email-input" data-email="${u.id}" value="${escapeHTML(u.email || '')}" placeholder="未绑定" />
-          <button class="btn secondary" data-action="email" data-id="${u.id}">保存</button>
-        </div>
-      </td>
-      <td>
-        <select data-action="tier" data-id="${u.id}">
-          <option value="free" ${u.tier === 'free' ? 'selected' : ''}>free</option>
-          <option value="pro" ${u.tier === 'pro' ? 'selected' : ''}>pro</option>
-          <option value="enterprise" ${u.tier === 'enterprise' ? 'selected' : ''}>enterprise</option>
-        </select>
-      </td>
-      <td>${roleCell}</td>
+      <td>${escapeHTML(u.nickname || '-')}</td>
+      <td>${escapeHTML(u.email || '-')}</td>
+      <td><span class="badge">${escapeHTML(u.tier || 'free')}</span></td>
+      <td><span class="badge">${escapeHTML(u.role || 'user')}</span></td>
       <td><button class="btn ghost" data-action="pubkeys" data-id="${u.id}">${(u.pubkeys || []).length}</button></td>
+      <td><span class="badge ${pow.verified ? 'ok' : ''}">${escapeHTML(pow.label)}</span></td>
       <td><span class="badge ${u.disabled ? 'danger' : 'ok'}">${u.disabled ? '已禁用' : '活跃'}</span></td>
       <td class="mono">${escapeHTML(u.created_at)}</td>
       <td>
-        <button class="btn ${u.disabled ? 'secondary' : 'danger'}" data-action="disabled" data-id="${u.id}">
-          ${u.disabled ? '启用' : '禁用'}
-        </button>
+        <div class="inline">
+          <button class="btn secondary" data-action="edit" data-id="${u.id}">编辑</button>
+          <button class="btn ${u.disabled || protectedRoot ? 'secondary' : 'danger'}" data-action="disabled" data-id="${u.id}" ${protectedRoot ? 'disabled title="root 用户不能禁用"' : ''}>
+            ${u.disabled ? '启用' : '禁用'}
+          </button>
+        </div>
       </td>
     </tr>`;
   }).join('');
@@ -653,18 +923,93 @@ async function patchUser(id, body) {
   renderUsers();
 }
 
+function isProtectedRootUser(u) {
+  return u && (u.role === 'root' || String(u.username || '').trim().toLowerCase() === 'root');
+}
+
+function canEditRole(u) {
+  return state.me && state.me.role === 'root' && !isProtectedRootUser(u);
+}
+
+function userPowSummary(u) {
+  const verified = (u.pubkeys || []).find(pk => !pk.revoked_at && pk.pow_verified);
+  if (!verified) return { verified: false, label: '未完成' };
+  const score = Number(verified.pow_score || 0);
+  return {
+    verified: true,
+    label: score > 0 ? `已完成 · ${score}bit` : '已完成',
+  };
+}
+
+function openUserEdit(id) {
+  const u = state.users.find(item => String(item.id) === String(id));
+  if (!u) return;
+  state.editingUserID = u.id;
+  setToast(els.userEditToast, '');
+  els.userEditTitle.textContent = `编辑用户 · ${u.username}`;
+  els.userEditUsername.value = u.username || '';
+  els.userEditNickname.value = u.nickname || '';
+  els.userEditEmail.value = u.email || '';
+  els.userEditTier.value = u.tier || 'free';
+  els.userEditRole.value = u.role === 'root' ? 'root' : (u.role === 'admin' ? 'admin' : 'user');
+  els.userEditDisabled.value = String(!!u.disabled);
+  els.userEditRole.disabled = !canEditRole(u);
+  els.userEditDisabled.disabled = isProtectedRootUser(u);
+  if (isProtectedRootUser(u)) {
+    els.userEditRoleHint.textContent = 'root 用户不能在这里降级或禁用。';
+  } else if (!state.me || state.me.role !== 'root') {
+    els.userEditRoleHint.textContent = '只有 root 可以修改管理员角色。';
+  } else {
+    els.userEditRoleHint.textContent = '角色修改会直接写入认证中心，保存后刷新仍会保留。';
+  }
+  els.userEditModal.classList.add('show');
+}
+
+function closeUserEdit() {
+  state.editingUserID = null;
+  els.userEditModal.classList.remove('show');
+}
+
+async function saveUserEdit() {
+  const id = state.editingUserID;
+  if (!id) return;
+  const body = {
+    nickname: els.userEditNickname.value.trim(),
+    email: els.userEditEmail.value.trim(),
+    tier: els.userEditTier.value,
+  };
+  if (!els.userEditRole.disabled) body.role = els.userEditRole.value;
+  if (!els.userEditDisabled.disabled) body.disabled = els.userEditDisabled.value === 'true';
+  try {
+    await patchUser(id, body);
+    closeUserEdit();
+    setToast(els.usersToast, '用户修改已保存', true);
+  } catch (err) {
+    setToast(els.userEditToast, err.message);
+  }
+}
+
 function openPubkeys(id) {
   const u = state.users.find(item => String(item.id) === String(id));
   if (!u) return;
   els.pubkeyTitle.textContent = `公钥列表 · ${u.username}`;
-  els.pubkeyBody.innerHTML = (u.pubkeys || []).map(pk => `<div class="pubkey">
+  els.pubkeyBody.innerHTML = (u.pubkeys || []).map(pk => {
+    const powAt = pk.pow_verified_at
+      ? new Date(Number(pk.pow_verified_at) * 1000).toLocaleString()
+      : '-';
+    const powLabel = pk.pow_verified
+      ? `已完成 · ${escapeHTML(pk.pow_algorithm || '-')} · ${Number(pk.pow_score || 0)}bit · ${escapeHTML(powAt)}`
+      : '未完成';
+    return `<div class="pubkey">
     <div class="inline" style="justify-content:space-between;">
       <span class="mono">#${pk.id} · ${escapeHTML(pk.created_at)}</span>
       <button class="btn danger" data-action="revoke" data-user="${u.id}" data-pk="${pk.id}">撤销</button>
     </div>
+    <div style="margin-top:8px;"><span class="badge ${pk.pow_verified ? 'ok' : ''}">工作量证明：${powLabel}</span></div>
     <div class="mono break" style="margin-top:8px;">Hash: ${escapeHTML(pk.pubkey_hash)}</div>
     <div class="mono break" style="margin-top:6px;">Hex: ${escapeHTML(pk.pubkey_hex || '')}</div>
-  </div>`).join('') || '<p>暂无公钥</p>';
+  </div>`;
+  }).join('') || '<p>暂无公钥</p>';
   els.pubkeyModal.classList.add('show');
 }
 
@@ -773,7 +1118,11 @@ function renderLogs() {
   </tr>`).join('');
 }
 
-document.getElementById('loginBtn').addEventListener('click', login);
+document.getElementById('refreshChallengeBtn').addEventListener('click', refreshChallenge);
+document.getElementById('copyChallengeBtn').addEventListener('click', copyChallenge);
+document.getElementById('protocolLoginBtn').addEventListener('click', protocolLogin);
+document.getElementById('loginCodeBtn').addEventListener('click', submitLoginCode);
+document.getElementById('legacyLoginBtn').addEventListener('click', legacyLogin);
 document.getElementById('logoutBtn').addEventListener('click', logout);
 document.getElementById('refreshUsersBtn').addEventListener('click', loadUsers);
 document.getElementById('refreshSMTPBtn').addEventListener('click', loadSMTP);
@@ -782,8 +1131,14 @@ document.getElementById('saveSMTPBtn').addEventListener('click', saveSMTP);
 document.getElementById('testSMTPBtn').addEventListener('click', testSMTP);
 document.getElementById('smtpTLSMode').addEventListener('change', () => syncSMTPPortWithMode(true));
 document.getElementById('closePubkeyBtn').addEventListener('click', () => els.pubkeyModal.classList.remove('show'));
+document.getElementById('closeUserEditBtn').addEventListener('click', closeUserEdit);
+document.getElementById('cancelUserEditBtn').addEventListener('click', closeUserEdit);
+document.getElementById('saveUserEditBtn').addEventListener('click', saveUserEdit);
 els.pubkeyModal.addEventListener('click', evt => {
   if (evt.target === els.pubkeyModal) els.pubkeyModal.classList.remove('show');
+});
+els.userEditModal.addEventListener('click', evt => {
+  if (evt.target === els.userEditModal) closeUserEdit();
 });
 
 document.querySelectorAll('[data-tab]').forEach(btn => {
@@ -794,30 +1149,16 @@ document.querySelectorAll('[data-tab]').forEach(btn => {
   });
 });
 
-els.usersBody.addEventListener('change', async evt => {
-  const target = evt.target;
-  const id = target.dataset.id;
-  if (!id) return;
-  try {
-    if (target.dataset.action === 'tier') await patchUser(id, { tier: target.value });
-    if (target.dataset.action === 'role') await patchUser(id, { role: target.value });
-  } catch (err) {
-    setToast(els.usersToast, err.message);
-  }
-});
-
 els.usersBody.addEventListener('click', async evt => {
   const target = evt.target.closest('[data-action]');
   if (!target) return;
   const id = target.dataset.id;
   const userItem = state.users.find(u => String(u.id) === String(id));
   try {
-    if (target.dataset.action === 'email') {
-      const input = document.querySelector(`[data-email="${id}"]`);
-      await patchUser(id, { email: input.value.trim() });
-    }
+    if (target.dataset.action === 'edit') openUserEdit(id);
     if (target.dataset.action === 'disabled' && userItem) {
       await patchUser(id, { disabled: !userItem.disabled });
+      setToast(els.usersToast, userItem.disabled ? '用户已启用' : '用户已禁用', true);
     }
     if (target.dataset.action === 'pubkeys') openPubkeys(id);
   } catch (err) {

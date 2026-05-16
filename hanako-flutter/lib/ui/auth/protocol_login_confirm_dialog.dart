@@ -19,12 +19,13 @@ class ProtocolLoginConfirmDialog extends StatelessWidget {
     final theme = Theme.of(context);
     final color = theme.colorScheme;
     final detail = request.detail;
+    final serviceLabel = detail.serviceLabel;
     return AlertDialog(
       title: const Row(
         children: [
           Icon(Icons.security),
           SizedBox(width: 10),
-          Text('AI 网关授权确认'),
+          Text('PH01 授权确认'),
         ],
       ),
       content: SizedBox(
@@ -35,7 +36,7 @@ class ProtocolLoginConfirmDialog extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                '网页正在请求使用你的 PH01 身份登录 AI 网关。',
+                '网页正在请求使用你的 PH01 身份登录$serviceLabel。',
                 style: theme.textTheme.bodyMedium,
               ),
               const SizedBox(height: 16),
@@ -44,11 +45,12 @@ class ProtocolLoginConfirmDialog extends StatelessWidget {
                   icon: Icons.gpp_bad_outlined,
                   color: color.error,
                   title: '已阻止不受信任的回调地址',
-                  message: '此请求不会被授权。请确认你是从官方 AI 网关页面发起登录。',
+                  message: '此请求不会被授权。请确认你是从可信页面发起登录。',
                 ),
                 const SizedBox(height: 16),
               ],
               _InfoRow(label: '本机账号', value: accountLabel),
+              _InfoRow(label: '登录目标', value: serviceLabel),
               _InfoRow(label: '请求站点', value: request.callbackOrigin),
               _InfoRow(
                 label: '请求 IP',

@@ -146,6 +146,33 @@ void main() {
       );
     });
 
+    test('认证中心管理端登录码沿用 PH01 challenge 签名格式', () {
+      final pair = HanakoKeyPair.generate();
+      final client = HanakoBackendClient();
+      final challenge = base64Url
+          .encode(
+            utf8.encode(
+              jsonEncode({
+                'version': 1,
+                'purpose': 'ph01_auth_admin_login',
+                'nonce': 'admin-login-nonce',
+              }),
+            ),
+          )
+          .replaceAll('=', '');
+      final loginCode = client.buildProtocolLoginCode(
+        keyPair: pair,
+        userId: 7,
+        challenge: challenge,
+      );
+      final body = jsonDecode(loginCode) as Map<String, dynamic>;
+      expect(body['user_id'], 7);
+      expect(body['nonce'], 'admin-login-nonce');
+      expect(body['signature'], isNotEmpty);
+      expect(body.containsKey('payload'), isFalse);
+      expect(body.containsKey('pubkey'), isFalse);
+    });
+
     test('AES-GCM 密文格式：分离的 (nonce, ciphertext, tag)', () {
       final aesKey = Uint8List(32);
       for (var i = 0; i < 32; i++) {

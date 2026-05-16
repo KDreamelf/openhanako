@@ -162,7 +162,7 @@ payload + "\n" + pubkey + "\n" + timestamp + "\n" + nonce
 
 **POST `/api/v1/auth/register_email/start`**
 
-公开接口，不要求签名。用户名预检可用后，子体先提交用户名和邮箱，请求认证中心发送注册验证码。
+公开接口，不要求签名。用户名预检可用后，子体先提交用户名和邮箱，请求认证中心发送注册验证码。服务端会在发码前检查邮箱是否已绑定；已绑定时返回 `409 email_taken`，不会发送验证码。
 
 请求：
 
@@ -220,9 +220,10 @@ Retry-After: 42
 
 1. 验证签名，确认客户端持有该公钥对应私钥。
 2. 检查 `payload.pubkey_hex == outer.pubkey`。
-3. 校验注册邮箱验证码，确认邮箱属于本次注册。
-4. 创建用户与第一把公钥。
-5. 返回身份摘要。
+3. 检查用户名与邮箱未被占用。
+4. 校验注册邮箱验证码，确认邮箱属于本次注册。
+5. 创建用户与第一把公钥。
+6. 返回身份摘要。
 
 响应：
 
@@ -527,6 +528,37 @@ AI 网关调用认证中心内部接口：
 - 验签成功返回 `user_id`、`username`、`tier`、`pubkey_hash`。
 - 用户不存在、被禁用、无有效公钥或签名不匹配时返回 `valid: false`。
 
+### 7.2 认证中心管理端登录挑战
+
+认证中心管理端复用 PH01 登录挑战格式，但 purpose 固定为 `ph01_auth_admin_login`。
+
+网页侧公开端点：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/admin/session/challenge` | 生成 base64url(JSON) challenge 与 `ph01://login` URL |
+| `POST` | `/admin/session/login_code` | 用户粘贴子体生成的授权 JSON，成功后直接返回管理端 session |
+| `POST` | `/admin/session/protocol/complete` | `ph01://login` 的 callback，成功后标记 challenge 已完成 |
+| `GET` | `/admin/session/challenge/:id/status` | 网页轮询协议登录结果，完成后返回管理端 session |
+
+客户端授权 JSON 与 AI 网关一致：
+
+```json
+{
+  "user_id": 12345,
+  "nonce": "random-nonce",
+  "signature": "deadbeef..."
+}
+```
+
+差异：
+
+- 管理端 challenge 的 callback path 是 `/admin/session/protocol/complete`。
+- 管理端 challenge 的 callback origin 固定使用认证中心公开基址，来自 `server "auth_gateway".public_base_url` 或默认官方域名 `https://auth.xn--lbtx0e.cn`，不能从请求 Host、来源头或反代内部地址推导。
+- 验签成功后，认证中心还必须校验用户角色是 `root` 或 `admin`。
+- 普通用户即使签名正确，也返回 `admin_required`。
+- 旧 `/admin/session/login` 的 `SignedRequest` 登录保留为兼容入口，不作为默认网页登录流程。
+
 ---
 
 ## 8. 短期通信通道（子体 ↔ ai-gateway）
@@ -614,6 +646,7 @@ AI 网关调用认证中心内部接口：
 | `user_disabled` | 403 | 用户被禁用 |
 | `user_not_found` | 404 | 用户名不存在 |
 | `username_taken` | 409 | 用户名已占用 |
+| `email_taken` | 409 | 邮箱已被其他账号绑定 |
 | `model_not_allowed` | 403 | 套餐不支持该模型 |
 | `rate_limit_exceeded` | 429 | 超出限流 |
 | `channel_expired` | 401 | 短期通信通道过期，需重新握手 |

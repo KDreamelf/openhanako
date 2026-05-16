@@ -605,6 +605,18 @@ void main() {
       },
     );
 
+    test('generateRegistrationPreview → 注册成功前不写入本机 vault', () async {
+      final preview = await repo.generateRegistrationPreview();
+      expect(preview.identity.mnemonic!.words.length, 12);
+      expect(preview.story, isNotEmpty);
+      expect(repo.current, isNull);
+      expect(await repo.hasSavedIdentity(), isFalse);
+
+      await repo.replaceCurrentIdentity(preview.identity, pin: '1234');
+      expect(repo.current!.publicKeyHash, preview.identity.publicKeyHash);
+      expect(await repo.hasSavedIdentity(), isTrue);
+    });
+
     test('verifyCurrentStory → 不退出登录也走恢复链路验证当前身份', () async {
       final reg = await repo.registerNew(pin: '1234');
       final originalHash = reg.identity.publicKeyHash;

@@ -15,21 +15,45 @@ const (
 )
 
 type PH01Identity struct {
-	Id           int    `json:"id"`
-	UserId       int    `json:"user_id" gorm:"uniqueIndex;not null"`
-	PH01UserID   uint64 `json:"ph01_user_id" gorm:"uniqueIndex;not null"`
-	PH01Username string `json:"ph01_username" gorm:"size:64;index"`
-	PubkeyHash   string `json:"pubkey_hash" gorm:"size:64;index"`
-	CreatedAt    int64  `json:"created_at" gorm:"autoCreateTime;column:created_at"`
-	UpdatedAt    int64  `json:"updated_at" gorm:"autoUpdateTime;column:updated_at"`
+	Id            int    `json:"id"`
+	UserId        int    `json:"user_id" gorm:"uniqueIndex;not null"`
+	PH01UserID    uint64 `json:"ph01_user_id" gorm:"uniqueIndex;not null"`
+	PH01Username  string `json:"ph01_username" gorm:"size:64;index"`
+	PubkeyHash    string `json:"pubkey_hash" gorm:"size:64;index"`
+	PowVerified   bool   `json:"pow_verified" gorm:"default:false;not null"`
+	PowAlgorithm  string `json:"pow_algorithm" gorm:"size:64"`
+	PowScore      int    `json:"pow_score" gorm:"default:0;not null"`
+	PowVerifiedAt int64  `json:"pow_verified_at"`
+	CreatedAt     int64  `json:"created_at" gorm:"autoCreateTime;column:created_at"`
+	UpdatedAt     int64  `json:"updated_at" gorm:"autoUpdateTime;column:updated_at"`
+}
+
+type PH01UserState struct {
+	PH01UserID    uint64
+	PH01Username  string
+	PubkeyHash    string
+	PowVerified   bool
+	PowAlgorithm  string
+	PowScore      int
+	PowVerifiedAt int64
 }
 
 func FindOrCreateUserFromPH01(ph01UserID uint64, ph01Username string, pubkeyHash string) (*User, *PH01Identity, error) {
+	return FindOrCreateUserFromPH01State(PH01UserState{
+		PH01UserID:   ph01UserID,
+		PH01Username: ph01Username,
+		PubkeyHash:   pubkeyHash,
+	})
+}
+
+func FindOrCreateUserFromPH01State(state PH01UserState) (*User, *PH01Identity, error) {
+	ph01UserID := state.PH01UserID
 	if ph01UserID == 0 {
 		return nil, nil, errors.New("ph01 user id is empty")
 	}
-	ph01Username = strings.TrimSpace(ph01Username)
-	pubkeyHash = strings.ToLower(strings.TrimSpace(pubkeyHash))
+	ph01Username := strings.TrimSpace(state.PH01Username)
+	pubkeyHash := strings.ToLower(strings.TrimSpace(state.PubkeyHash))
+	powAlgorithm := strings.TrimSpace(state.PowAlgorithm)
 
 	var user User
 	var identity PH01Identity
@@ -45,9 +69,17 @@ func FindOrCreateUserFromPH01(ph01UserID uint64, ph01Username string, pubkeyHash
 			}
 			identity.PH01Username = ph01Username
 			identity.PubkeyHash = pubkeyHash
+			identity.PowVerified = state.PowVerified
+			identity.PowAlgorithm = powAlgorithm
+			identity.PowScore = state.PowScore
+			identity.PowVerifiedAt = state.PowVerifiedAt
 			if err := tx.Model(&identity).Updates(map[string]any{
-				"ph01_username": ph01Username,
-				"pubkey_hash":   pubkeyHash,
+				"ph01_username":   ph01Username,
+				"pubkey_hash":     pubkeyHash,
+				"pow_verified":    state.PowVerified,
+				"pow_algorithm":   powAlgorithm,
+				"pow_score":       state.PowScore,
+				"pow_verified_at": state.PowVerifiedAt,
 			}).Error; err != nil {
 				return err
 			}
@@ -62,10 +94,14 @@ func FindOrCreateUserFromPH01(ph01UserID uint64, ph01Username string, pubkeyHash
 			return err
 		}
 		identity = PH01Identity{
-			UserId:       user.Id,
-			PH01UserID:   ph01UserID,
-			PH01Username: ph01Username,
-			PubkeyHash:   pubkeyHash,
+			UserId:        user.Id,
+			PH01UserID:    ph01UserID,
+			PH01Username:  ph01Username,
+			PubkeyHash:    pubkeyHash,
+			PowVerified:   state.PowVerified,
+			PowAlgorithm:  powAlgorithm,
+			PowScore:      state.PowScore,
+			PowVerifiedAt: state.PowVerifiedAt,
 		}
 		if err := tx.Create(&identity).Error; err != nil {
 			return err

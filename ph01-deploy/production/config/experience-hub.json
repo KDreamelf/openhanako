@@ -4,6 +4,13 @@
   "admin_token": "39263fb0a04db397e36bb740852badd2cfd93f479a2f841e3f9a6c99ee11722c",
   "cors_origins": ["https://experience.xn--lbtx0e.cn"],
   "max_upload_bytes": 536870912,
+  "review": {
+    "trust_admin_uploads": false
+  },
+  "auth_center": {
+    "base_url": "https://auth.xn--lbtx0e.cn",
+    "audience": "ph01-experience-hub"
+  },
   "governance": {
     "enabled": true,
     "root_certificate_path": "/etc/ph01/certs/experience-network/root-certificate.json",

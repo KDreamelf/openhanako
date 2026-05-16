@@ -8,7 +8,7 @@
 ; 产物：build/installers/phantasm_01_Setup-{version}.exe
 
 #define MyAppName "幻宙01"
-#define MyAppVersion "v0.0.1"
+#define MyAppVersion "v0.0.2"
 #define MyAppPublisher "湖北幻宙智能科技有限公司"
 #define MyAppURL "https://xn--lbtx0e.cn"
 #define MyAppDirName "phantasm_01"
@@ -34,8 +34,8 @@ VersionInfoCompany={#MyAppPublisher}
 VersionInfoCopyright=Copyright (C) 2026 {#MyAppPublisher}. All rights reserved.
 VersionInfoDescription={#MyAppName} 安装程序
 VersionInfoProductName={#MyAppName}
-VersionInfoProductVersion=0.0.1.0
-VersionInfoVersion=0.0.1.0
+VersionInfoProductVersion=0.0.2.0
+VersionInfoVersion=0.0.2.0
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern

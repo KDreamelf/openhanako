@@ -47,9 +47,22 @@ func main() {
 	handler := &hub.Handler{
 		Store:          store,
 		Governance:     governanceService,
+		AuthCenter:     cfg.AuthCenter,
+		Review:         cfg.Review,
+		DelegatedPow:   hub.HTTPDelegatedPowClient{},
 		AdminToken:     cfg.AdminToken,
 		CORSOrigins:    cfg.CORSOrigins,
 		MaxUploadBytes: cfg.MaxUploadBytes,
+	}
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	if cfg.ReviewChain.Enabled {
+		scheduler := &hub.ReviewChainScheduler{
+			Store:      store,
+			Governance: governanceService,
+			Config:     cfg.ReviewChain,
+		}
+		go scheduler.Run(runCtx)
 	}
 	srv := &http.Server{
 		Addr:    cfg.Listen,
@@ -67,6 +80,7 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 	log.Println("[info] shutting down...")
+	runCancel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
@@ -83,6 +97,9 @@ func loadConfig(path string) (*hub.Config, error) {
 	}
 	if cfg.AdminToken == "" {
 		cfg.AdminToken = os.Getenv("PH01_EXPERIENCE_HUB_TOKEN")
+	}
+	if cfg.AuthCenter.BaseURL == "" {
+		cfg.AuthCenter.BaseURL = os.Getenv("PH01_AUTH_CENTER_BASE_URL")
 	}
 	return &cfg, nil
 }

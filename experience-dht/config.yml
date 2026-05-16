@@ -1,0 +1,9 @@
+# experience-dht 本地调试配置
+# 正式部署包也使用同样的极简配置模型：这里只保留外部必须填写的字段。
+
+# HTTP API 监听地址。
+listen: ":8091"
+
+# 首次绑定密码。
+# 绑定后，后续 DHT 运行配置由客户端用账号公钥签名下发。
+init_password: "CHANGE_ME_DHT_INIT_PASSWORD"

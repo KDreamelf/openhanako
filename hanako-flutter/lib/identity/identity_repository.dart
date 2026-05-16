@@ -4,9 +4,9 @@
 // / 恢复 串成几个高层 API，让 UI 层（OnboardingPage / LoginPage）只面对
 // "注册一份新身份"、"用故事登录"、"加载已保存身份" 这几件事。
 //
-// 与未来用户后端的对接点：
-//   - registerNew() 完成后会调用 [PubkeyRegistrar.upload] 把新公钥上报；
-//     当前未实装，留 hook，本地先把身份写入平台 keystore。
+// 与用户后端的对接点：
+//   - generateRegistrationPreview() 只生成未落盘身份；服务端注册成功后，
+//     UI 再调用 replaceCurrentIdentity() 写入平台 keystore。
 //   - loginWithStory() 在 LLM 解析得到 12×K 矩阵后，进入 [Recovery] 按汉明
 //     距离搜索；目标公钥哈希集合通过 [setKnownPublicKeyHashes] 注入：
 //       离线自检：用本地 keystore 中已存身份的公钥哈希
@@ -149,33 +149,13 @@ class IdentityRepository {
   /// 注册：本地生成 ECDSA 密钥对、派生助记词、调 LLM 编故事、写入密钥库。
   ///
   Future<IdentityRegistration> registerNew({String? pin}) async {
-    final mnemonic = generateMnemonic();
-    final keyPair = HanakoKeyPair.fromPrivateKeyBytes(mnemonic.privateKeyBytes);
-
-    // LLM 故事生成（失败兜底，不阻塞主流程）。
-    final composition = await composer.compose(mnemonic.words);
-
-    // 私钥与助记词 ID 组落地存储；Windows 默认由 DPAPI 保护 vault DEK。
-    await keystore.writeVault(
-      IdentityVault(
-        privateKey: Uint8List.fromList(keyPair.privateKeyBytes),
-        mnemonicIds: mnemonic.words.map((word) => idByWord(word)!).toList(),
-        wordlistVersion: hanakoWordlistVersion,
-      ),
-      pin: pin,
-    );
-
-    final identity = HanakoIdentity(keyPair: keyPair, mnemonic: mnemonic);
-    _current = identity;
+    final registration = await generateRegistrationPreview();
+    await replaceCurrentIdentity(registration.identity, pin: pin);
 
     // TODO: 等用户后端就位后，这里把 keyPair.publicKeyHex 上报到 pubkey-service。
     //       现在先只在本地完成注册，子体可以离线运转。
 
-    return IdentityRegistration(
-      identity: identity,
-      story: composition.story,
-      fallback: composition.fallback,
-    );
+    return registration;
   }
 
   /// 解锁已保存的身份（Windows 走 DPAPI；旧文件 fallback 可传 PIN 迁移）。
@@ -210,11 +190,11 @@ class IdentityRepository {
     );
   }
 
-  /// 生成一份新的未落盘身份，用于密钥轮换预览。
+  /// 生成一份新的未落盘身份，用于注册预览。
   ///
   /// 该方法只生成新私钥、助记词和故事，不覆盖当前 vault。调用方必须先完成
-  /// 服务端轮换，再调用 [replaceCurrentIdentity] 持久化新身份。
-  Future<IdentityRegistration> generateReplacementIdentityPreview() async {
+  /// 服务端注册，再调用 [replaceCurrentIdentity] 持久化新身份。
+  Future<IdentityRegistration> generateRegistrationPreview() async {
     final mnemonic = generateMnemonic();
     final keyPair = HanakoKeyPair.fromPrivateKeyBytes(mnemonic.privateKeyBytes);
     final composition = await composer.compose(mnemonic.words);
@@ -223,6 +203,14 @@ class IdentityRepository {
       story: composition.story,
       fallback: composition.fallback,
     );
+  }
+
+  /// 生成一份新的未落盘身份，用于密钥轮换预览。
+  ///
+  /// 该方法只生成新私钥、助记词和故事，不覆盖当前 vault。调用方必须先完成
+  /// 服务端轮换，再调用 [replaceCurrentIdentity] 持久化新身份。
+  Future<IdentityRegistration> generateReplacementIdentityPreview() {
+    return generateRegistrationPreview();
   }
 
   /// 用新身份覆盖本机 vault，并把运行期当前身份切换到新身份。
