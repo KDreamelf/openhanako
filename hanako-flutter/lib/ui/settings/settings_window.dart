@@ -167,6 +167,23 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     );
   }
 
+  Future<void> _showSettingsNotice(String title, String message) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: SelectableText(message),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _saveThemeMode(String mode) async {
     final sp = await SharedPreferences.getInstance();
     await sp.setString(kPrefThemeMode, mode);
@@ -831,8 +848,10 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       final store = ExperienceStore(
         agentDir: eng.home.agentDir(eng.config.agentId),
       );
+      final remoteExperienceId =
+          item.reviewState?.effectiveRemoteExperienceId ?? item.experienceId;
       final materials = await client.fetchReviewMaterials(
-        experienceId: item.experienceId,
+        experienceId: remoteExperienceId,
         bearerToken: input.bearerToken,
       );
       final attached = await store.attachReviewMaterialsToPrivatePackage(
@@ -863,7 +882,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
         return;
       }
       final packageBytes = await client.fetchPackage(
-        experienceId: item.experienceId,
+        experienceId: remoteExperienceId,
         bearerToken: input.bearerToken,
       );
       final replaced = await store.replacePrivatePackageFromNetworkPackage(
@@ -879,6 +898,15 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       await _refresh();
     } catch (e) {
       if (!mounted) return;
+      if (_reviewMaterialsNotReady(e)) {
+        await _showSettingsNotice(
+          '审核签名暂不可取回',
+          '管理端尚未为该经验生成审核签名材料。'
+              '如果它处于待审状态，这是正常结果；审核通过后再取回即可。'
+              '\n\n服务端返回：${e.toString()}',
+        );
+        return;
+      }
       await _showSettingsError('同步审核签名失败', e);
     } finally {
       if (mounted) setState(() => _experienceSyncingId = null);
@@ -891,6 +919,20 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('只有本地私有经验需要提交审核')));
+      return;
+    }
+    final reviewState = item.reviewState;
+    if (reviewState?.pendingReview == true) {
+      await _showSettingsNotice(
+        '经验已提交',
+        '该经验已经提交审核，当前状态是“等待审核”。'
+            '为避免重复入队，客户端不会再次提交同一个本地经验包。'
+            '\n\n可以在审核通过后点击“取回审核签名”。',
+      );
+      return;
+    }
+    if (reviewState?.approved == true) {
+      await _showSettingsNotice('经验已通过审核', '该经验已经取回审核签名或处于网络通过状态，不需要重复提交。');
       return;
     }
     final input = await showDialog<_ExperienceSubmitInput>(
@@ -956,6 +998,16 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
           pubkeyHash: identity.keyPair.publicKeyHash,
         ),
         filename: '${item.experienceId}.hxp',
+      );
+      await store.recordReviewSubmission(
+        experienceId: item.experienceId,
+        remoteExperienceId: result.experienceId.isEmpty
+            ? item.experienceId
+            : result.experienceId,
+        status: result.status.isEmpty ? 'inbox' : result.status,
+        packageBytesSha256: package.packageBytesSha256,
+        packageHash: package.packageHash,
+        reviewReason: result.reviewReason,
       );
       if (result.approved) {
         try {
@@ -2172,12 +2224,19 @@ ${input.instructions.trim()}
   Widget _buildExperienceTile(ExperienceListItem item) {
     final metadataPath = p.join(item.path, 'content', 'metadata.json');
     final meta = item.metadata;
+    final reviewState = item.reviewState;
     final keywords = meta?.keywords.join(', ') ?? '';
     final syncing = _experienceSyncingId == item.experienceId;
     final submitting = _experienceSubmittingId == item.experienceId;
     final regenerating = _experienceRegeneratingId == item.experienceId;
     final subtitle = [
       item.scope.wireName,
+      if (reviewState != null) '审核状态：${reviewState.displayLabel}',
+      if (reviewState?.submittedAt.trim().isNotEmpty == true)
+        '提交时间：${reviewState!.submittedAt}',
+      if (reviewState?.remoteExperienceId.trim().isNotEmpty == true &&
+          reviewState!.remoteExperienceId != item.experienceId)
+        '管理端 ID：${reviewState.remoteExperienceId}',
       if (meta?.createdAt.trim().isNotEmpty == true) meta!.createdAt,
       if (keywords.isNotEmpty) keywords,
       metadataPath,
@@ -2242,7 +2301,11 @@ ${input.instructions.trim()}
                 ),
               if (item.scope == ExperienceScope.private)
                 IconButton(
-                  tooltip: '提交审核',
+                  tooltip: reviewState?.pendingReview == true
+                      ? '已提交审核，等待审核通过'
+                      : reviewState?.approved == true
+                      ? '已通过审核，不需要重复提交'
+                      : '提交审核',
                   icon: submitting
                       ? const SizedBox(
                           width: 18,
@@ -2254,7 +2317,8 @@ ${input.instructions.trim()}
                       _experienceSubmittingId == null &&
                           _experienceSyncingId == null &&
                           _experienceRegeneratingId == null &&
-                          _experienceRedactingId == null
+                          _experienceRedactingId == null &&
+                          reviewState?.submitted != true
                       ? () => _submitExperienceForReview(item)
                       : null,
                 ),
@@ -3602,6 +3666,13 @@ _SettingsErrorDetails _settingsErrorDetails(Object error) {
     return _SettingsErrorDetails(summary: error.toString(), body: body);
   }
   return _SettingsErrorDetails(summary: error.toString());
+}
+
+bool _reviewMaterialsNotReady(Object error) {
+  if (error is! ExperienceNetworkRequestException) return false;
+  if (error.statusCode != 404) return false;
+  final code = error.errorCode.trim().toLowerCase();
+  return code.isEmpty || code == 'not_found';
 }
 
 class _ExperiencePreviewData {

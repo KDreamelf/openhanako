@@ -644,6 +644,34 @@ void main() {
     );
   });
 
+  test('取回审核材料 404 会转为可识别的经验网络异常', () async {
+    final dio = Dio();
+    dio.httpClientAdapter = _InspectingAdapter((options, requestStream) async {
+      expect(options.method, 'GET');
+      expect(options.uri.path, '/api/v1/experiences/exp_1/review-materials');
+      return ResponseBody.fromString(
+        jsonEncode({'error': 'not_found', 'message': ''}),
+        404,
+        headers: {
+          Headers.contentTypeHeader: [Headers.jsonContentType],
+        },
+      );
+    });
+    final client = ExperienceNetworkManagerClient(
+      managerBaseUrl: 'https://experience.test/',
+      dio: dio,
+    );
+
+    await expectLater(
+      client.fetchReviewMaterials(experienceId: 'exp_1'),
+      throwsA(
+        isA<ExperienceNetworkRequestException>()
+            .having((e) => e.statusCode, 'statusCode', 404)
+            .having((e) => e.errorCode, 'errorCode', 'not_found'),
+      ),
+    );
+  });
+
   test('客户端普通用户提审使用 PH01 SignedRequest 上传经验包', () async {
     final keyPair = HanakoKeyPair.generate();
     final packageBytes = Uint8List.fromList([1, 2, 3, 4]);

@@ -79,6 +79,35 @@ void main() {
     expect(outer.findFile('ratings.dat'), isNotNull);
   });
 
+  test('提审后本地列表会保留待审状态用于禁止重复提交', () async {
+    final store = ExperienceStore(agentDir: tmp);
+    final saved = await store.savePrivateExperience(
+      title: '待审状态测试',
+      conversation: '原始内容\n',
+      now: DateTime.utc(2026, 5, 9, 1, 2, 3),
+    );
+
+    await store.recordReviewSubmission(
+      experienceId: saved.experienceId,
+      remoteExperienceId: 'remote_${saved.experienceId}',
+      status: 'inbox',
+      packageBytesSha256: 'a' * 64,
+      packageHash: 'b' * 64,
+      reviewReason: 'pending',
+      submittedAt: DateTime.utc(2026, 5, 9, 2, 0, 0),
+    );
+
+    final item = (await store.list(scope: ExperienceScope.private)).single;
+    expect(item.reviewState, isNotNull);
+    expect(item.reviewState!.pendingReview, true);
+    expect(item.reviewState!.submitted, true);
+    expect(
+      item.reviewState!.remoteExperienceId,
+      'remote_${saved.experienceId}',
+    );
+    expect(item.reviewState!.displayLabel, '已提交，等待审核');
+  });
+
   test('提审打包不会用程序规则脱敏内容', () async {
     final store = ExperienceStore(agentDir: tmp);
     final saved = await store.savePrivateExperience(

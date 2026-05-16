@@ -145,6 +145,39 @@ class ExperienceStore {
     return File(p.join(itemDir.path, 'review-materials.json')).exists();
   }
 
+  Future<void> recordReviewSubmission({
+    required String experienceId,
+    required String remoteExperienceId,
+    required String status,
+    required String packageBytesSha256,
+    required String packageHash,
+    String reviewReason = '',
+    DateTime? submittedAt,
+  }) async {
+    await init();
+    _validateExperienceId(experienceId);
+    final itemDir = _safeChild(privateDir, experienceId);
+    if (!await itemDir.exists()) {
+      throw StateError('本地私有经验不存在：$experienceId');
+    }
+    final now = (submittedAt ?? DateTime.now().toUtc()).toUtc();
+    await _writeReviewState(
+      itemDir,
+      ExperienceReviewState(
+        experienceId: experienceId,
+        remoteExperienceId: remoteExperienceId.trim().isEmpty
+            ? experienceId
+            : remoteExperienceId.trim(),
+        status: _normalizeReviewStateStatus(status),
+        submittedAt: now.toIso8601String(),
+        updatedAt: now.toIso8601String(),
+        packageBytesSha256: packageBytesSha256.trim().toLowerCase(),
+        packageHash: packageHash.trim().toLowerCase(),
+        reviewReason: reviewReason.trim(),
+      ),
+    );
+  }
+
   Future<ExperienceSaveResult> importRawDirectoryToPrivate({
     required Directory rawDir,
     DateTime? now,
@@ -320,6 +353,18 @@ class ExperienceStore {
       flush: true,
     );
     await cacheFile.writeAsBytes(hxpBytes, flush: true);
+    await _writeReviewState(
+      itemDir,
+      ExperienceReviewState(
+        experienceId: experienceId,
+        remoteExperienceId: info.publisher.experienceId,
+        status: 'network',
+        submittedAt: (await _tryReadReviewState(itemDir))?.submittedAt ?? '',
+        updatedAt: DateTime.now().toUtc().toIso8601String(),
+        packageHash: info.publisher.packageHash,
+        reviewReason: '审核材料已附加',
+      ),
+    );
     return ExperienceReviewAttachResult.success(
       experienceId: experienceId,
       cachePath: cacheFile.path,
@@ -375,6 +420,17 @@ class ExperienceStore {
     await _extractZip(info.packageBytes, contentDir);
     final cachePath = p.join(cacheDir.path, '$id.hxp');
     await File(cachePath).writeAsBytes(hxpBytes, flush: true);
+    await _writeReviewState(
+      itemDir,
+      ExperienceReviewState(
+        experienceId: id,
+        remoteExperienceId: id,
+        status: 'network',
+        updatedAt: DateTime.now().toUtc().toIso8601String(),
+        packageHash: info.publisher.packageHash,
+        reviewReason: '完整包已通过审核',
+      ),
+    );
     return ExperienceReviewAttachResult.success(
       experienceId: id,
       cachePath: cachePath,
@@ -478,6 +534,11 @@ class ExperienceStore {
             title: metadata?.title ?? id,
             path: entity.path,
             metadata: metadata,
+            reviewState: await _effectiveReviewState(
+              entity,
+              id: id,
+              scope: currentScope,
+            ),
           ),
         );
       }
@@ -613,6 +674,50 @@ class ExperienceStore {
     }
   }
 
+  Future<ExperienceReviewState?> _effectiveReviewState(
+    Directory itemDir, {
+    required String id,
+    required ExperienceScope scope,
+  }) async {
+    final explicit = await _tryReadReviewState(itemDir);
+    if (explicit != null) return explicit;
+    if (scope == ExperienceScope.network ||
+        await File(p.join(itemDir.path, 'review-materials.json')).exists()) {
+      return ExperienceReviewState(
+        experienceId: id,
+        remoteExperienceId: id,
+        status: 'network',
+        updatedAt: DateTime.now().toUtc().toIso8601String(),
+      );
+    }
+    return null;
+  }
+
+  Future<ExperienceReviewState?> _tryReadReviewState(Directory itemDir) async {
+    final file = File(p.join(itemDir.path, 'review-state.json'));
+    if (!await file.exists()) return null;
+    try {
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is Map<String, dynamic>) {
+        return ExperienceReviewState.fromJson(decoded);
+      }
+      if (decoded is Map) {
+        return ExperienceReviewState.fromJson(decoded.cast<String, dynamic>());
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<void> _writeReviewState(
+    Directory itemDir,
+    ExperienceReviewState state,
+  ) async {
+    await File(p.join(itemDir.path, 'review-state.json')).writeAsString(
+      const JsonEncoder.withIndent('  ').convert(state.toJson()),
+      flush: true,
+    );
+  }
+
   Future<void> _deletePrivatePackageArtifacts(
     String experienceId,
     Directory itemDir,
@@ -621,6 +726,7 @@ class ExperienceStore {
       p.join(itemDir.path, 'package.zip'),
       p.join(itemDir.path, 'publisher.json'),
       p.join(itemDir.path, 'ratings.dat'),
+      p.join(itemDir.path, 'review-state.json'),
       p.join(cacheDir.path, '$experienceId.hxp'),
     ]) {
       final file = File(path);
@@ -1279,6 +1385,20 @@ String? _normalizeOptionalString(String? value) {
   return normalized;
 }
 
+String _normalizeReviewStateStatus(String status) {
+  final value = status.trim().toLowerCase();
+  return switch (value) {
+    'approved' => 'network',
+    'pending' => 'inbox',
+    'pending_review' => 'inbox',
+    'reviewing' => 'inbox',
+    'network' => 'network',
+    'inbox' => 'inbox',
+    'rejected' => 'rejected',
+    _ => value,
+  };
+}
+
 String _requireNonEmpty(String value, String fieldName) {
   final normalized = value.trim();
   if (normalized.isEmpty) {
@@ -1688,6 +1808,7 @@ class ExperienceListItem {
     required this.title,
     required this.path,
     this.metadata,
+    this.reviewState,
   });
 
   final String experienceId;
@@ -1695,6 +1816,7 @@ class ExperienceListItem {
   final String title;
   final String path;
   final ExperienceMetadata? metadata;
+  final ExperienceReviewState? reviewState;
 
   Map<String, dynamic> toJson() => {
     'experience_id': experienceId,
@@ -1702,7 +1824,78 @@ class ExperienceListItem {
     'title': title,
     'path': path,
     if (metadata != null) 'metadata': metadata!.toJson(),
+    if (reviewState != null) 'review_state': reviewState!.toJson(),
   };
+}
+
+class ExperienceReviewState {
+  const ExperienceReviewState({
+    this.schemaVersion = 'ph01.experience.local_review_state.v1',
+    required this.experienceId,
+    this.remoteExperienceId = '',
+    this.status = '',
+    this.submittedAt = '',
+    this.updatedAt = '',
+    this.packageBytesSha256 = '',
+    this.packageHash = '',
+    this.reviewReason = '',
+  });
+
+  final String schemaVersion;
+  final String experienceId;
+  final String remoteExperienceId;
+  final String status;
+  final String submittedAt;
+  final String updatedAt;
+  final String packageBytesSha256;
+  final String packageHash;
+  final String reviewReason;
+
+  bool get submitted => status == 'inbox' || status == 'network';
+  bool get pendingReview => status == 'inbox';
+  bool get approved => status == 'network';
+
+  String get effectiveRemoteExperienceId =>
+      remoteExperienceId.trim().isEmpty ? experienceId : remoteExperienceId;
+
+  String get displayLabel => switch (status) {
+    'network' => '已通过审核',
+    'inbox' => '已提交，等待审核',
+    'rejected' => '审核未通过',
+    _ => status.trim().isEmpty ? '未提交' : status,
+  };
+
+  Map<String, dynamic> toJson() => {
+    'schema_version': schemaVersion,
+    'experience_id': experienceId,
+    if (remoteExperienceId.trim().isNotEmpty)
+      'remote_experience_id': remoteExperienceId.trim(),
+    if (status.trim().isNotEmpty) 'status': status.trim(),
+    if (submittedAt.trim().isNotEmpty) 'submitted_at': submittedAt.trim(),
+    if (updatedAt.trim().isNotEmpty) 'updated_at': updatedAt.trim(),
+    if (packageBytesSha256.trim().isNotEmpty)
+      'package_bytes_sha256': packageBytesSha256.trim(),
+    if (packageHash.trim().isNotEmpty) 'package_hash': packageHash.trim(),
+    if (reviewReason.trim().isNotEmpty) 'review_reason': reviewReason.trim(),
+  };
+
+  static ExperienceReviewState? fromJson(Map<String, dynamic> json) {
+    final id = json['experience_id']?.toString().trim() ?? '';
+    if (id.isEmpty) return null;
+    return ExperienceReviewState(
+      schemaVersion:
+          json['schema_version']?.toString() ??
+          'ph01.experience.local_review_state.v1',
+      experienceId: id,
+      remoteExperienceId: json['remote_experience_id']?.toString() ?? '',
+      status: _normalizeReviewStateStatus(json['status']?.toString() ?? ''),
+      submittedAt: json['submitted_at']?.toString() ?? '',
+      updatedAt: json['updated_at']?.toString() ?? '',
+      packageBytesSha256: json['package_bytes_sha256']?.toString() ?? '',
+      packageHash: json['package_hash']?.toString() ?? '',
+      reviewReason: json['review_reason']?.toString() ?? '',
+    );
+  }
 }
 
 class _OuterPackageInfo {

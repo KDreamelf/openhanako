@@ -1643,13 +1643,18 @@ class ExperienceNetworkManagerClient {
         'must not be empty',
       );
     }
-    final resp = await _dio.getUri<Map<String, dynamic>>(
-      Uri.parse('$managerBaseUrl/api/v1/experiences/$id/review-materials'),
-      options: Options(
-        contentType: Headers.jsonContentType,
-        headers: _authHeaders(bearerToken),
-      ),
-    );
+    late final Response<Map<String, dynamic>> resp;
+    try {
+      resp = await _dio.getUri<Map<String, dynamic>>(
+        Uri.parse('$managerBaseUrl/api/v1/experiences/$id/review-materials'),
+        options: Options(
+          contentType: Headers.jsonContentType,
+          headers: _authHeaders(bearerToken),
+        ),
+      );
+    } on DioException catch (e) {
+      throw _experienceNetworkException(e, '取回审核签名失败');
+    }
     final data = resp.data;
     if (data == null) {
       throw StateError('管理端未返回审核签名材料');
@@ -1669,13 +1674,18 @@ class ExperienceNetworkManagerClient {
         'must not be empty',
       );
     }
-    final resp = await _dio.getUri<List<int>>(
-      Uri.parse('$managerBaseUrl/api/v1/experiences/$id/package'),
-      options: Options(
-        responseType: ResponseType.bytes,
-        headers: _authHeaders(bearerToken),
-      ),
-    );
+    late final Response<List<int>> resp;
+    try {
+      resp = await _dio.getUri<List<int>>(
+        Uri.parse('$managerBaseUrl/api/v1/experiences/$id/package'),
+        options: Options(
+          responseType: ResponseType.bytes,
+          headers: _authHeaders(bearerToken),
+        ),
+      );
+    } on DioException catch (e) {
+      throw _experienceNetworkException(e, '下载完整经验包失败');
+    }
     final data = resp.data;
     if (data == null || data.isEmpty) {
       throw StateError('管理端未返回完整经验包');
