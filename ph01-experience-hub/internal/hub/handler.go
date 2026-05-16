@@ -460,6 +460,20 @@ func (h *Handler) handleExperiencePackagePowChallenge(w http.ResponseWriter, r *
 		writeError(w, http.StatusBadRequest, "invalid_payload", err.Error())
 		return
 	}
+	if experienceID := strings.TrimSpace(req.ExperienceID); experienceID != "" {
+		if !idPattern.MatchString(experienceID) {
+			writeError(w, http.StatusBadRequest, "invalid_payload", "experience_id invalid")
+			return
+		}
+		if existing, err := h.Store.Get(experienceID); err == nil {
+			writeDuplicateExperienceEntry(w, existing)
+			return
+		} else if !errors.Is(err, ErrNotFound) {
+			status, code := classifyStoreErr(err)
+			writeError(w, status, code, err.Error())
+			return
+		}
+	}
 	packageSHA256, err := normalizeHex64(req.PackageSHA256)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_payload", "package_sha256 invalid")
@@ -529,7 +543,9 @@ func (h *Handler) handleExperienceUpload(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	principal := uploadPrincipal{AuthorizedHubAdmin: hubAdminUpload}
-	if !signedUpload && !hubAdminUpload {
+	if signedUpload {
+		principal = h.signedUploadPrincipal(r, signedPubkeyHash)
+	} else if !hubAdminUpload {
 		var ok bool
 		principal, ok = h.authCenterUploadPrincipal(r)
 		if !ok {
@@ -552,6 +568,9 @@ func (h *Handler) handleExperienceUpload(w http.ResponseWriter, r *http.Request)
 		}
 		entry, err := h.Store.ImportZip(data, StatusInbox)
 		if err != nil {
+			if writeDuplicateExperienceUpload(w, err) {
+				return
+			}
 			statusCode, code := classifyStoreErr(err)
 			writeError(w, statusCode, code, err.Error())
 			return
@@ -586,6 +605,9 @@ func (h *Handler) handleExperienceUpload(w http.ResponseWriter, r *http.Request)
 
 	entry, err := h.Store.ImportZip(data, status)
 	if err != nil {
+		if writeDuplicateExperienceUpload(w, err) {
+			return
+		}
 		statusCode, code := classifyStoreErr(err)
 		writeError(w, statusCode, code, err.Error())
 		return
@@ -874,6 +896,30 @@ func (h *Handler) authCenterUploadPrincipal(r *http.Request) (uploadPrincipal, b
 	}, true
 }
 
+func (h *Handler) signedUploadPrincipal(r *http.Request, pubkeyHash string) uploadPrincipal {
+	hash := strings.ToLower(strings.TrimSpace(pubkeyHash))
+	if !h.Review.TrustAdminUploads || hash == "" {
+		return uploadPrincipal{}
+	}
+	statuses, err := FetchAuthCenterPubkeyStatuses(r.Context(), h.AuthCenter, []string{hash})
+	if err != nil {
+		return uploadPrincipal{}
+	}
+	status, ok := statuses[hash]
+	if !ok || !status.Valid || !status.HasAdminRole() {
+		return uploadPrincipal{}
+	}
+	reviewedBy := strings.TrimSpace(status.Username)
+	if reviewedBy == "" && status.UserID > 0 {
+		reviewedBy = strconv.FormatUint(status.UserID, 10)
+	}
+	return uploadPrincipal{
+		TrustedAdmin: h.Review.TrustAdminUploads,
+		ReviewedBy:   reviewedBy,
+		ReviewedRole: strings.ToLower(strings.TrimSpace(status.Role)),
+	}
+}
+
 func (h *Handler) adminVerifier() AuthCenterAdminVerifier {
 	if h.AdminVerifier != nil {
 		return h.AdminVerifier
@@ -932,6 +978,8 @@ func (h *Handler) writeCORS(w http.ResponseWriter) {
 
 func classifyStoreErr(err error) (int, string) {
 	switch {
+	case errors.Is(err, ErrDuplicateExperience):
+		return http.StatusConflict, "experience_already_submitted"
 	case errors.Is(err, ErrNotFound):
 		return http.StatusNotFound, "experience_not_found"
 	case errors.Is(err, ErrInvalidID), errors.Is(err, ErrInvalidStatus),
@@ -971,6 +1019,30 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, ErrorResponse{Error: code, Message: message})
+}
+
+func writeDuplicateExperienceUpload(w http.ResponseWriter, err error) bool {
+	var duplicate *DuplicateExperienceError
+	if !errors.As(err, &duplicate) {
+		return false
+	}
+	writeDuplicateExperienceEntry(w, duplicate.Entry)
+	return true
+}
+
+func writeDuplicateExperienceEntry(w http.ResponseWriter, entry IndexEntry) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":             "experience_already_submitted",
+		"message":           "experience already submitted",
+		"already_submitted": true,
+		"experience_id":     entry.ExperienceID,
+		"title":             entry.Title,
+		"status":            entry.Status,
+		"path":              entry.Path,
+		"package_path":      entry.PackagePath,
+		"content_hash":      entry.ContentHash,
+		"review_reason":     entry.ReviewReason,
+	})
 }
 
 func contentTypeFor(path string) string {

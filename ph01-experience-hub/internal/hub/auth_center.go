@@ -30,6 +30,10 @@ type AuthCenterAdmin struct {
 
 type AuthCenterPubkeyStatus struct {
 	Valid       bool   `json:"valid"`
+	UserID      uint64 `json:"user_id,omitempty"`
+	Username    string `json:"username,omitempty"`
+	Role        string `json:"role,omitempty"`
+	IsAdmin     bool   `json:"is_admin,omitempty"`
 	PubkeyHash  string `json:"pubkey_hash"`
 	PowVerified bool   `json:"pow_verified"`
 }
@@ -60,6 +64,18 @@ type authCenterPubkeyStatusResponse struct {
 
 func (a AuthCenterAdmin) IsAdmin() bool {
 	switch strings.ToLower(strings.TrimSpace(a.Role)) {
+	case "root", "admin":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s AuthCenterPubkeyStatus) HasAdminRole() bool {
+	if s.IsAdmin {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(s.Role)) {
 	case "root", "admin":
 		return true
 	default:

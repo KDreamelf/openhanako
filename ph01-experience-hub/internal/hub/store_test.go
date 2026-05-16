@@ -492,6 +492,7 @@ func TestHandlerCreatesPackagePowChallengeThroughAuthCenter(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, _ := json.Marshal(ExperiencePackagePowChallengeRequest{
+		ExperienceID:  "exp_pow_test",
 		PackageSHA256: packageHash,
 		PubkeyHash:    pubkeyHash,
 	})
@@ -511,6 +512,54 @@ func TestHandlerCreatesPackagePowChallengeThroughAuthCenter(t *testing.T) {
 	}
 	if out.ChallengeID != "pow_test" {
 		t.Fatalf("unexpected challenge response: %+v", out)
+	}
+}
+
+func TestPackagePowChallengeRejectsDuplicateBeforeAuthCenter(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	if err := store.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	zipData := signedExperiencePackage(t, sampleRawDumpDir(t))
+	if _, err := store.ImportZip(zipData, StatusInbox); err != nil {
+		t.Fatalf("seed inbox: %v", err)
+	}
+	handler := &Handler{
+		Store:        store,
+		DelegatedPow: fakeDelegatedPow{err: fmt.Errorf("delegated pow should not be called")},
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	sum := sha256.Sum256(zipData)
+	pubkeyHash, err := dhtPubkeyHash(governancePublicKeyOne)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(ExperiencePackagePowChallengeRequest{
+		ExperienceID:  "exp_test_001",
+		PackageSHA256: fmt.Sprintf("%x", sum[:]),
+		PubkeyHash:    pubkeyHash,
+	})
+	resp, err := http.Post(srv.URL+"/api/v1/experiences/package-pow/challenge", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		buf := new(bytes.Buffer)
+		buf.ReadFrom(resp.Body)
+		t.Fatalf("duplicate challenge status=%d body=%s", resp.StatusCode, buf.String())
+	}
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out["error"] != "experience_already_submitted" ||
+		out["experience_id"] != "exp_test_001" ||
+		out["status"] != StatusInbox {
+		t.Fatalf("unexpected duplicate challenge response: %+v", out)
 	}
 }
 
@@ -670,6 +719,51 @@ func TestSignedUserUploadRejectsInvalidSignature(t *testing.T) {
 	}
 	if out.Error != "invalid_signature" {
 		t.Fatalf("unexpected error response: %+v", out)
+	}
+}
+
+func TestDuplicateSignedUploadReturnsConflictWithExistingStatus(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	if err := store.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	handler := &Handler{
+		Store:        store,
+		AdminToken:   "hub-admin-token",
+		DelegatedPow: fakeDelegatedPow{},
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body := signedUploadBody(t, signedExperiencePackage(t, sampleRawDumpDir(t)), nil)
+	for i := 0; i < 2; i++ {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/experiences", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if i == 0 {
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("first upload status=%d", resp.StatusCode)
+			}
+			continue
+		}
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("duplicate upload status=%d", resp.StatusCode)
+		}
+		var out map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		if out["error"] != "experience_already_submitted" ||
+			out["experience_id"] != "exp_test_001" ||
+			out["status"] != StatusInbox ||
+			out["already_submitted"] != true {
+			t.Fatalf("unexpected duplicate response: %+v", out)
+		}
 	}
 }
 
@@ -859,6 +953,68 @@ func TestTrustedAdminUploadBecomesNetworkWithAuditMarker(t *testing.T) {
 	}
 }
 
+func TestSignedAdminUploadUsesAuthCenterPubkeyStatusForBypass(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	if err := store.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	zipData := signedExperiencePackage(t, sampleRawDumpDir(t))
+	pubkeyHash, err := dhtPubkeyHash(governancePublicKeyOne)
+	if err != nil {
+		t.Fatalf("hash pubkey: %v", err)
+	}
+	authSrv := authCenterPubkeyStatusServer(t, []AuthCenterPubkeyStatus{{
+		Valid:       true,
+		UserID:      1,
+		Username:    "root",
+		Role:        "root",
+		IsAdmin:     true,
+		PubkeyHash:  pubkeyHash,
+		PowVerified: true,
+	}})
+	defer authSrv.Close()
+	handler := &Handler{
+		Store:        store,
+		AdminToken:   "hub-admin-token",
+		Review:       ReviewConfig{TrustAdminUploads: true},
+		AuthCenter:   AuthCenterConfig{BaseURL: authSrv.URL},
+		DelegatedPow: fakeDelegatedPow{},
+		Governance:   testGovernanceService(t),
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body := signedUploadBody(t, zipData, nil)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/experiences", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		buf := new(bytes.Buffer)
+		buf.ReadFrom(resp.Body)
+		t.Fatalf("signed admin upload status=%d body=%s", resp.StatusCode, buf.String())
+	}
+	var entry IndexEntry
+	if err := json.NewDecoder(resp.Body).Decode(&entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Status != StatusNetwork {
+		t.Fatalf("signed root upload should enter network, got %+v", entry)
+	}
+	reviewRaw, err := os.ReadFile(filepath.Join(root, StatusNetwork, "exp_test_001", "review", "local-review.json"))
+	if err != nil {
+		t.Fatalf("read review audit: %v", err)
+	}
+	if !strings.Contains(string(reviewRaw), "trusted_admin_upload") ||
+		!strings.Contains(string(reviewRaw), "root") {
+		t.Fatalf("signed admin audit marker missing: %s", reviewRaw)
+	}
+}
+
 func TestTrustedAdminUploadSwitchOffKeepsAuthCenterAdminInInbox(t *testing.T) {
 	root := t.TempDir()
 	store := NewStore(root)
@@ -951,14 +1107,35 @@ func testGovernanceService(t *testing.T) *governance.Service {
 	t.Helper()
 	cert := governance.SignedMasterCertificate{
 		Certificate: governance.MasterCertificatePayload{
-			PublicKeyHex: governancePublicKeyOne,
+			CertificateID:   "test-master",
+			Role:            "experience_review_master",
+			IssuerRootKeyID: "test-root",
+			Algorithm:       governance.Algorithm,
+			PublicKeyHex:    governancePublicKeyOne,
 		},
+		SignatureAlgorithm: governance.Algorithm,
 	}
 	key, err := governance.LoadMasterKey(governancePrivateKeyOne, cert)
 	if err != nil {
 		t.Fatalf("load governance key: %v", err)
 	}
-	return &governance.Service{Master: key}
+	raw, err := json.Marshal(cert)
+	if err != nil {
+		t.Fatalf("marshal governance cert: %v", err)
+	}
+	return &governance.Service{Master: key, MasterCertificateRaw: raw}
+}
+
+func authCenterPubkeyStatusServer(t *testing.T, items []AuthCenterPubkeyStatus) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/auth/pubkeys/status" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(authCenterPubkeyStatusResponse{Items: items})
+	}))
 }
 
 func signedExperiencePackage(t *testing.T, rawDir string) []byte {

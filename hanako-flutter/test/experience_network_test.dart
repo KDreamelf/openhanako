@@ -594,6 +594,7 @@ void main() {
     );
 
     final challenge = await client.startPackagePowChallenge(
+      experienceId: 'exp_1',
       packageSha256: packageHash,
       pubkeyHash: keyPair.publicKeyHash,
     );
@@ -624,6 +625,7 @@ void main() {
 
     await expectLater(
       client.startPackagePowChallenge(
+        experienceId: 'exp_1',
         packageSha256: 'a' * 64,
         pubkeyHash: 'b' * 64,
       ),
@@ -640,6 +642,44 @@ void main() {
               'message',
               'auth_center.base_url is required',
             ),
+      ),
+    );
+  });
+
+  test('申请包级 PoW 时管理端重复提审响应会转为已提交异常', () async {
+    final dio = Dio();
+    dio.httpClientAdapter = _InspectingAdapter((options, requestStream) async {
+      final body = await _readJsonBody(requestStream);
+      expect(body['experience_id'], 'exp_1');
+      return ResponseBody.fromString(
+        jsonEncode({
+          'error': 'experience_already_submitted',
+          'message': 'experience already submitted',
+          'already_submitted': true,
+          'experience_id': 'exp_1',
+          'status': 'inbox',
+        }),
+        409,
+        headers: {
+          Headers.contentTypeHeader: [Headers.jsonContentType],
+        },
+      );
+    });
+    final client = ExperienceNetworkManagerClient(
+      managerBaseUrl: 'https://experience.test/',
+      dio: dio,
+    );
+
+    await expectLater(
+      client.startPackagePowChallenge(
+        experienceId: 'exp_1',
+        packageSha256: 'a' * 64,
+        pubkeyHash: 'b' * 64,
+      ),
+      throwsA(
+        isA<ExperienceAlreadySubmittedException>()
+            .having((e) => e.result.experienceId, 'experienceId', 'exp_1')
+            .having((e) => e.result.pendingReview, 'pendingReview', true),
       ),
     );
   });
@@ -730,6 +770,51 @@ void main() {
     expect(result.experienceId, 'exp_1');
     expect(result.pendingReview, isTrue);
     expect(result.approved, isFalse);
+  });
+
+  test('管理端拒绝重复提审时客户端返回可同步的已提交状态', () async {
+    final keyPair = HanakoKeyPair.generate();
+    final packageBytes = Uint8List.fromList([1, 2, 3, 4]);
+    final dio = Dio();
+    dio.httpClientAdapter = _InspectingAdapter((options, requestStream) async {
+      expect(options.method, 'POST');
+      expect(options.uri.path, '/api/v1/experiences');
+      return ResponseBody.fromString(
+        jsonEncode({
+          'error': 'experience_already_submitted',
+          'message': 'experience already submitted',
+          'already_submitted': true,
+          'experience_id': 'exp_1',
+          'title': '经验 1',
+          'status': 'inbox',
+          'path': 'inbox/exp_1',
+          'package_path': 'packages/exp_1.hxp',
+        }),
+        409,
+        headers: {
+          Headers.contentTypeHeader: [Headers.jsonContentType],
+        },
+      );
+    });
+    final client = ExperienceNetworkManagerClient(
+      managerBaseUrl: 'https://experience.test/',
+      dio: dio,
+    );
+
+    final result = await client.submitPackageForReview(
+      packageBytes: packageBytes,
+      keyPair: keyPair,
+      packagePow: ExperiencePackagePowProof(
+        challengeId: 'pow_exp_1',
+        packageSha256: sha256.convert(packageBytes).toString(),
+        pubkeyHash: keyPair.publicKeyHash,
+      ),
+      filename: 'exp_1.hxp',
+    );
+
+    expect(result.alreadySubmitted, isTrue);
+    expect(result.experienceId, 'exp_1');
+    expect(result.pendingReview, isTrue);
   });
 
   test('DHT presence 与 provider record JSON 保持协议字段', () {

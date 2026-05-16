@@ -38,6 +38,22 @@ class ExperienceNetworkRequestException implements Exception {
   }
 }
 
+class ExperienceAlreadySubmittedException implements Exception {
+  const ExperienceAlreadySubmittedException({
+    required this.action,
+    required this.result,
+  });
+
+  final String action;
+  final ExperienceSubmissionResult result;
+
+  @override
+  String toString() {
+    final status = result.status.trim().isEmpty ? '未知' : result.status.trim();
+    return '$action：经验已在管理端，当前状态：$status';
+  }
+}
+
 enum ExperienceTransport {
   ipv6Direct('ipv6_direct'),
   ipv4HolePunch('ipv4_hole_punch'),
@@ -1694,6 +1710,7 @@ class ExperienceNetworkManagerClient {
   }
 
   Future<ExperiencePackagePowChallenge> startPackagePowChallenge({
+    required String experienceId,
     required String packageSha256,
     required String pubkeyHash,
   }) async {
@@ -1702,12 +1719,20 @@ class ExperienceNetworkManagerClient {
       resp = await _dio.postUri<Map<String, dynamic>>(
         Uri.parse('$managerBaseUrl/api/v1/experiences/package-pow/challenge'),
         data: {
+          'experience_id': experienceId.trim(),
           'package_sha256': packageSha256.trim().toLowerCase(),
           'pubkey_hash': pubkeyHash.trim().toLowerCase(),
         },
         options: Options(contentType: Headers.jsonContentType),
       );
     } on DioException catch (e) {
+      final duplicate = _duplicateSubmissionResult(e);
+      if (duplicate != null) {
+        throw ExperienceAlreadySubmittedException(
+          action: '申请经验包工作量证明挑战',
+          result: duplicate,
+        );
+      }
       throw _experienceNetworkException(e, '申请经验包工作量证明挑战失败');
     }
     final data = resp.data;
@@ -1752,6 +1777,8 @@ class ExperienceNetworkManagerClient {
         options: Options(contentType: Headers.jsonContentType),
       );
     } on DioException catch (e) {
+      final duplicate = _duplicateSubmissionResult(e);
+      if (duplicate != null) return duplicate;
       throw _experienceNetworkException(e, '提交经验审核失败');
     }
     final data = resp.data;
@@ -1760,6 +1787,16 @@ class ExperienceNetworkManagerClient {
     }
     return ExperienceSubmissionResult.fromJson(data);
   }
+}
+
+ExperienceSubmissionResult? _duplicateSubmissionResult(DioException error) {
+  final response = error.response;
+  if (response?.statusCode != 409) return null;
+  final decoded = _decodeJsonMap(response?.data);
+  if (decoded == null) return null;
+  final code = decoded['error']?.toString().trim() ?? '';
+  if (code != 'experience_already_submitted') return null;
+  return ExperienceSubmissionResult.fromJson(decoded);
 }
 
 ExperienceNetworkRequestException _experienceNetworkException(
@@ -1852,6 +1889,7 @@ class ExperienceSubmissionResult {
   const ExperienceSubmissionResult({
     required this.experienceId,
     required this.status,
+    this.alreadySubmitted = false,
     this.title = '',
     this.path = '',
     this.packagePath = '',
@@ -1862,6 +1900,7 @@ class ExperienceSubmissionResult {
 
   final String experienceId;
   final String status;
+  final bool alreadySubmitted;
   final String title;
   final String path;
   final String packagePath;
@@ -1871,11 +1910,15 @@ class ExperienceSubmissionResult {
 
   bool get approved => status == 'network';
   bool get pendingReview => status == 'inbox';
+  bool get rejected => status == 'rejected';
 
   static ExperienceSubmissionResult fromJson(Map<String, dynamic> json) {
     return ExperienceSubmissionResult(
       experienceId: json['experience_id']?.toString() ?? '',
       status: json['status']?.toString() ?? '',
+      alreadySubmitted:
+          json['already_submitted'] as bool? ??
+          json['error']?.toString() == 'experience_already_submitted',
       title: json['title']?.toString() ?? '',
       path: json['path']?.toString() ?? '',
       packagePath: json['package_path']?.toString() ?? '',

@@ -80,8 +80,9 @@ cp config.example.json config.json
 - `storage_root` 指向大容量磁盘或挂载卷。
 - `admin_token` 通过环境变量或部署系统注入。
 - 上传接口会把非 hub admin token 的 Bearer 转给认证中心 `/admin/session/self`
-  验证。`review.trust_admin_uploads=false` 时认证中心管理员上传进入 inbox；
-  `true` 时只有 `root/admin` 才自动审核入网。
+  验证；普通 SignedRequest 上传会在包级 PoW 通过后，用签名公钥哈希查询认证中心
+  `/api/v1/auth/pubkeys/status`。`review.trust_admin_uploads=false` 时认证中心管理员
+  上传进入 inbox；`true` 时只有认证中心状态为 `root/admin` 的账号才自动审核入网。
 - 上传前客户端先向管理端申请包级 PoW challenge id，管理端通过认证中心
   `/api/v1/auth/pow/delegated/challenge` 创建通用委托 PoW。上传接口要求每个
   经验包携带已完成的 challenge id，并通过
@@ -143,7 +144,7 @@ Authorization: Bearer <admin_token>
 |---|---|---|
 | `GET` | `/healthz` | 健康检查 |
 | `POST` | `/api/v1/experiences?status=inbox` | 管理端 Bearer 上传 raw `.hxp` |
-| `POST` | `/api/v1/experiences` | 普通用户 SignedRequest 上传 `.hxp`，固定进入 `inbox` |
+| `POST` | `/api/v1/experiences` | SignedRequest 上传 `.hxp`；非管理员进入 `inbox`，配置允许时 `root/admin` 自动入网 |
 | `GET` | `/api/v1/experiences` | 列表，可按 `status` / `keyword` / `q` 过滤 |
 | `GET` | `/api/v1/search?q=text&status=network&limit=50` | 搜索 `content/` 下文本文件，返回路径、行号和片段 |
 | `GET` | `/api/v1/experiences/{id}` | 查看索引详情 |
@@ -222,14 +223,21 @@ cd ../experience-dht/deployment-package
 ```
 
 当 `review.trust_admin_uploads=true` 且请求 Bearer 是认证中心 `root/admin`
-管理端 session 时，`POST /api/v1/experiences` 会自动导入为 `network`，并在
+管理端 session，或 SignedRequest 的签名公钥在认证中心状态中属于 `root/admin`
+账号时，`POST /api/v1/experiences` 会自动导入为 `network`，并在
 `review/local-review.json` 中记录 `review_mode=trusted_admin_upload`、
 `reviewed_by` 和 `reviewed_role`。该路径仍会校验包结构、`package.zip` hash、
 发布者签名，并生成 `review-materials.json`。
 
 普通用户可使用 PH01 `SignedRequest` 上传，业务 payload 使用
 `ph01.experience.upload.v1`，包含 `package_base64` 与可选 `package_sha256`。
-服务端验签后只导入 `inbox`，不会因为 query 指定 `status=network` 而免审。
+服务端验签后由管理端查询认证中心账号状态；非管理员只导入 `inbox`，不会因为
+query 指定 `status=network` 而免审。
+同一个 `experience_id` 一旦进入管理端的 `inbox`、`network` 或 `rejected`，
+后续重复上传都会被拒绝，返回 HTTP 409 与 `experience_already_submitted`，
+并带回现有状态供客户端同步本地提审状态。
+客户端申请包级 PoW challenge 时也应携带 `experience_id`。管理端会在调用认证中心
+创建委托 PoW 前先检查重复状态；已存在的经验直接返回同样的 409，不会再创建新挑战。
 
 ## 原始转储目录示例
 

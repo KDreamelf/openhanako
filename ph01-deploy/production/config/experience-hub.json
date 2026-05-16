@@ -5,7 +5,7 @@
   "cors_origins": ["https://experience.xn--lbtx0e.cn"],
   "max_upload_bytes": 536870912,
   "review": {
-    "trust_admin_uploads": false
+    "trust_admin_uploads": true
   },
   "auth_center": {
     "base_url": "https://auth.xn--lbtx0e.cn",

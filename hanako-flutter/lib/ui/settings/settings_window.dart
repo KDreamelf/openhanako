@@ -935,6 +935,14 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       await _showSettingsNotice('经验已通过审核', '该经验已经取回审核签名或处于网络通过状态，不需要重复提交。');
       return;
     }
+    if (reviewState?.rejected == true) {
+      await _showSettingsNotice(
+        '经验已进入管理端',
+        '该经验已经提交过且审核未通过。管理端不允许重复提交同一个经验包。'
+            '\n\n如需重新提交，请重新生成为一条新的经验。',
+      );
+      return;
+    }
     final input = await showDialog<_ExperienceSubmitInput>(
       context: context,
       builder: (_) => _ExperienceSubmitDialog(title: item.title),
@@ -962,10 +970,36 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
         });
       }
       final client = ExperienceNetworkManagerClient();
-      final packagePowChallenge = await client.startPackagePowChallenge(
-        packageSha256: package.packageBytesSha256,
-        pubkeyHash: identity.keyPair.publicKeyHash,
-      );
+      late final ExperiencePackagePowChallenge packagePowChallenge;
+      try {
+        packagePowChallenge = await client.startPackagePowChallenge(
+          experienceId: item.experienceId,
+          packageSha256: package.packageBytesSha256,
+          pubkeyHash: identity.keyPair.publicKeyHash,
+        );
+      } on ExperienceAlreadySubmittedException catch (e) {
+        await store.recordReviewSubmission(
+          experienceId: item.experienceId,
+          remoteExperienceId: e.result.experienceId.isEmpty
+              ? item.experienceId
+              : e.result.experienceId,
+          status: e.result.status.isEmpty ? 'inbox' : e.result.status,
+          packageBytesSha256: package.packageBytesSha256,
+          packageHash: package.packageHash,
+          reviewReason: e.result.reviewReason,
+        );
+        if (!mounted) return;
+        final statusText = e.result.approved
+            ? '已通过审核'
+            : e.result.rejected
+            ? '审核未通过'
+            : '已提交审核';
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('经验已在管理端：$statusText，已同步本地状态')));
+        await _refresh();
+        return;
+      }
       final powStatus = await eng.backendClient
           .completeDelegatedPowWithProgress(
             keyPair: identity.keyPair,
@@ -1023,7 +1057,13 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
         } catch (_) {}
       }
       if (!mounted) return;
-      final message = result.approved
+      final message = result.alreadySubmitted
+          ? result.approved
+                ? '经验已在管理端通过审核，已同步本地状态'
+                : result.rejected
+                ? '经验已在管理端且审核未通过，已同步本地状态'
+                : '经验已在管理端，已同步本地提审状态'
+          : result.approved
           ? '经验已通过审核并进入网络'
           : result.pendingReview
           ? '经验已提交审核，等待主脑审核'
@@ -2305,6 +2345,8 @@ ${input.instructions.trim()}
                       ? '已提交审核，等待审核通过'
                       : reviewState?.approved == true
                       ? '已通过审核，不需要重复提交'
+                      : reviewState?.rejected == true
+                      ? '审核未通过，不能重复提交同一包'
                       : '提交审核',
                   icon: submitting
                       ? const SizedBox(

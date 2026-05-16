@@ -1851,9 +1851,11 @@ class ExperienceReviewState {
   final String packageHash;
   final String reviewReason;
 
-  bool get submitted => status == 'inbox' || status == 'network';
+  bool get submitted =>
+      status == 'inbox' || status == 'network' || status == 'rejected';
   bool get pendingReview => status == 'inbox';
   bool get approved => status == 'network';
+  bool get rejected => status == 'rejected';
 
   String get effectiveRemoteExperienceId =>
       remoteExperienceId.trim().isEmpty ? experienceId : remoteExperienceId;

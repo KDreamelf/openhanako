@@ -106,6 +106,20 @@ void main() {
       'remote_${saved.experienceId}',
     );
     expect(item.reviewState!.displayLabel, '已提交，等待审核');
+
+    await store.recordReviewSubmission(
+      experienceId: saved.experienceId,
+      remoteExperienceId: 'remote_${saved.experienceId}',
+      status: 'rejected',
+      packageBytesSha256: 'a' * 64,
+      packageHash: 'b' * 64,
+      reviewReason: 'duplicate package rejected',
+      submittedAt: DateTime.utc(2026, 5, 9, 3, 0, 0),
+    );
+    final rejected = (await store.list(scope: ExperienceScope.private)).single;
+    expect(rejected.reviewState!.rejected, true);
+    expect(rejected.reviewState!.submitted, true);
+    expect(rejected.reviewState!.displayLabel, '审核未通过');
   });
 
   test('提审打包不会用程序规则脱敏内容', () async {

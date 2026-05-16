@@ -391,6 +391,8 @@ type UserPubkeyStatus struct {
 	UserID        uint64 `json:"user_id,omitempty"`
 	Username      string `json:"username,omitempty"`
 	Tier          string `json:"tier,omitempty"`
+	Role          string `json:"role,omitempty"`
+	IsAdmin       bool   `json:"is_admin,omitempty"`
 	Disabled      bool   `json:"disabled,omitempty"`
 	PubkeyHash    string `json:"pubkey_hash"`
 	PowVerified   bool   `json:"pow_verified"`

@@ -80,6 +80,7 @@ type PubkeyStatus struct {
 	UserID        uint64
 	Username      string
 	Tier          string
+	Role          string
 	Disabled      bool
 	PubkeyHash    string
 	PowVerified   bool
@@ -454,6 +455,7 @@ func (s *Store) GetPubkeyStatuses(pubkeyHashes []string) ([]PubkeyStatus, error)
 		UserID        uint64
 		Username      string
 		Tier          string
+		Role          string
 		Disabled      bool
 		PubkeyHash    string
 		PowVerified   bool
@@ -465,7 +467,7 @@ func (s *Store) GetPubkeyStatuses(pubkeyHashes []string) ([]PubkeyStatus, error)
 	}
 	var rows []statusRow
 	err := s.DB.Table("pubkeys").
-		Select("users.id AS user_id, users.username, users.tier, users.disabled, pubkeys.pubkey_hash, pubkeys.pow_verified, pubkeys.pow_algorithm, pubkeys.pow_score, pubkeys.pow_verified_at, pubkeys.updated_at AS pubkey_updated, users.updated_at AS user_updated").
+		Select("users.id AS user_id, users.username, users.tier, users.role, users.disabled, pubkeys.pubkey_hash, pubkeys.pow_verified, pubkeys.pow_algorithm, pubkeys.pow_score, pubkeys.pow_verified_at, pubkeys.updated_at AS pubkey_updated, users.updated_at AS user_updated").
 		Joins("JOIN users ON users.id = pubkeys.user_id").
 		Where("pubkeys.pubkey_hash IN ? AND pubkeys.revoked_at IS NULL", hashes).
 		Find(&rows).Error
@@ -483,6 +485,7 @@ func (s *Store) GetPubkeyStatuses(pubkeyHashes []string) ([]PubkeyStatus, error)
 			UserID:        row.UserID,
 			Username:      row.Username,
 			Tier:          row.Tier,
+			Role:          row.Role,
 			Disabled:      row.Disabled,
 			PubkeyHash:    row.PubkeyHash,
 			PowVerified:   row.PowVerified,
@@ -504,6 +507,7 @@ func (s *Store) ListPubkeyStatesSince(since time.Time, limit int) ([]PubkeyStatu
 		UserID        uint64
 		Username      string
 		Tier          string
+		Role          string
 		Disabled      bool
 		PubkeyHash    string
 		PowVerified   bool
@@ -514,7 +518,7 @@ func (s *Store) ListPubkeyStatesSince(since time.Time, limit int) ([]PubkeyStatu
 		UserUpdated   time.Time
 	}
 	query := s.DB.Table("pubkeys").
-		Select("users.id AS user_id, users.username, users.tier, users.disabled, pubkeys.pubkey_hash, pubkeys.pow_verified, pubkeys.pow_algorithm, pubkeys.pow_score, pubkeys.pow_verified_at, pubkeys.updated_at AS pubkey_updated, users.updated_at AS user_updated").
+		Select("users.id AS user_id, users.username, users.tier, users.role, users.disabled, pubkeys.pubkey_hash, pubkeys.pow_verified, pubkeys.pow_algorithm, pubkeys.pow_score, pubkeys.pow_verified_at, pubkeys.updated_at AS pubkey_updated, users.updated_at AS user_updated").
 		Joins("JOIN users ON users.id = pubkeys.user_id").
 		Where("pubkeys.revoked_at IS NULL")
 	if !since.IsZero() {
@@ -535,6 +539,7 @@ func (s *Store) ListPubkeyStatesSince(since time.Time, limit int) ([]PubkeyStatu
 			UserID:        row.UserID,
 			Username:      row.Username,
 			Tier:          row.Tier,
+			Role:          row.Role,
 			Disabled:      row.Disabled,
 			PubkeyHash:    row.PubkeyHash,
 			PowVerified:   row.PowVerified,

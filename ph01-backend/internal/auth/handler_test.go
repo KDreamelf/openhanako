@@ -291,6 +291,49 @@ func TestUserPowChallengeVerifyAndStatus(t *testing.T) {
 	}
 }
 
+func TestPubkeyStatusIncludesRoleAndAdminFlag(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	gormDB, err := db.Open("sqlite", filepath.Join(tmpDir, "pubkey-role.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := user.AutoMigrate(gormDB); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		sqlDB, _ := gormDB.DB()
+		if sqlDB != nil {
+			sqlDB.Close()
+		}
+	})
+	store := user.NewStore(gormDB)
+	priv, _ := secp.GeneratePrivateKey()
+	pubHex := hex.EncodeToString(priv.PubKey().SerializeUncompressed())
+	pubHash, err := hcrypto.PubkeyHash(pubHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateWithPubkey("root", "root", "root@example.com", pubHex, pubHash); err != nil {
+		t.Fatal(err)
+	}
+	handler := &auth.Handler{UserStore: store}
+	r := gin.New()
+	handler.Register(r.Group("/api/v1"))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	var batch api.PubkeyStatusResponse
+	postJSONDecode(t, srv.URL+"/api/v1/auth/pubkeys/status", api.PubkeyStatusRequest{PubkeyHashes: []string{pubHash}}, &batch)
+	if len(batch.Items) != 1 {
+		t.Fatalf("unexpected batch status: %+v", batch)
+	}
+	status := batch.Items[0]
+	if status.Role != "root" || !status.IsAdmin {
+		t.Fatalf("root pubkey status should expose admin facts, got %+v", status)
+	}
+}
+
 func TestDelegatedPowChallengeVerifyAndStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tmpDir := t.TempDir()
@@ -385,6 +428,87 @@ func TestDelegatedPowChallengeVerifyAndStatus(t *testing.T) {
 	}, &status)
 	if !status.Verified || status.ChallengeID != challenge.ChallengeID {
 		t.Fatalf("unexpected cached delegated pow status: %+v", status)
+	}
+}
+
+func TestDelegatedPowChallengeDoesNotRequireExistingPubkey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	gormDB, err := db.Open("sqlite", filepath.Join(tmpDir, "delegated-pow-lightweight.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := user.AutoMigrate(gormDB); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		sqlDB, _ := gormDB.DB()
+		if sqlDB != nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	priv, _ := secp.GeneratePrivateKey()
+	pubHex := hex.EncodeToString(priv.PubKey().SerializeUncompressed())
+	pubHash, err := hcrypto.PubkeyHash(pubHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &auth.Handler{
+		UserStore: user.NewStore(gormDB),
+		Verifier:  hcrypto.NewSignedRequestVerifier(nil, "nonce:test"),
+		DelegatedPow: &auth.DelegatedPowService{
+			DifficultyBits: 4,
+			MemoryKiB:      16,
+			RoundCount:     1,
+			TTL:            time.Minute,
+		},
+	}
+	r := gin.New()
+	handler.Register(r.Group("/api/v1"))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	purpose := "ph01.test.delegated_pow.v1"
+	subjectHash := strings.Repeat("c", 64)
+	var challenge api.DelegatedPowChallengeResponse
+	postJSONDecode(t, srv.URL+"/api/v1/auth/pow/delegated/challenge", api.DelegatedPowChallengeRequest{
+		Purpose:     purpose,
+		SubjectHash: subjectHash,
+		PubkeyHash:  pubHash,
+	}, &challenge)
+	if challenge.ChallengeID == "" || challenge.PubkeyHash != pubHash {
+		t.Fatalf("challenge should bind unknown pubkey hash without user lookup: %+v", challenge)
+	}
+
+	nonce, ok := auth.SolveUserPoW(api.UserPowChallengeResponse{
+		ChallengeID:    challenge.ChallengeID,
+		PubkeyHash:     challenge.SubjectHash,
+		Algorithm:      challenge.Algorithm,
+		DifficultyBits: challenge.DifficultyBits,
+		MemoryKiB:      challenge.MemoryKiB,
+		RoundCount:     challenge.RoundCount,
+		Seed:           challenge.Seed,
+		ExpiresAt:      challenge.ExpiresAt,
+	}, 1<<20)
+	if !ok {
+		t.Fatal("delegated pow solution not found")
+	}
+	verifyBody := buildSignedRequest(priv, map[string]interface{}{
+		"challenge_id":   challenge.ChallengeID,
+		"purpose":        purpose,
+		"subject_hash":   subjectHash,
+		"pubkey_hash":    pubHash,
+		"solution_nonce": nonce,
+	})
+	resp, err := http.Post(srv.URL+"/api/v1/auth/pow/delegated/verify", "application/json", bytes.NewReader(verifyBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("verify should still require registered pubkey, status=%d body=%s", resp.StatusCode, string(data))
 	}
 }
 

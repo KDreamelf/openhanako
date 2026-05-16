@@ -906,15 +906,6 @@ func (h *Handler) HandleDelegatedPowChallenge(c *gin.Context) {
 			errorJSON(c, http.StatusBadRequest, api.ErrInvalidPayload, "pubkey_hash invalid")
 			return
 		}
-		u, _, err := h.UserStore.GetByPubkeyHash(hash)
-		if err != nil {
-			errorJSON(c, http.StatusNotFound, api.ErrPubkeyNotFound, "")
-			return
-		}
-		if u.Disabled {
-			errorJSON(c, http.StatusForbidden, api.ErrUserDisabled, "")
-			return
-		}
 		pubkeyHash = hash
 	}
 	resp, err := h.delegatedPowService().Create(purpose, subjectHash, pubkeyHash, timeNowUTC())
@@ -1133,6 +1124,8 @@ func pubkeyStatusToAPI(status user.PubkeyStatus) api.UserPubkeyStatus {
 		UserID:        status.UserID,
 		Username:      status.Username,
 		Tier:          status.Tier,
+		Role:          status.Role,
+		IsAdmin:       user.IsAdminRole(status.Role),
 		Disabled:      status.Disabled,
 		PubkeyHash:    status.PubkeyHash,
 		PowVerified:   status.PowVerified,

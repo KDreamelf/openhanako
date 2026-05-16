@@ -14,11 +14,28 @@ import (
 )
 
 var (
-	ErrInvalidID     = errors.New("invalid experience id")
-	ErrNotFound      = errors.New("experience not found")
-	ErrInvalidStatus = errors.New("invalid experience status")
-	ErrInvalidQuery  = errors.New("invalid search query")
+	ErrInvalidID           = errors.New("invalid experience id")
+	ErrNotFound            = errors.New("experience not found")
+	ErrInvalidStatus       = errors.New("invalid experience status")
+	ErrInvalidQuery        = errors.New("invalid search query")
+	ErrDuplicateExperience = errors.New("duplicate experience id")
 )
+
+type DuplicateExperienceError struct {
+	Entry IndexEntry
+}
+
+func (e *DuplicateExperienceError) Error() string {
+	id := strings.TrimSpace(e.Entry.ExperienceID)
+	if id == "" {
+		return ErrDuplicateExperience.Error()
+	}
+	return ErrDuplicateExperience.Error() + ": " + id
+}
+
+func (e *DuplicateExperienceError) Unwrap() error {
+	return ErrDuplicateExperience
+}
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
@@ -78,8 +95,8 @@ func (s *Store) ImportZip(zipData []byte, status string) (IndexEntry, error) {
 	if err != nil {
 		return IndexEntry{}, err
 	}
-	if _, found := findEntry(idx.Items, manifest.ExperienceID); found {
-		return IndexEntry{}, errors.New("duplicate experience id")
+	if existing, found := findEntry(idx.Items, manifest.ExperienceID); found {
+		return IndexEntry{}, &DuplicateExperienceError{Entry: existing}
 	}
 
 	packagePath := s.packagePath(manifest.ExperienceID)

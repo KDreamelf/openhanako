@@ -91,6 +91,7 @@ type ExperiencePackagePow struct {
 }
 
 type ExperiencePackagePowChallengeRequest struct {
+	ExperienceID  string `json:"experience_id"`
 	PackageSHA256 string `json:"package_sha256"`
 	PubkeyHash    string `json:"pubkey_hash"`
 }
