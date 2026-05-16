@@ -602,6 +602,48 @@ void main() {
     expect(challenge.expiresAt, 1770000000);
   });
 
+  test('经验管理端错误会保留 HTTP 状态与 JSON 错误正文', () async {
+    final dio = Dio();
+    dio.httpClientAdapter = _InspectingAdapter((options, requestStream) async {
+      await _readJsonBody(requestStream);
+      return ResponseBody.fromString(
+        jsonEncode({
+          'error': 'experience_pow_challenge_failed',
+          'message': 'auth_center.base_url is required',
+        }),
+        502,
+        headers: {
+          Headers.contentTypeHeader: [Headers.jsonContentType],
+        },
+      );
+    });
+    final client = ExperienceNetworkManagerClient(
+      managerBaseUrl: 'https://experience.test/',
+      dio: dio,
+    );
+
+    await expectLater(
+      client.startPackagePowChallenge(
+        packageSha256: 'a' * 64,
+        pubkeyHash: 'b' * 64,
+      ),
+      throwsA(
+        isA<ExperienceNetworkRequestException>()
+            .having((e) => e.statusCode, 'statusCode', 502)
+            .having(
+              (e) => e.errorCode,
+              'errorCode',
+              'experience_pow_challenge_failed',
+            )
+            .having(
+              (e) => e.message,
+              'message',
+              'auth_center.base_url is required',
+            ),
+      ),
+    );
+  });
+
   test('客户端普通用户提审使用 PH01 SignedRequest 上传经验包', () async {
     final keyPair = HanakoKeyPair.generate();
     final packageBytes = Uint8List.fromList([1, 2, 3, 4]);

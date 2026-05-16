@@ -104,6 +104,68 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     });
   }
 
+  Future<void> _showSettingsError(String title, Object error) async {
+    if (!mounted) return;
+    final details = _settingsErrorDetails(error);
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: SizedBox(
+          width: 640,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SelectableText(details.summary),
+              if (details.body.trim().isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  constraints: const BoxConstraints(maxHeight: 280),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.outlineVariant.withValues(alpha: 0.6),
+                    ),
+                  ),
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      details.body,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontFamily: 'monospace',
+                        height: 1.45,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton.icon(
+            onPressed: () {
+              Clipboard.setData(
+                ClipboardData(text: '${details.summary}\n${details.body}'),
+              );
+            },
+            icon: const Icon(Icons.copy_outlined, size: 18),
+            label: const Text('复制详情'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _saveThemeMode(String mode) async {
     final sp = await SharedPreferences.getInstance();
     await sp.setString(kPrefThemeMode, mode);
@@ -303,9 +365,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('解锁失败：$e')));
+      await _showSettingsError('解锁失败', e);
     } finally {
       if (mounted) setState(() => _accountBusy = false);
     }
@@ -340,9 +400,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       ).showSnackBar(const SnackBar(content: Text('模型列表已同步')));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('同步失败：$e')));
+      await _showSettingsError('同步失败', e);
     } finally {
       if (mounted) setState(() => _accountBusy = false);
     }
@@ -361,6 +419,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     );
     var dialogOpen = true;
     BuildContext? dialogContext;
+    Object? deferredError;
     setState(() {
       _accountBusy = true;
       _userPowBusy = true;
@@ -399,9 +458,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _userPowError = '$e');
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('工作量证明失败：$e')));
+      deferredError = e;
     } finally {
       final activeDialogContext = dialogContext;
       if (dialogOpen &&
@@ -415,6 +472,9 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
           _accountBusy = false;
           _userPowBusy = false;
         });
+      }
+      if (mounted && deferredError != null) {
+        await _showSettingsError('工作量证明失败', deferredError);
       }
     }
   }
@@ -486,9 +546,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('查看助记词失败：$e')));
+      await _showSettingsError('查看助记词失败', e);
     } finally {
       if (mounted) setState(() => _accountBusy = false);
     }
@@ -510,9 +568,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('重新生成故事失败：$e')));
+      await _showSettingsError('重新生成故事失败', e);
     } finally {
       if (mounted) setState(() => _accountBusy = false);
     }
@@ -536,9 +592,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     if (_accountBusy) return;
     final username = _configuredUsername();
     if (username == null || username.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('当前配置缺少云端用户名')));
+      await _showSettingsError('无法轮换密钥', StateError('当前配置缺少云端用户名'));
       return;
     }
     await showDialog<void>(
@@ -748,9 +802,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       }
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('打开失败：$e')));
+      await _showSettingsError('打开失败', e);
     }
   }
 
@@ -826,9 +878,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('同步审核签名失败：$e')));
+      await _showSettingsError('同步审核签名失败', e);
     } finally {
       if (mounted) setState(() => _experienceSyncingId = null);
     }
@@ -931,9 +981,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('提交审核失败：$e')));
+      await _showSettingsError('提交审核失败', e);
     } finally {
       if (mounted) {
         setState(() {
@@ -1026,9 +1074,7 @@ ${input.instructions.trim()}
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('脱敏任务失败：$e')));
+      await _showSettingsError('脱敏任务失败', e);
     } finally {
       if (mounted) setState(() => _experienceRedactingId = null);
     }
@@ -1120,9 +1166,7 @@ ${input.instructions.trim()}
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('创建失败：$e')));
+      await _showSettingsError('创建失败', e);
     }
   }
 
@@ -1256,9 +1300,7 @@ ${input.instructions.trim()}
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('保存失败：$e')));
+      await _showSettingsError('保存失败', e);
     }
   }
 
@@ -1502,9 +1544,7 @@ ${input.instructions.trim()}
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('立即执行失败：$e')));
+      await _showSettingsError('立即执行失败', e);
     }
   }
 
@@ -2343,12 +2383,13 @@ ${input.instructions.trim()}
     await _refresh();
   }
 
-  String? _requireDhtAdminBaseUrl() {
+  Future<String?> _requireDhtAdminBaseUrl() async {
     final baseUrl = _dhtClientConfig?.adminBaseUrl.trim() ?? '';
     if (baseUrl.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请先添加 DHT 节点并填写公网访问 URL')));
+      await _showSettingsError(
+        '缺少 DHT 公网访问 URL',
+        StateError('请先添加 DHT 节点并填写公网访问 URL'),
+      );
       return null;
     }
     return baseUrl;
@@ -2366,8 +2407,9 @@ ${input.instructions.trim()}
 
   Future<void> _bindDhtAdmin() async {
     if (_accountBusy) return;
-    final baseUrl = _requireDhtAdminBaseUrl();
+    final baseUrl = await _requireDhtAdminBaseUrl();
     if (baseUrl == null) return;
+    if (!mounted) return;
     final initPassword = await showDialog<String>(
       context: context,
       builder: (_) => const _DhtBindDialog(),
@@ -2393,9 +2435,7 @@ ${input.instructions.trim()}
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('DHT 绑定失败：$e')));
+      await _showSettingsError('DHT 绑定失败', e);
     } finally {
       if (mounted) setState(() => _accountBusy = false);
     }
@@ -2403,7 +2443,7 @@ ${input.instructions.trim()}
 
   Future<void> _syncDhtRuntimeConfig() async {
     if (_accountBusy) return;
-    final baseUrl = _requireDhtAdminBaseUrl();
+    final baseUrl = await _requireDhtAdminBaseUrl();
     if (baseUrl == null) return;
     setState(() => _accountBusy = true);
     try {
@@ -2420,9 +2460,7 @@ ${input.instructions.trim()}
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('DHT 配置同步失败：$e')));
+      await _showSettingsError('DHT 配置同步失败', e);
     } finally {
       if (mounted) setState(() => _accountBusy = false);
     }
@@ -2430,7 +2468,7 @@ ${input.instructions.trim()}
 
   Future<void> _showDhtAdminStatus() async {
     if (_accountBusy) return;
-    final baseUrl = _requireDhtAdminBaseUrl();
+    final baseUrl = await _requireDhtAdminBaseUrl();
     if (baseUrl == null) return;
     setState(() => _accountBusy = true);
     try {
@@ -2459,9 +2497,7 @@ ${input.instructions.trim()}
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('DHT 状态查询失败：$e')));
+      await _showSettingsError('DHT 状态查询失败', e);
     } finally {
       if (mounted) setState(() => _accountBusy = false);
     }
@@ -2469,7 +2505,7 @@ ${input.instructions.trim()}
 
   Future<void> _setDhtPublicMode(bool enabled) async {
     if (_accountBusy) return;
-    final baseUrl = _requireDhtAdminBaseUrl();
+    final baseUrl = await _requireDhtAdminBaseUrl();
     if (baseUrl == null) return;
     final managerBaseUrl = enabled ? _defaultExperienceManagerBaseUrl() : '';
     setState(() => _accountBusy = true);
@@ -2508,9 +2544,7 @@ ${input.instructions.trim()}
       await _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('DHT 公开模式切换失败：$e')));
+      await _showSettingsError('DHT 公开模式切换失败', e);
     } finally {
       if (mounted) setState(() => _accountBusy = false);
     }
@@ -3439,16 +3473,42 @@ class _StoryVerificationResult {
   final String? publicKeyHash;
 }
 
+class _SettingsErrorDetails {
+  const _SettingsErrorDetails({required this.summary, this.body = ''});
+
+  final String summary;
+  final String body;
+}
+
+_SettingsErrorDetails _settingsErrorDetails(Object error) {
+  if (error is ExperienceNetworkRequestException) {
+    final body = <String>[
+      if (error.statusCode != null) 'HTTP 状态：${error.statusCode}',
+      if (error.errorCode.trim().isNotEmpty) '错误代码：${error.errorCode}',
+      '错误信息：${error.message}',
+      if (error.rawBody.trim().isNotEmpty) ...[
+        '',
+        '服务端返回：',
+        error.rawBody.trim(),
+      ],
+    ].join('\n');
+    return _SettingsErrorDetails(summary: error.toString(), body: body);
+  }
+  return _SettingsErrorDetails(summary: error.toString());
+}
+
 class _ExperiencePreviewData {
   const _ExperiencePreviewData({
     required this.contentPath,
     required this.messages,
     required this.eventsText,
+    required this.toolFiles,
   });
 
   final String contentPath;
   final List<_ExperiencePreviewMessage> messages;
   final String eventsText;
+  final List<_ExperiencePreviewToolFile> toolFiles;
 }
 
 class _ExperiencePreviewMessage {
@@ -3456,6 +3516,16 @@ class _ExperiencePreviewMessage {
 
   final String role;
   final String text;
+}
+
+class _ExperiencePreviewToolFile {
+  const _ExperiencePreviewToolFile({
+    required this.relativePath,
+    required this.content,
+  });
+
+  final String relativePath;
+  final String content;
 }
 
 Future<_ExperiencePreviewData> _loadExperiencePreviewData(
@@ -3472,6 +3542,7 @@ Future<_ExperiencePreviewData> _loadExperiencePreviewData(
     contentPath: contentPath,
     messages: _parseExperienceConversation(conversation),
     eventsText: eventsText.trimRight(),
+    toolFiles: await _readExperienceToolFiles(contentPath),
   );
 }
 
@@ -3479,6 +3550,42 @@ Future<String> _readOptionalText(String path) async {
   final file = File(path);
   if (!await file.exists()) return '';
   return file.readAsString();
+}
+
+Future<List<_ExperiencePreviewToolFile>> _readExperienceToolFiles(
+  String contentPath,
+) async {
+  final toolDir = Directory(p.join(contentPath, 'tool-calls'));
+  if (!await toolDir.exists()) return const [];
+  final out = <_ExperiencePreviewToolFile>[];
+  await for (final entity in toolDir.list(
+    recursive: true,
+    followLinks: false,
+  )) {
+    if (entity is! File) continue;
+    final relative = p
+        .relative(entity.path, from: toolDir.path)
+        .split(p.separator)
+        .join('/');
+    final stat = await entity.stat();
+    if (stat.size > 512 * 1024) {
+      out.add(
+        _ExperiencePreviewToolFile(
+          relativePath: relative,
+          content: '文件过大，预览已省略（${stat.size} bytes）',
+        ),
+      );
+      continue;
+    }
+    out.add(
+      _ExperiencePreviewToolFile(
+        relativePath: relative,
+        content: await entity.readAsString().catchError((_) => '无法读取该工具记录'),
+      ),
+    );
+  }
+  out.sort((a, b) => a.relativePath.compareTo(b.relativePath));
+  return out;
 }
 
 List<_ExperiencePreviewMessage> _parseExperienceConversation(String text) {
@@ -3506,6 +3613,11 @@ List<_ExperiencePreviewMessage> _parseExperienceConversation(String text) {
     buffer.writeln(line);
   }
   flush();
+  if (messages.isEmpty && text.trim().isNotEmpty) {
+    messages.add(
+      _ExperiencePreviewMessage(role: '原始对话', text: text.trimRight()),
+    );
+  }
   return messages;
 }
 
@@ -3758,8 +3870,13 @@ class _ExperiencePreviewDialogState extends State<_ExperiencePreviewDialog> {
                           _buildExperiencePreviewBubble(context, message),
                       const SizedBox(height: 8),
                       ExpansionTile(
+                        initiallyExpanded: true,
                         tilePadding: EdgeInsets.zero,
-                        title: const Text('工具调用与返回'),
+                        title: Text(
+                          data.toolFiles.isEmpty
+                              ? '工具调用与返回'
+                              : '工具调用与返回（${data.toolFiles.length} 个文件）',
+                        ),
                         children: [
                           Container(
                             width: double.infinity,
@@ -3782,6 +3899,40 @@ class _ExperiencePreviewDialogState extends State<_ExperiencePreviewDialog> {
                               ),
                             ),
                           ),
+                          for (final file in data.toolFiles)
+                            Container(
+                              width: double.infinity,
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: theme.colorScheme.surfaceContainerLow,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: theme.colorScheme.outlineVariant
+                                      .withValues(alpha: 0.55),
+                                ),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    file.relativePath,
+                                    style: theme.textTheme.labelMedium
+                                        ?.copyWith(fontWeight: FontWeight.w700),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  SelectableText(
+                                    file.content.trimRight().isEmpty
+                                        ? '空文件'
+                                        : file.content.trimRight(),
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      fontFamily: 'monospace',
+                                      height: 1.45,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                         ],
                       ),
                     ],

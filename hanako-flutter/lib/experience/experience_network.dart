@@ -9,6 +9,35 @@ import '../identity/keypair.dart';
 import '../identity/signed_request.dart' as ph01;
 import 'experience_review.dart';
 
+class ExperienceNetworkRequestException implements Exception {
+  const ExperienceNetworkRequestException({
+    required this.action,
+    required this.statusCode,
+    required this.message,
+    this.errorCode = '',
+    this.rawBody = '',
+  });
+
+  final String action;
+  final int? statusCode;
+  final String errorCode;
+  final String message;
+  final String rawBody;
+
+  @override
+  String toString() {
+    final parts = <String>[action];
+    if (statusCode != null) {
+      parts.add('HTTP $statusCode');
+    }
+    if (errorCode.trim().isNotEmpty) {
+      parts.add(errorCode.trim());
+    }
+    parts.add(message.trim().isEmpty ? '请求失败' : message.trim());
+    return parts.join('：');
+  }
+}
+
 enum ExperienceTransport {
   ipv6Direct('ipv6_direct'),
   ipv4HolePunch('ipv4_hole_punch'),
@@ -1658,14 +1687,19 @@ class ExperienceNetworkManagerClient {
     required String packageSha256,
     required String pubkeyHash,
   }) async {
-    final resp = await _dio.postUri<Map<String, dynamic>>(
-      Uri.parse('$managerBaseUrl/api/v1/experiences/package-pow/challenge'),
-      data: {
-        'package_sha256': packageSha256.trim().toLowerCase(),
-        'pubkey_hash': pubkeyHash.trim().toLowerCase(),
-      },
-      options: Options(contentType: Headers.jsonContentType),
-    );
+    late final Response<Map<String, dynamic>> resp;
+    try {
+      resp = await _dio.postUri<Map<String, dynamic>>(
+        Uri.parse('$managerBaseUrl/api/v1/experiences/package-pow/challenge'),
+        data: {
+          'package_sha256': packageSha256.trim().toLowerCase(),
+          'pubkey_hash': pubkeyHash.trim().toLowerCase(),
+        },
+        options: Options(contentType: Headers.jsonContentType),
+      );
+    } on DioException catch (e) {
+      throw _experienceNetworkException(e, '申请经验包工作量证明挑战失败');
+    }
     final data = resp.data;
     if (data == null) {
       throw StateError('经验管理端未返回工作量证明挑战');
@@ -1700,17 +1734,71 @@ class ExperienceNetworkManagerClient {
         'package_pow': packagePow.toJson(),
       },
     );
-    final resp = await _dio.postUri<Map<String, dynamic>>(
-      Uri.parse('$managerBaseUrl/api/v1/experiences'),
-      data: signed.toJson(),
-      options: Options(contentType: Headers.jsonContentType),
-    );
+    late final Response<Map<String, dynamic>> resp;
+    try {
+      resp = await _dio.postUri<Map<String, dynamic>>(
+        Uri.parse('$managerBaseUrl/api/v1/experiences'),
+        data: signed.toJson(),
+        options: Options(contentType: Headers.jsonContentType),
+      );
+    } on DioException catch (e) {
+      throw _experienceNetworkException(e, '提交经验审核失败');
+    }
     final data = resp.data;
     if (data == null) {
       throw StateError('经验管理端未返回提审结果');
     }
     return ExperienceSubmissionResult.fromJson(data);
   }
+}
+
+ExperienceNetworkRequestException _experienceNetworkException(
+  DioException error,
+  String action,
+) {
+  final response = error.response;
+  final bodyText = _dioBodyText(response?.data);
+  final decoded = _decodeJsonMap(response?.data);
+  final code = decoded?['error']?.toString().trim() ?? '';
+  final decodedMessage = decoded?['message']?.toString().trim() ?? '';
+  final message = decodedMessage.ifEmpty(
+    bodyText.trim().ifEmpty(error.message ?? '网络请求失败'),
+  );
+  return ExperienceNetworkRequestException(
+    action: action,
+    statusCode: response?.statusCode,
+    errorCode: code,
+    message: message,
+    rawBody: bodyText,
+  );
+}
+
+Map<String, dynamic>? _decodeJsonMap(Object? data) {
+  if (data is Map<String, dynamic>) return data;
+  if (data is Map) return data.cast<String, dynamic>();
+  if (data is String && data.trim().isNotEmpty) {
+    try {
+      final decoded = jsonDecode(data);
+      if (decoded is Map<String, dynamic>) return decoded;
+      if (decoded is Map) return decoded.cast<String, dynamic>();
+    } catch (_) {}
+  }
+  return null;
+}
+
+String _dioBodyText(Object? data) {
+  if (data == null) return '';
+  if (data is String) return data;
+  if (data is List<int>) return utf8.decode(data, allowMalformed: true);
+  try {
+    return const JsonEncoder.withIndent('  ').convert(data);
+  } catch (_) {
+    return data.toString();
+  }
+}
+
+extension _ExperienceStringExt on String {
+  String ifEmpty(String fallback) => isEmpty ? fallback : this;
 }
 
 class ExperiencePackagePowChallenge {
