@@ -33,6 +33,10 @@ class ExperienceStore {
     String brief = '',
     List<String> keywords = const [],
     String events = '',
+    String sourceType = '',
+    String sourceSessionPath = '',
+    List<ExperienceRawFile> toolFiles = const [],
+    List<ExperienceRawFile> attachmentFiles = const [],
     DateTime? now,
   }) async {
     await init();
@@ -51,9 +55,13 @@ class ExperienceStore {
         brief: brief.trim(),
         keywords: _normalizeKeywords(keywords),
         createdAt: createdAt.toIso8601String(),
+        sourceType: sourceType.trim(),
+        sourceSessionPath: sourceSessionPath.trim(),
       ),
       conversation: conversation,
       events: events,
+      toolFiles: toolFiles,
+      attachmentFiles: attachmentFiles,
     );
     return ExperienceSaveResult(
       experienceId: id,
@@ -67,8 +75,74 @@ class ExperienceStore {
         brief: brief.trim(),
         keywords: _normalizeKeywords(keywords),
         createdAt: createdAt.toIso8601String(),
+        sourceType: sourceType.trim(),
+        sourceSessionPath: sourceSessionPath.trim(),
       ),
     );
+  }
+
+  Future<ExperienceSaveResult> overwritePrivateExperience({
+    required String experienceId,
+    required String title,
+    required String conversation,
+    String brief = '',
+    List<String> keywords = const [],
+    String events = '',
+    String sourceType = '',
+    String sourceSessionPath = '',
+    List<ExperienceRawFile> toolFiles = const [],
+    List<ExperienceRawFile> attachmentFiles = const [],
+    DateTime? now,
+  }) async {
+    await init();
+    _validateExperienceId(experienceId);
+    final itemDir = _safeChild(privateDir, experienceId);
+    if (!await itemDir.exists()) {
+      throw StateError('本地私有经验不存在：$experienceId');
+    }
+    if (await privateExperienceHasReviewMaterials(experienceId: experienceId)) {
+      throw StateError('经验已附加审核材料，不能直接覆盖内容');
+    }
+    await _deletePrivatePackageArtifacts(experienceId, itemDir);
+    final contentDir = Directory(p.join(itemDir.path, 'content'));
+    if (await contentDir.exists()) {
+      await contentDir.delete(recursive: true);
+    }
+    final createdAt = (now ?? DateTime.now().toUtc()).toUtc();
+    final metadata = ExperienceMetadata(
+      experienceId: experienceId,
+      title: title.trim(),
+      brief: brief.trim(),
+      keywords: _normalizeKeywords(keywords),
+      createdAt: createdAt.toIso8601String(),
+      sourceType: sourceType.trim(),
+      sourceSessionPath: sourceSessionPath.trim(),
+    );
+    await _writeRawDump(
+      contentDir: contentDir,
+      metadata: metadata,
+      conversation: conversation,
+      events: events,
+      toolFiles: toolFiles,
+      attachmentFiles: attachmentFiles,
+    );
+    return ExperienceSaveResult(
+      experienceId: experienceId,
+      scope: ExperienceScope.private,
+      path: itemDir.path,
+      contentPath: contentDir.path,
+      metadataPath: p.join(contentDir.path, 'metadata.json'),
+      metadata: metadata,
+    );
+  }
+
+  Future<bool> privateExperienceHasReviewMaterials({
+    required String experienceId,
+  }) async {
+    await init();
+    _validateExperienceId(experienceId);
+    final itemDir = _safeChild(privateDir, experienceId);
+    return File(p.join(itemDir.path, 'review-materials.json')).exists();
   }
 
   Future<ExperienceSaveResult> importRawDirectoryToPrivate({
@@ -470,10 +544,12 @@ class ExperienceStore {
       keyPair: keyPair,
       now: now,
     );
+    final packageBytes = await File(packaged.cachePath).readAsBytes();
     return ExperienceSubmissionPackageResult(
       experienceId: packaged.experienceId,
-      packageBytes: await File(packaged.cachePath).readAsBytes(),
+      packageBytes: packageBytes,
       packageHash: packaged.packageHash,
+      packageBytesSha256: sha256.convert(packageBytes).toString(),
       publisher: packaged.publisher,
       cachePath: packaged.cachePath,
     );
@@ -484,6 +560,8 @@ class ExperienceStore {
     required ExperienceMetadata metadata,
     required String conversation,
     required String events,
+    required List<ExperienceRawFile> toolFiles,
+    required List<ExperienceRawFile> attachmentFiles,
   }) async {
     final rawDir = Directory(p.join(contentDir.path, 'raw'));
     await rawDir.create(recursive: true);
@@ -504,6 +582,50 @@ class ExperienceStore {
       _ensureTrailingNewline(events.trim().isEmpty ? '无工具事件记录。' : events),
       flush: true,
     );
+    await _writeRawFiles(
+      Directory(p.join(contentDir.path, 'tool-calls')),
+      toolFiles,
+    );
+    await _writeRawFiles(
+      Directory(p.join(contentDir.path, 'attachments')),
+      attachmentFiles,
+    );
+  }
+
+  Future<void> _writeRawFiles(
+    Directory baseDir,
+    List<ExperienceRawFile> files,
+  ) async {
+    final base = p.normalize(baseDir.absolute.path);
+    for (final file in files) {
+      final relative = file.relativePath.trim().replaceAll('\\', '/');
+      if (relative.isEmpty ||
+          p.isAbsolute(relative) ||
+          relative.split('/').contains('..')) {
+        throw ArgumentError('经验文件路径无效：${file.relativePath}');
+      }
+      final target = File(p.joinAll([baseDir.path, ...relative.split('/')]));
+      if (!_pathInside(base, target.path)) {
+        throw ArgumentError('经验文件路径逃逸：${file.relativePath}');
+      }
+      await target.parent.create(recursive: true);
+      await target.writeAsBytes(file.bytes, flush: true);
+    }
+  }
+
+  Future<void> _deletePrivatePackageArtifacts(
+    String experienceId,
+    Directory itemDir,
+  ) async {
+    for (final path in [
+      p.join(itemDir.path, 'package.zip'),
+      p.join(itemDir.path, 'publisher.json'),
+      p.join(itemDir.path, 'ratings.dat'),
+      p.join(cacheDir.path, '$experienceId.hxp'),
+    ]) {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    }
   }
 
   Directory _safeChild(Directory base, String child) {
@@ -964,7 +1086,7 @@ class ExperienceDemandPullWorkflow {
         sessionId: offer.relaySessionId,
       );
     } else if (bytes == null && _managerClient != null) {
-      bytes = await _managerClient!.fetchPackage(
+      bytes = await _managerClient.fetchPackage(
         experienceId: offer.experienceId,
       );
     } else if (bytes == null) {
@@ -1183,6 +1305,8 @@ class ExperienceMetadata {
     this.brief = '',
     this.keywords = const [],
     required this.createdAt,
+    this.sourceType = '',
+    this.sourceSessionPath = '',
   });
 
   final String schemaVersion;
@@ -1191,6 +1315,8 @@ class ExperienceMetadata {
   final String brief;
   final List<String> keywords;
   final String createdAt;
+  final String sourceType;
+  final String sourceSessionPath;
 
   Map<String, dynamic> toJson() => {
     'schema_version': schemaVersion,
@@ -1199,6 +1325,9 @@ class ExperienceMetadata {
     if (brief.trim().isNotEmpty) 'brief': brief.trim(),
     if (keywords.isNotEmpty) 'keywords': keywords,
     'created_at': createdAt,
+    if (sourceType.trim().isNotEmpty) 'source_type': sourceType.trim(),
+    if (sourceSessionPath.trim().isNotEmpty)
+      'source_session_path': sourceSessionPath.trim(),
   };
 
   static ExperienceMetadata fromJson(Map<String, dynamic> json) {
@@ -1217,8 +1346,23 @@ class ExperienceMetadata {
       createdAt:
           json['created_at']?.toString() ??
           DateTime.now().toUtc().toIso8601String(),
+      sourceType: json['source_type']?.toString() ?? '',
+      sourceSessionPath: json['source_session_path']?.toString() ?? '',
     );
   }
+}
+
+class ExperienceRawFile {
+  const ExperienceRawFile({required this.relativePath, required this.bytes});
+
+  factory ExperienceRawFile.text(String relativePath, String content) =>
+      ExperienceRawFile(
+        relativePath: relativePath,
+        bytes: Uint8List.fromList(utf8.encode(content)),
+      );
+
+  final String relativePath;
+  final Uint8List bytes;
 }
 
 class ExperiencePublisher {
@@ -1394,13 +1538,19 @@ class ExperienceSubmissionPackageResult {
     required this.experienceId,
     required this.packageBytes,
     required this.packageHash,
+    required this.packageBytesSha256,
     required this.publisher,
     this.cachePath,
   });
 
   final String experienceId;
   final Uint8List packageBytes;
+
+  /// Hash of the inner `package.zip` content, used by publisher/review chains.
   final String packageHash;
+
+  /// Hash of the uploaded outer `.hxp` bytes, used by package PoW.
+  final String packageBytesSha256;
   final ExperiencePublisher publisher;
   final String? cachePath;
 }

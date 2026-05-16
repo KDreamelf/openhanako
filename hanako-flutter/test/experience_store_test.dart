@@ -102,6 +102,12 @@ void main() {
     expect(conversation, contains('user@example.com'));
     expect(conversation, contains('13800138000'));
     expect(conversation, isNot(contains('REDACTED')));
+    expect(
+      result.packageBytesSha256,
+      sha256.convert(result.packageBytes).toString(),
+    );
+    expect(result.packageHash, result.publisher.packageHash);
+    expect(result.packageBytesSha256, isNot(result.packageHash));
   });
 
   test('publisher.json 验签通过，篡改 package.zip 后失败', () async {

@@ -72,6 +72,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
   Map<String, BridgeSourceStatus> _bridgeStatuses = const {};
   BrowserStatus? _browserStatus;
   String? _experienceRedactingId;
+  String? _experienceRegeneratingId;
   String? _experienceSyncingId;
   String? _experienceSubmittingId;
   double? _experienceSubmitProgress;
@@ -920,7 +921,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
       }
       final client = ExperienceNetworkManagerClient();
       final packagePowChallenge = await client.startPackagePowChallenge(
-        packageSha256: package.packageHash,
+        packageSha256: package.packageBytesSha256,
         pubkeyHash: identity.keyPair.publicKeyHash,
       );
       final powStatus = await eng.backendClient
@@ -951,7 +952,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
         keyPair: identity.keyPair,
         packagePow: ExperiencePackagePowProof(
           challengeId: packagePowChallenge.challengeId,
-          packageSha256: package.packageHash,
+          packageSha256: package.packageBytesSha256,
           pubkeyHash: identity.keyPair.publicKeyHash,
         ),
         filename: '${item.experienceId}.hxp',
@@ -997,6 +998,91 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     await showDialog<void>(
       context: context,
       builder: (_) => _ExperiencePreviewDialog(item: item),
+    );
+  }
+
+  Future<void> _regenerateExperience(ExperienceListItem item) async {
+    if (_experienceRegeneratingId != null) return;
+    final meta = item.metadata;
+    final sessionPath = meta?.sourceSessionPath.trim() ?? '';
+    if (sessionPath.isEmpty) {
+      await _showSettingsError(
+        '无法重新生成经验',
+        StateError('该经验没有记录原始会话路径，只能预览或重新创建。'),
+      );
+      return;
+    }
+    final eng = ref.read(engineProvider);
+    final store = ExperienceStore(
+      agentDir: eng.home.agentDir(eng.config.agentId),
+    );
+    final reviewed =
+        item.scope == ExperienceScope.network ||
+        await store.privateExperienceHasReviewMaterials(
+          experienceId: item.experienceId,
+        );
+    var createNew = false;
+    if (reviewed) {
+      final confirmed = await _confirmRegenerateReviewedExperience(item);
+      if (confirmed != true) return;
+      createNew = true;
+    }
+    setState(() => _experienceRegeneratingId = item.experienceId);
+    try {
+      final title = item.title.trim();
+      final brief = meta?.brief ?? '';
+      final keywords = meta?.keywords ?? const <String>[];
+      if (createNew) {
+        await ExperienceSessionCapture.saveSessionAsPrivateExperience(
+          agentDir: eng.home.agentDir(eng.config.agentId),
+          sessionPath: sessionPath,
+          title: title,
+          brief: brief,
+          keywords: keywords,
+        );
+      } else {
+        await ExperienceSessionCapture.overwritePrivateExperienceFromSession(
+          agentDir: eng.home.agentDir(eng.config.agentId),
+          experienceId: item.experienceId,
+          sessionPath: sessionPath,
+          title: title,
+          brief: brief,
+          keywords: keywords,
+        );
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(createNew ? '已创建重新生成的新经验' : '经验内容已重新生成')),
+      );
+      await _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      await _showSettingsError('重新生成经验失败', e);
+    } finally {
+      if (mounted) setState(() => _experienceRegeneratingId = null);
+    }
+  }
+
+  Future<bool?> _confirmRegenerateReviewedExperience(ExperienceListItem item) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('经验已审核通过'),
+        content: Text(
+          '“${item.title}”已经进入审核通过链路，不能直接覆盖原内容。'
+          '如果继续重新生成，程序会基于原始会话创建一条新的本地私有经验。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消重新生成'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('创建新经验'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -2089,6 +2175,7 @@ ${input.instructions.trim()}
     final keywords = meta?.keywords.join(', ') ?? '';
     final syncing = _experienceSyncingId == item.experienceId;
     final submitting = _experienceSubmittingId == item.experienceId;
+    final regenerating = _experienceRegeneratingId == item.experienceId;
     final subtitle = [
       item.scope.wireName,
       if (meta?.createdAt.trim().isNotEmpty == true) meta!.createdAt,
@@ -2118,6 +2205,23 @@ ${input.instructions.trim()}
                 icon: const Icon(Icons.visibility_outlined),
                 onPressed: () => _previewExperience(item),
               ),
+              IconButton(
+                tooltip: '重新生成经验',
+                icon: regenerating
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh_outlined),
+                onPressed:
+                    _experienceRegeneratingId == null &&
+                        _experienceRedactingId == null &&
+                        _experienceSubmittingId == null &&
+                        _experienceSyncingId == null
+                    ? () => _regenerateExperience(item)
+                    : null,
+              ),
               if (item.scope == ExperienceScope.private)
                 IconButton(
                   tooltip: '启动脱敏任务',
@@ -2130,6 +2234,7 @@ ${input.instructions.trim()}
                       : const Icon(Icons.auto_fix_high_outlined),
                   onPressed:
                       _experienceRedactingId == null &&
+                          _experienceRegeneratingId == null &&
                           _experienceSubmittingId == null &&
                           _experienceSyncingId == null
                       ? () => _startExperienceRedactionTask(item)
@@ -2148,6 +2253,7 @@ ${input.instructions.trim()}
                   onPressed:
                       _experienceSubmittingId == null &&
                           _experienceSyncingId == null &&
+                          _experienceRegeneratingId == null &&
                           _experienceRedactingId == null
                       ? () => _submitExperienceForReview(item)
                       : null,
@@ -2165,6 +2271,7 @@ ${input.instructions.trim()}
                   onPressed:
                       _experienceSyncingId == null &&
                           _experienceSubmittingId == null &&
+                          _experienceRegeneratingId == null &&
                           _experienceRedactingId == null
                       ? () => _syncExperienceReviewMaterials(item)
                       : null,

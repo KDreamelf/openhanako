@@ -100,6 +100,72 @@ void main() {
     expect(conversation, contains('AI 给出处理方案'));
   });
 
+  test('create_experience 会在对话流中保留工具位置并保存图片附件', () async {
+    final dir = await Directory.systemTemp.createTemp('hanako_local_tools_');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final sessionPath = [
+      dir.path,
+      'sessions',
+      's1.jsonl',
+    ].join(Platform.pathSeparator);
+    RuntimeSessionStore.createSessionFile(sessionPath, sessionId: 's1');
+    RuntimeSessionStore.appendMessages(sessionPath, [
+      RuntimeMessage.userText('请检查屏幕'),
+      RuntimeMessage.assistant(
+        blocks: [
+          const RuntimeTextBlock('我先读取图片。'),
+          RuntimeToolCallBlock(
+            id: 'call_1',
+            name: 'view_image',
+            argumentsJson: jsonEncode({'path': 'screen.png'}),
+          ),
+          const RuntimeTextBlock('读取后继续判断。'),
+        ],
+        stopReason: 'tool_calls',
+      ),
+      RuntimeMessage.toolResult(
+        toolCallId: 'call_1',
+        toolName: 'view_image',
+        content: jsonEncode({
+          'ok': true,
+          'image_url': 'data:image/png;base64,$_onePixelPngBase64',
+        }),
+      ),
+    ], sessionId: 's1');
+
+    final raw = await LocalToolRegistry.execute(
+      LocalToolNames.createExperience,
+      {'title': '工具经验'},
+      agentDir: dir.path,
+      sessionPath: sessionPath,
+    );
+    final body = jsonDecode(raw) as Map<String, dynamic>;
+    final contentPath = body['content_path'] as String;
+    final conversation = File(
+      [contentPath, 'raw', 'conversation.md'].join(Platform.pathSeparator),
+    ).readAsStringSync();
+    final events = File(
+      [contentPath, 'raw', 'events.md'].join(Platform.pathSeparator),
+    ).readAsStringSync();
+    final toolFiles = Directory(
+      [contentPath, 'tool-calls'].join(Platform.pathSeparator),
+    ).listSync().whereType<File>().toList();
+    final attachments = Directory(
+      [contentPath, 'attachments'].join(Platform.pathSeparator),
+    ).listSync().whereType<File>().toList();
+    final toolText = toolFiles.single.readAsStringSync();
+
+    expect(conversation, contains('我先读取图片。'));
+    expect(conversation, contains('[工具调用 t0001：view_image]'));
+    expect(conversation, contains('读取后继续判断。'));
+    expect(events, contains('t0001 · 消息 2 · AI · view_image'));
+    expect(toolText, contains('## 参数'));
+    expect(toolText, contains('## 返回'));
+    expect(toolText, isNot(contains('data:image/png;base64')));
+    expect(toolText, contains('![t0001-result]'));
+    expect(attachments.single.path, endsWith('.png'));
+  });
+
   test('create_artifact 会写入本地文件并返回文件引用', () async {
     final dir = await Directory.systemTemp.createTemp('hanako_local_tools_');
     addTearDown(() => dir.deleteSync(recursive: true));
@@ -337,3 +403,6 @@ void main() {
     expect(first.keys, isNot(contains('content')));
   });
 }
+
+const _onePixelPngBase64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
