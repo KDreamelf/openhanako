@@ -12,7 +12,7 @@
 //   step 0: 欢迎，介绍子体定位
 //   step 1: 账户昵称 + 用户名（沿用原项目 Hanako/User 默认值）
 //   step 2: 新账号验证邮箱 / 既有账号恢复登录
-//   step 3: 生成账号——展示 12 个中文名词 + 占位故事，要求用户保存
+//   step 3: 生成账号——展示 12 个中文名词 + 故事（LLM 未配置时使用 fallback 文案，让 UI 继续可用），要求用户保存
 //   step 4: 用户勾选"已保存"→ 创建 agent，完成
 //
 // 规避 BUG-5：每一步右上角永远显示「跳过」。跳过后不创建身份，
@@ -27,6 +27,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
 import '../../identity/identity.dart';
+import '../design/design.dart';
 import '../widgets/recovery_matrix_table.dart';
 
 enum _OnboardingAccountFlow { unknown, register, login }
@@ -522,40 +523,56 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Scaffold(
-      appBar: AppBar(
-        title: Text('欢迎使用 PH01 子体 · ${_step + 1}/$_totalSteps'),
-        actions: [
-          TextButton(onPressed: _busy ? null : _skip, child: const Text('跳过')),
-        ],
-      ),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: _step == 2 && _accountFlow == _OnboardingAccountFlow.login
-                ? 820
-                : 580,
-          ),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _buildStep(),
-                if (_error != null) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    _error!,
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.error,
+      backgroundColor: Colors.transparent,
+      body: AmbientBackground(
+        child: Column(
+          children: [
+            _OnboardingHeader(
+              currentStep: _step,
+              totalSteps: _totalSteps,
+              busy: _busy,
+              onSkip: _busy ? null : _skip,
+            ),
+            Expanded(
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth:
+                        _step == 2 && _accountFlow == _OnboardingAccountFlow.login
+                            ? 880
+                            : 620,
+                  ),
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(
+                      DS.s24,
+                      DS.s24,
+                      DS.s24,
+                      DS.s24,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _buildStep(),
+                        if (_error != null) ...[
+                          const SizedBox(height: DS.s14),
+                          HanaBanner(
+                            icon: Icons.error_outline_rounded,
+                            title: '出错了',
+                            subtitle: _error!,
+                            color: palette.accentCrimson,
+                          ),
+                        ],
+                        const SizedBox(height: DS.s24),
+                        _buildButtons(),
+                      ],
                     ),
                   ),
-                ],
-                const SizedBox(height: 24),
-                _buildButtons(),
-              ],
+                ),
+              ),
             ),
-          ),
+          ],
         ),
       ),
     );
@@ -702,6 +719,171 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
 }
 
 // ===========================================================================
+//  Header
+// ===========================================================================
+class _OnboardingHeader extends StatelessWidget {
+  const _OnboardingHeader({
+    required this.currentStep,
+    required this.totalSteps,
+    required this.busy,
+    required this.onSkip,
+  });
+
+  final int currentStep;
+  final int totalSteps;
+  final bool busy;
+  final VoidCallback? onSkip;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Container(
+      decoration: BoxDecoration(
+        color: palette.bgRaised.withValues(alpha: palette.isDark ? 0.70 : 0.86),
+        border: Border(
+          bottom: BorderSide(color: palette.divider, width: DS.hairline),
+        ),
+      ),
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(DS.s20, DS.s14, DS.s20, DS.s12),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          palette.accentEmerald,
+                          palette.accentCyan,
+                        ],
+                      ),
+                      borderRadius: BorderRadius.circular(DS.r8),
+                      boxShadow: [
+                        BoxShadow(
+                          color: palette.accentEmerald.withValues(alpha: 0.42),
+                          blurRadius: 12,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Icon(
+                      Icons.auto_awesome_rounded,
+                      size: 18,
+                      color: palette.isDark
+                          ? const Color(0xFF06120A)
+                          : Colors.white,
+                    ),
+                  ),
+                  const SizedBox(width: DS.s12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          children: [
+                            Text(
+                              'PH01 SUBBODY',
+                              style: TextStyle(
+                                color: palette.textTertiary,
+                                fontSize: DS.t10,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 1.6,
+                              ),
+                            ),
+                            const SizedBox(width: DS.s10),
+                            Text(
+                              'STEP ${currentStep + 1} / $totalSteps',
+                              style: TextStyle(
+                                color: palette.accentEmerald,
+                                fontSize: DS.t10,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Text(
+                          '欢迎使用 PH01 子体',
+                          style: TextStyle(
+                            color: palette.textPrimary,
+                            fontSize: DS.t18,
+                            fontWeight: FontWeight.w700,
+                            height: 1.15,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  GlassButton(
+                    label: '跳过',
+                    icon: Icons.skip_next_rounded,
+                    dense: true,
+                    onPressed: onSkip,
+                  ),
+                ],
+              ),
+              const SizedBox(height: DS.s12),
+              _OnboardingProgressBar(
+                currentStep: currentStep,
+                totalSteps: totalSteps,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OnboardingProgressBar extends StatelessWidget {
+  const _OnboardingProgressBar({
+    required this.currentStep,
+    required this.totalSteps,
+  });
+
+  final int currentStep;
+  final int totalSteps;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Row(
+      children: [
+        for (var i = 0; i < totalSteps; i++)
+          Expanded(
+            child: Container(
+              margin: EdgeInsets.only(right: i < totalSteps - 1 ? 4 : 0),
+              height: 3,
+              decoration: BoxDecoration(
+                color: i <= currentStep
+                    ? palette.accentEmerald
+                    : palette.divider,
+                borderRadius: BorderRadius.circular(2),
+                boxShadow: i <= currentStep
+                    ? [
+                        BoxShadow(
+                          color: palette.accentEmerald.withValues(alpha: 0.36),
+                          blurRadius: 6,
+                        ),
+                      ]
+                    : null,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+// ===========================================================================
 //  step 0 · 欢迎
 // ===========================================================================
 class _StepWelcome extends StatelessWidget {
@@ -709,18 +891,59 @@ class _StepWelcome extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Column(
       children: [
-        const Icon(Icons.auto_awesome, size: 80),
-        const SizedBox(height: 16),
-        Text('欢迎使用 PH01 子体', style: Theme.of(context).textTheme.headlineMedium),
-        const SizedBox(height: 8),
+        Container(
+          width: 80,
+          height: 80,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                palette.accentEmerald,
+                palette.accentCyan,
+                palette.accentLavender,
+              ],
+            ),
+            borderRadius: BorderRadius.circular(DS.r20),
+            boxShadow: [
+              BoxShadow(
+                color: palette.accentEmerald.withValues(alpha: 0.42),
+                blurRadius: 24,
+                spreadRadius: 2,
+                offset: const Offset(0, 8),
+              ),
+            ],
+          ),
+          child: Icon(
+            Icons.auto_awesome_rounded,
+            size: 40,
+            color: palette.isDark ? const Color(0xFF06120A) : Colors.white,
+          ),
+        ),
+        const SizedBox(height: DS.s20),
+        Text(
+          '欢迎使用 PH01 子体',
+          style: TextStyle(
+            color: palette.textPrimary,
+            fontSize: DS.t26,
+            fontWeight: FontWeight.w700,
+            letterSpacing: -0.4,
+          ),
+        ),
+        const SizedBox(height: DS.s10),
         Text(
           '你的私人 AI 子体，带有本地身份、长期记忆与桌面工作流。',
-          style: Theme.of(context).textTheme.bodyLarge,
+          style: TextStyle(
+            color: palette.textSecondary,
+            fontSize: DS.t14,
+            height: 1.6,
+          ),
           textAlign: TextAlign.center,
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: DS.s24),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -767,12 +990,18 @@ class _StepNames extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     final usernameTooLong = userName.trim().length > 32;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('你的账号', style: Theme.of(context).textTheme.titleLarge),
-        const SizedBox(height: 16),
+        _StepHeading(
+          icon: Icons.account_circle_outlined,
+          title: '你的账号',
+          subtitle: '为子体取一个名字；用户名是云端账号的唯一标识。',
+          accent: palette.accentEmerald,
+        ),
+        const SizedBox(height: DS.s16),
         TextFormField(
           initialValue: agentName,
           decoration: const InputDecoration(
@@ -782,7 +1011,7 @@ class _StepNames extends StatelessWidget {
           ),
           onChanged: onAgentNameChanged,
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: DS.s12),
         TextFormField(
           initialValue: userName,
           decoration: InputDecoration(
@@ -824,6 +1053,7 @@ class _StepRegistrationEmail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     final theme = Theme.of(context);
     final emailReady = email.trim().isNotEmpty && email.contains('@');
     final canSend = !busy && emailReady && cooldownRemaining <= 0;
@@ -835,13 +1065,13 @@ class _StepRegistrationEmail extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('验证邮箱', style: theme.textTheme.titleLarge),
-        const SizedBox(height: 8),
-        Text(
-          '邮箱用于注册确认与后续恢复二次校验。验证码通过后，本机会生成私钥和助记词，再提交公钥完成注册。',
-          style: theme.textTheme.bodyMedium,
+        _StepHeading(
+          icon: Icons.mark_email_unread_outlined,
+          title: '验证邮箱',
+          subtitle: '邮箱用于注册确认与后续恢复二次校验。验证码通过后，本机会生成私钥和助记词，再提交公钥完成注册。',
+          accent: palette.accentCyan,
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: DS.s16),
         TextFormField(
           initialValue: email,
           keyboardType: TextInputType.emailAddress,
@@ -852,7 +1082,7 @@ class _StepRegistrationEmail extends StatelessWidget {
           ),
           onChanged: onEmailChanged,
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: DS.s12),
         Row(
           children: [
             Expanded(
@@ -874,13 +1104,60 @@ class _StepRegistrationEmail extends StatelessWidget {
                 onChanged: onCodeChanged,
               ),
             ),
-            const SizedBox(width: 12),
-            OutlinedButton(
+            const SizedBox(width: DS.s12),
+            OutlinedButton.icon(
               onPressed: canSend ? onSendCode : null,
-              child: Text(sendLabel),
+              icon: Icon(
+                cooldownRemaining > 0
+                    ? Icons.hourglass_top_rounded
+                    : challenge == null
+                        ? Icons.send_rounded
+                        : Icons.refresh_rounded,
+                size: 16,
+              ),
+              label: Text(sendLabel),
             ),
           ],
         ),
+        if (challenge != null) ...[
+          const SizedBox(height: DS.s12),
+          Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: DS.s12,
+              vertical: DS.s10,
+            ),
+            decoration: BoxDecoration(
+              color:
+                  palette.accentEmerald.withValues(alpha: palette.isDark ? 0.10 : 0.08),
+              borderRadius: BorderRadius.circular(DS.r8),
+              border: Border.all(
+                color: palette.accentEmerald.withValues(alpha: 0.30),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.mark_email_read_outlined,
+                  size: 14,
+                  color: palette.accentEmerald,
+                ),
+                const SizedBox(width: DS.s8),
+                Expanded(
+                  child: Text(
+                    '已发送至 ${challenge!.delivery}',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: Color.lerp(
+                        palette.textSecondary,
+                        palette.accentEmerald,
+                        0.5,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -928,6 +1205,7 @@ class _StepExistingLogin extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     final theme = Theme.of(context);
     final showProgress =
         phase != null ||
@@ -937,13 +1215,13 @@ class _StepExistingLogin extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('登录已有账号', style: theme.textTheme.titleLarge),
-        const SizedBox(height: 8),
-        Text(
-          '用户名 $userName 已存在。请输入这个账号保存的 12 个名词或记忆故事。',
-          style: theme.textTheme.bodyMedium,
+        _StepHeading(
+          icon: Icons.key_outlined,
+          title: '登录已有账号',
+          subtitle: '用户名 $userName 已存在。请输入这个账号保存的 12 个名词或记忆故事。',
+          accent: palette.accentLavender,
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: DS.s16),
         TextFormField(
           initialValue: recoveryText,
           minLines: 3,
@@ -957,19 +1235,26 @@ class _StepExistingLogin extends StatelessWidget {
           onChanged: onRecoveryTextChanged,
         ),
         if (showProgress) ...[
-          const SizedBox(height: 12),
+          const SizedBox(height: DS.s12),
           if (busy) ...[
-            const LinearProgressIndicator(),
-            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(2),
+              child: LinearProgressIndicator(
+                minHeight: 3,
+                color: palette.accentLavender,
+                backgroundColor: palette.divider,
+              ),
+            ),
+            const SizedBox(height: DS.s10),
           ],
           Text(
             _loginRecoveryProgressText(),
             style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
+              color: palette.textSecondary,
             ),
           ),
           if (matrix.isNotEmpty || anchors.isNotEmpty) ...[
-            const SizedBox(height: 12),
+            const SizedBox(height: DS.s12),
             RecoveryCandidateMatrixTable(
               matrix: matrix,
               anchors: anchors,
@@ -1029,11 +1314,30 @@ class _StepShowAccount extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     if (registration == null) {
-      // 还没生成；这里显示一个提示让用户回上一步点"生成账号"。
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 40),
-        child: Center(child: Text('点击下方按钮生成账号…')),
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: DS.s40),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.auto_fix_high_outlined,
+                size: 36,
+                color: palette.textTertiary,
+              ),
+              const SizedBox(height: DS.s10),
+              Text(
+                '点击下方按钮生成账号…',
+                style: TextStyle(
+                  color: palette.textSecondary,
+                  fontSize: DS.t13,
+                ),
+              ),
+            ],
+          ),
+        ),
       );
     }
     final reg = registration!;
@@ -1042,88 +1346,211 @@ class _StepShowAccount extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('你的账号已生成', style: theme.textTheme.titleLarge),
-        const SizedBox(height: 8),
-        Text(
-          '请把下面的 12 个名词与故事保存好（截图、抄写或打印均可）。'
-          '丢失它们将无法在新设备登录此账号。',
-          style: theme.textTheme.bodyMedium,
+        _StepHeading(
+          icon: Icons.check_circle_outline_rounded,
+          title: '你的账号已生成',
+          subtitle: '请把下面的 12 个名词与故事保存好（截图、抄写或打印均可）。'
+              '丢失它们将无法在新设备登录此账号。',
+          accent: palette.accentEmerald,
         ),
-        const SizedBox(height: 16),
-        Card(
-          color: theme.colorScheme.surfaceContainerHighest,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.list_alt, color: theme.colorScheme.primary),
-                    const SizedBox(width: 8),
-                    Text('12 个名词（有序）', style: theme.textTheme.titleSmall),
-                    const Spacer(),
-                    IconButton(
-                      tooltip: '复制名词',
-                      icon: const Icon(Icons.copy),
-                      onPressed: () {
-                        Clipboard.setData(
-                          ClipboardData(text: reg.words.join(' ')),
-                        );
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('名词已复制到剪贴板')),
-                        );
-                      },
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (var i = 0; i < reg.words.length; i++)
-                      Chip(label: Text('${i + 1}. ${reg.words[i]}')),
-                  ],
-                ),
+        const SizedBox(height: DS.s16),
+        Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                palette.bgFloating.withValues(alpha: palette.isDark ? 0.55 : 0.94),
+                palette.bgRaised.withValues(alpha: palette.isDark ? 0.45 : 0.86),
               ],
             ),
+            borderRadius: BorderRadius.circular(DS.r12),
+            border: Border.all(
+              color: palette.accentEmerald.withValues(alpha: 0.30),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: palette.accentEmerald.withValues(alpha: 0.12),
+                blurRadius: 24,
+                spreadRadius: -8,
+                offset: const Offset(0, 8),
+              ),
+            ],
           ),
-        ),
-        const SizedBox(height: 16),
-        Card(
-          color: theme.colorScheme.surfaceContainerHigh,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.menu_book, color: theme.colorScheme.primary),
-                    const SizedBox(width: 8),
-                    Text('记忆故事', style: theme.textTheme.titleSmall),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                if (reg.fallback)
+          padding: const EdgeInsets.all(DS.s16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.list_alt_rounded,
+                    size: 18,
+                    color: palette.accentEmerald,
+                  ),
+                  const SizedBox(width: DS.s8),
                   Text(
-                    '当前未配置 LLM，故事尚未生成。'
-                    '进入主界面后可让子体随时帮你编一段。',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      fontStyle: FontStyle.italic,
+                    '12 个名词（有序）',
+                    style: TextStyle(
+                      color: palette.textPrimary,
+                      fontSize: DS.t14,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.2,
                     ),
-                  )
-                else
-                  Text(reg.story, style: theme.textTheme.bodyLarge),
-              ],
-            ),
+                  ),
+                  const Spacer(),
+                  GlassIconButton(
+                    icon: Icons.copy_rounded,
+                    tooltip: '复制名词',
+                    size: 30,
+                    iconSize: 15,
+                    onPressed: () {
+                      Clipboard.setData(
+                        ClipboardData(text: reg.words.join(' ')),
+                      );
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('名词已复制到剪贴板')),
+                      );
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: DS.s10),
+              Wrap(
+                spacing: DS.s8,
+                runSpacing: DS.s8,
+                children: [
+                  for (var i = 0; i < reg.words.length; i++)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: DS.s10,
+                        vertical: DS.s6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: palette.accentEmerald
+                            .withValues(alpha: palette.isDark ? 0.12 : 0.10),
+                        borderRadius: BorderRadius.circular(DS.r8),
+                        border: Border.all(
+                          color: palette.accentEmerald.withValues(alpha: 0.30),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '${i + 1}',
+                            style: TextStyle(
+                              color: palette.accentEmerald
+                                  .withValues(alpha: 0.75),
+                              fontSize: DS.t10,
+                              fontWeight: FontWeight.w700,
+                              fontFamilyFallback: DS.monoFallback,
+                            ),
+                          ),
+                          const SizedBox(width: DS.s8),
+                          Text(
+                            reg.words[i],
+                            style: TextStyle(
+                              color: palette.textPrimary,
+                              fontSize: DS.t13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ],
           ),
         ),
-        const SizedBox(height: 12),
-        SelectableText(
-          '公钥指纹：${reg.identity.publicKeyHash.substring(0, 16)}…',
-          style: theme.textTheme.bodySmall,
+        const SizedBox(height: DS.s14),
+        Container(
+          decoration: BoxDecoration(
+            color: palette.accentLavender
+                .withValues(alpha: palette.isDark ? 0.08 : 0.06),
+            borderRadius: BorderRadius.circular(DS.r12),
+            border: Border.all(
+              color: palette.accentLavender.withValues(alpha: 0.28),
+            ),
+          ),
+          padding: const EdgeInsets.all(DS.s16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.menu_book_rounded,
+                    size: 18,
+                    color: palette.accentLavender,
+                  ),
+                  const SizedBox(width: DS.s8),
+                  Text(
+                    '记忆故事',
+                    style: TextStyle(
+                      color: palette.textPrimary,
+                      fontSize: DS.t14,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: DS.s10),
+              if (reg.fallback)
+                Text(
+                  '当前未配置 LLM，故事尚未生成。'
+                  '进入主界面后可让子体随时帮你编一段。',
+                  style: TextStyle(
+                    color: palette.textSecondary,
+                    fontSize: DS.t13,
+                    fontStyle: FontStyle.italic,
+                    height: 1.55,
+                  ),
+                )
+              else
+                SelectableText(
+                  reg.story,
+                  style: TextStyle(
+                    color: palette.textPrimary,
+                    fontSize: DS.t14,
+                    height: 1.65,
+                  ),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: DS.s12),
+        Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: DS.s10,
+            vertical: DS.s8,
+          ),
+          decoration: BoxDecoration(
+            color: palette.bgDeep.withValues(alpha: palette.isDark ? 0.5 : 0.40),
+            borderRadius: BorderRadius.circular(DS.r8),
+            border: Border.all(color: palette.divider),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Icons.fingerprint_rounded,
+                size: 14,
+                color: palette.textTertiary,
+              ),
+              const SizedBox(width: DS.s8),
+              Expanded(
+                child: SelectableText(
+                  '公钥指纹：${reg.identity.publicKeyHash.substring(0, 16)}…',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: palette.textSecondary,
+                    fontFamilyFallback: DS.monoFallback,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -1146,44 +1573,207 @@ class _StepConfirmSaved extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final palette = context.palette;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('确认保存', style: theme.textTheme.titleLarge),
-        const SizedBox(height: 12),
-        Text(
-          '一旦点击「完成」，引导页将关闭。'
-          '请再次确认你已经妥善保管以下信息：',
-          style: theme.textTheme.bodyMedium,
+        _StepHeading(
+          icon: Icons.task_alt_rounded,
+          title: '确认保存',
+          subtitle: '一旦点击「完成」，引导页将关闭。请再次确认你已经妥善保管以下信息：',
+          accent: palette.accentAmber,
         ),
-        const SizedBox(height: 12),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _line('• 12 个名词（按顺序）'),
-                _line(registration.fallback ? '• （故事尚未生成，仅靠名词记忆）' : '• 记忆故事'),
-                _line('• 本机身份 vault（由 Windows 当前用户保护）'),
-              ],
-            ),
+        const SizedBox(height: DS.s12),
+        Container(
+          decoration: BoxDecoration(
+            color: palette.bgRaised
+                .withValues(alpha: palette.isDark ? 0.66 : 0.90),
+            borderRadius: BorderRadius.circular(DS.r10),
+            border: Border.all(color: palette.divider),
+          ),
+          padding: const EdgeInsets.all(DS.s16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _ChecklistLine(text: '12 个名词（按顺序）', color: palette.accentEmerald),
+              _ChecklistLine(
+                text: registration.fallback
+                    ? '故事尚未生成，仅靠名词记忆'
+                    : '记忆故事',
+                color: palette.accentLavender,
+              ),
+              _ChecklistLine(
+                text: '本机身份 vault（由 Windows 当前用户保护）',
+                color: palette.accentCyan,
+              ),
+            ],
           ),
         ),
-        const SizedBox(height: 16),
-        CheckboxListTile(
-          title: const Text('我已经把名词与故事保存到了安全的地方'),
-          value: confirmed,
-          controlAffinity: ListTileControlAffinity.leading,
-          onChanged: (v) => onChanged(v ?? false),
+        const SizedBox(height: DS.s16),
+        Material(
+          color: confirmed
+              ? palette.accentEmerald
+                  .withValues(alpha: palette.isDark ? 0.12 : 0.10)
+              : palette.glassFill,
+          borderRadius: BorderRadius.circular(DS.r10),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(DS.r10),
+            onTap: () => onChanged(!confirmed),
+            child: Padding(
+              padding: const EdgeInsets.all(DS.s12),
+              child: Row(
+                children: [
+                  AnimatedContainer(
+                    duration: DS.dFast,
+                    width: 20,
+                    height: 20,
+                    decoration: BoxDecoration(
+                      color: confirmed
+                          ? palette.accentEmerald
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(DS.r4),
+                      border: Border.all(
+                        color: confirmed
+                            ? palette.accentEmerald
+                            : palette.textTertiary,
+                        width: 1.4,
+                      ),
+                    ),
+                    child: confirmed
+                        ? Icon(
+                            Icons.check_rounded,
+                            size: 14,
+                            color: palette.isDark
+                                ? const Color(0xFF06120A)
+                                : Colors.white,
+                          )
+                        : null,
+                  ),
+                  const SizedBox(width: DS.s10),
+                  Expanded(
+                    child: Text(
+                      '我已经把名词与故事保存到了安全的地方',
+                      style: TextStyle(
+                        color: palette.textPrimary,
+                        fontSize: DS.t14,
+                        fontWeight: confirmed
+                            ? FontWeight.w700
+                            : FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ],
     );
   }
+}
 
-  Widget _line(String text) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 2),
-    child: Text(text),
-  );
+class _ChecklistLine extends StatelessWidget {
+  const _ChecklistLine({required this.text, required this.color});
+
+  final String text;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: color.withValues(alpha: 0.6),
+                  blurRadius: 4,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: DS.s10),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                color: palette.textPrimary,
+                fontSize: DS.t13,
+                height: 1.55,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 通用步骤标题：渐变左指示条 + 图标 + 标题 + 副标题。
+class _StepHeading extends StatelessWidget {
+  const _StepHeading({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.accent,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: accent.withValues(alpha: palette.isDark ? 0.18 : 0.14),
+            borderRadius: BorderRadius.circular(DS.r10),
+            border: Border.all(color: accent.withValues(alpha: 0.36)),
+          ),
+          child: Icon(icon, size: 20, color: accent),
+        ),
+        const SizedBox(width: DS.s12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                title,
+                style: TextStyle(
+                  color: palette.textPrimary,
+                  fontSize: DS.t20,
+                  fontWeight: FontWeight.w700,
+                  height: 1.25,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                subtitle,
+                style: TextStyle(
+                  color: palette.textSecondary,
+                  fontSize: DS.t13,
+                  height: 1.6,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
 }

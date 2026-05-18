@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../app/protocol_login_service.dart';
+import '../design/design.dart';
 
 class ProtocolLoginConfirmDialog extends StatelessWidget {
   const ProtocolLoginConfirmDialog({
@@ -16,16 +17,35 @@ class ProtocolLoginConfirmDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final color = theme.colorScheme;
+    final palette = context.palette;
     final detail = request.detail;
     final serviceLabel = detail.serviceLabel;
     return AlertDialog(
-      title: const Row(
+      title: Row(
         children: [
-          Icon(Icons.security),
-          SizedBox(width: 10),
-          Text('PH01 授权确认'),
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  palette.accentEmerald.withValues(alpha: 0.28),
+                  palette.accentCyan.withValues(alpha: 0.20),
+                ],
+              ),
+              borderRadius: BorderRadius.circular(DS.r8),
+              border: Border.all(
+                color: palette.accentEmerald.withValues(alpha: 0.40),
+              ),
+            ),
+            child: Icon(
+              Icons.shield_outlined,
+              size: 16,
+              color: palette.accentEmerald,
+            ),
+          ),
+          const SizedBox(width: DS.s10),
+          const Text('PH01 授权确认'),
         ],
       ),
       content: SizedBox(
@@ -37,17 +57,18 @@ class ProtocolLoginConfirmDialog extends StatelessWidget {
             children: [
               Text(
                 '网页正在请求使用你的 PH01 身份登录$serviceLabel。',
-                style: theme.textTheme.bodyMedium,
+                style: TextStyle(color: palette.textPrimary, height: 1.5),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: DS.s14),
               if (!trustedCallback) ...[
-                _WarningBox(
+                HanaBanner(
                   icon: Icons.gpp_bad_outlined,
-                  color: color.error,
+                  leadingLabel: 'BLOCKED',
                   title: '已阻止不受信任的回调地址',
-                  message: '此请求不会被授权。请确认你是从可信页面发起登录。',
+                  subtitle: '此请求不会被授权。请确认你是从可信页面发起登录。',
+                  color: palette.accentCrimson,
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: DS.s14),
               ],
               _InfoRow(label: '本机账号', value: accountLabel),
               _InfoRow(label: '登录目标', value: serviceLabel),
@@ -58,9 +79,8 @@ class ProtocolLoginConfirmDialog extends StatelessWidget {
               ),
               _InfoRow(
                 label: 'IP 归属',
-                value: detail.ipLocation.isEmpty
-                    ? 'unknown'
-                    : detail.ipLocation,
+                value:
+                    detail.ipLocation.isEmpty ? 'unknown' : detail.ipLocation,
               ),
               _InfoRow(
                 label: '浏览器',
@@ -68,12 +88,26 @@ class ProtocolLoginConfirmDialog extends StatelessWidget {
               ),
               _InfoRow(label: '过期时间', value: _formatTime(detail.expiresAtTime)),
               _InfoRow(label: '挑战 ID', value: detail.challengeId),
-              const SizedBox(height: 10),
-              SelectableText(
-                request.callbackUrl,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: color.onSurfaceVariant,
-                  fontFamily: 'monospace',
+              const SizedBox(height: DS.s10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: DS.s10,
+                  vertical: DS.s8,
+                ),
+                decoration: BoxDecoration(
+                  color:
+                      palette.bgDeep.withValues(alpha: palette.isDark ? 0.6 : 0.4),
+                  borderRadius: BorderRadius.circular(DS.r6),
+                  border: Border.all(color: palette.divider),
+                ),
+                child: SelectableText(
+                  request.callbackUrl,
+                  style: TextStyle(
+                    color: palette.textSecondary,
+                    fontFamilyFallback: DS.monoFallback,
+                    fontSize: DS.t11,
+                  ),
                 ),
               ),
             ],
@@ -86,10 +120,9 @@ class ProtocolLoginConfirmDialog extends StatelessWidget {
           child: const Text('拒绝'),
         ),
         FilledButton.icon(
-          onPressed: trustedCallback
-              ? () => Navigator.of(context).pop(true)
-              : null,
-          icon: const Icon(Icons.check),
+          onPressed:
+              trustedCallback ? () => Navigator.of(context).pop(true) : null,
+          icon: const Icon(Icons.check_rounded, size: 16),
           label: const Text('授权登录'),
         ),
       ],
@@ -105,71 +138,31 @@ class _InfoRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final palette = context.palette;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 76,
+            width: 80,
             child: Text(
               label,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+              style: TextStyle(
+                color: palette.textTertiary,
+                fontSize: DS.t12,
+                letterSpacing: 0.3,
               ),
             ),
           ),
           Expanded(
             child: SelectableText(
               value.isEmpty ? '-' : value,
-              style: theme.textTheme.bodyMedium,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _WarningBox extends StatelessWidget {
-  const _WarningBox({
-    required this.icon,
-    required this.color,
-    required this.title,
-    required this.message,
-  });
-
-  final IconData icon;
-  final Color color;
-  final String title;
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: color.withAlpha(24),
-        border: Border.all(color: color.withAlpha(90)),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, color: color, size: 20),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: TextStyle(color: color, fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 4),
-                Text(message),
-              ],
+              style: TextStyle(
+                color: palette.textPrimary,
+                fontSize: DS.t13,
+                height: 1.45,
+              ),
             ),
           ),
         ],

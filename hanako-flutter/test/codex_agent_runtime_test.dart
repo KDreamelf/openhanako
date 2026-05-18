@@ -137,6 +137,30 @@ void main() {
     expect(allProperties, isNot(contains('max_length')));
   });
 
+  test('every visible tool exposes auto-injected _purpose field', () async {
+    final runtime = await _buildRuntime();
+    for (final tool in runtime.modelVisibleTools) {
+      final parameters = (tool.parameters).cast<String, dynamic>();
+      final properties = (parameters['properties'] as Map?)
+              ?.cast<String, dynamic>() ??
+          const <String, dynamic>{};
+      expect(
+        properties.keys,
+        contains('_purpose'),
+        reason: '${tool.name} 未注入 _purpose 字段',
+      );
+      final purposeSpec = (properties['_purpose'] as Map)
+          .cast<String, dynamic>();
+      expect(purposeSpec['type'], 'string');
+      final required = (parameters['required'] as List?) ?? const <dynamic>[];
+      expect(
+        required,
+        contains('_purpose'),
+        reason: '${tool.name} 未把 _purpose 加入 required',
+      );
+    }
+  });
+
   test('tool_search returns registered Codex tool metadata', () async {
     final runtime = await _buildRuntime();
 
@@ -467,6 +491,7 @@ Future<CodexAgentToolRuntime> _buildRuntime({
       sessionPath: 'test-session',
       windowsOpsClient: WindowsOpsClient(),
       permissionPolicy: permissionPolicy,
+      execCommandDefaultTimeoutSeconds: 30,
       userInputPrompt: userInputPrompt,
       goalStore: goalStore,
     ),
@@ -494,7 +519,9 @@ Set<String> _toolPropertyNames(Object? tool) {
   final properties =
       (parameters['properties'] as Map?)?.cast<String, dynamic>() ??
       const <String, dynamic>{};
-  return properties.keys.toSet();
+  // 注册层会自动给每个工具的 schema 注入 `_purpose`（用于 UI 展示中文用途），
+  // 这是全局行为而非某个工具特有的字段，断言时统一剥掉，避免污染等值检查。
+  return properties.keys.where((k) => k != '_purpose').toSet();
 }
 
 const _onePixelPngBase64 =

@@ -1,7 +1,15 @@
 import 'package:flutter/material.dart';
 
 import '../../identity/word_dict.dart';
+import '../design/design.dart';
 
+/// 记忆恢复矩阵 — Onboarding 与设置页里显示候选词矩阵的表格。
+///
+/// 把 hammingDistance / activePositions / candidateRanks 等业务输入翻译成
+/// 视觉上的"行排序、列排序、选中、活跃"组合：
+///   - 选中单元格：边框 + 强填充 + 发光
+///   - 活跃单元格：暗化背景填充，提示当前 hamming distance 命中
+///   - 表头活跃列：图标颜色提亮
 class RecoveryCandidateMatrixTable extends StatelessWidget {
   const RecoveryCandidateMatrixTable({
     super.key,
@@ -32,8 +40,8 @@ class RecoveryCandidateMatrixTable extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final c = theme.colorScheme;
+    final palette = context.palette;
+    final accent = usedLlm ? palette.accentLavender : palette.accentEmerald;
     final k = candidatesPerColumn > 0
         ? candidatesPerColumn
         : (matrix.isEmpty ? 0 : matrix.first.length);
@@ -51,113 +59,258 @@ class RecoveryCandidateMatrixTable extends StatelessWidget {
         .map((row) => row + 1)
         .take(4)
         .join('、');
+
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(DS.s14),
       decoration: BoxDecoration(
-        border: Border.all(color: c.outlineVariant),
-        borderRadius: BorderRadius.circular(8),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            palette.bgFloating.withValues(alpha: palette.isDark ? 0.55 : 0.94),
+            palette.bgRaised.withValues(alpha: palette.isDark ? 0.45 : 0.86),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(DS.r12),
+        border: Border.all(color: palette.divider, width: DS.hairline),
+        boxShadow: [
+          BoxShadow(
+            color: accent.withValues(alpha: 0.08),
+            blurRadius: 20,
+            spreadRadius: -6,
+            offset: const Offset(0, 6),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            usedLlm ? 'LLM 语义候选矩阵' : '确定性候选矩阵',
-            style: theme.textTheme.titleSmall?.copyWith(
-              fontWeight: FontWeight.w700,
-            ),
+          Row(
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(DS.r6),
+                  border: Border.all(color: accent.withValues(alpha: 0.36)),
+                ),
+                child: Icon(
+                  usedLlm
+                      ? Icons.psychology_alt_outlined
+                      : Icons.dataset_outlined,
+                  size: 14,
+                  color: accent,
+                ),
+              ),
+              const SizedBox(width: DS.s10),
+              Expanded(
+                child: Text(
+                  usedLlm ? 'LLM 语义候选矩阵' : '确定性候选矩阵',
+                  style: TextStyle(
+                    color: palette.textPrimary,
+                    fontSize: DS.t14,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.2,
+                  ),
+                ),
+              ),
+              HanaPill(
+                label: '$rows × $k',
+                color: accent,
+                dense: true,
+                outlined: false,
+              ),
+            ],
           ),
-          const SizedBox(height: 4),
-          Text(
-            [
-              '$rows × $k',
-              'D≤$hammingDistance 理论 $theoretical',
-              '全矩阵 $fullSpace',
-              '实际 $attempted',
-              if (combinationId != null) '组合 #$combinationId',
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: DS.s6,
+            runSpacing: 4,
+            children: [
+              if (hammingDistance > 0)
+                _MatrixStat(
+                  label: 'D ≤ $hammingDistance',
+                  value: '理论 $theoretical',
+                  color: palette.accentCyan,
+                ),
+              _MatrixStat(
+                label: '全矩阵',
+                value: '$fullSpace',
+                color: palette.textTertiary,
+              ),
+              _MatrixStat(
+                label: '实际',
+                value: '$attempted',
+                color: palette.accentEmerald,
+              ),
+              if (combinationId != null)
+                _MatrixStat(
+                  label: '组合',
+                  value: '#$combinationId',
+                  color: palette.accentLavender,
+                ),
               if (elapsedMs > 0)
-                '吞吐 ${formatRecoveryAttemptRate(attempted, elapsedMs)}',
-              if (activeRows.isNotEmpty) '活跃 $activeRows',
-            ].join(' · '),
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: c.onSurfaceVariant,
-            ),
+                _MatrixStat(
+                  label: '吞吐',
+                  value: formatRecoveryAttemptRate(attempted, elapsedMs),
+                  color: palette.accentAmber,
+                ),
+              if (activeRows.isNotEmpty)
+                _MatrixStat(
+                  label: '活跃',
+                  value: activeRows,
+                  color: accent,
+                ),
+            ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: DS.s12),
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
-            child: Table(
-              defaultColumnWidth: const IntrinsicColumnWidth(),
-              border: TableBorder.all(color: c.outlineVariant),
-              children: [
-                TableRow(
-                  decoration: BoxDecoration(color: c.surfaceContainerHighest),
-                  children: [
-                    _RecoveryMatrixCell(
-                      text: '#',
-                      style: theme.textTheme.labelSmall,
-                      isHeader: true,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: palette.bgDeep.withValues(alpha: palette.isDark ? 0.5 : 0.40),
+                borderRadius: BorderRadius.circular(DS.r8),
+                border: Border.all(color: palette.divider),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(DS.r8),
+                child: Table(
+                  defaultColumnWidth: const IntrinsicColumnWidth(),
+                  border: TableBorder.symmetric(
+                    inside: BorderSide(
+                      color: palette.divider.withValues(alpha: 0.6),
+                      width: DS.hairline,
                     ),
-                    if (anchors.isNotEmpty)
-                      _RecoveryMatrixCell(
-                        text: '锚点',
-                        style: theme.textTheme.labelSmall,
-                        isHeader: true,
+                  ),
+                  children: [
+                    TableRow(
+                      decoration: BoxDecoration(
+                        color: palette.bgRaised
+                            .withValues(alpha: palette.isDark ? 0.6 : 0.80),
                       ),
-                    for (final rank in rankOrder)
-                      _RecoveryMatrixCell(
-                        text: '候选 ${rank + 1}',
-                        style: theme.textTheme.labelSmall,
-                        isHeader: true,
-                        isActive: _rankIsActive(rank, candidateRanks),
+                      children: [
+                        _RecoveryMatrixCell(
+                          text: '#',
+                          isHeader: true,
+                          palette: palette,
+                        ),
+                        if (anchors.isNotEmpty)
+                          _RecoveryMatrixCell(
+                            text: '锚点',
+                            isHeader: true,
+                            palette: palette,
+                          ),
+                        for (final rank in rankOrder)
+                          _RecoveryMatrixCell(
+                            text: '候选 ${rank + 1}',
+                            isHeader: true,
+                            isActive: _rankIsActive(rank, candidateRanks),
+                            palette: palette,
+                            accent: accent,
+                          ),
+                      ],
+                    ),
+                    for (final row in rowOrder)
+                      TableRow(
+                        children: [
+                          _RecoveryMatrixCell(
+                            text: '${row + 1}',
+                            palette: palette,
+                            isActive: _isActiveMatrixRow(
+                              row,
+                              candidateRanks,
+                              activePositions,
+                            ),
+                            accent: accent,
+                          ),
+                          if (anchors.isNotEmpty)
+                            _RecoveryMatrixCell(
+                              text: row < anchors.length ? anchors[row] : '-',
+                              palette: palette,
+                              isActive: _isActiveMatrixRow(
+                                row,
+                                candidateRanks,
+                                activePositions,
+                              ),
+                              accent: accent,
+                            ),
+                          for (final rank in rankOrder)
+                            _RecoveryMatrixCell(
+                              text: row < matrix.length
+                                  ? _candidateLabel(matrix[row], rank)
+                                  : '-',
+                              palette: palette,
+                              isSelected: _isSelectedCandidate(
+                                row: row,
+                                rank: rank,
+                                matrix: matrix,
+                                candidateRanks: candidateRanks,
+                                wordIds: wordIds,
+                              ),
+                              isActive: _isActiveMatrixRow(
+                                row,
+                                candidateRanks,
+                                activePositions,
+                              ),
+                              accent: accent,
+                            ),
+                        ],
                       ),
                   ],
                 ),
-                for (final row in rowOrder)
-                  TableRow(
-                    children: [
-                      _RecoveryMatrixCell(
-                        text: '${row + 1}',
-                        style: theme.textTheme.bodySmall,
-                        isActive: _isActiveMatrixRow(
-                          row,
-                          candidateRanks,
-                          activePositions,
-                        ),
-                      ),
-                      if (anchors.isNotEmpty)
-                        _RecoveryMatrixCell(
-                          text: row < anchors.length ? anchors[row] : '-',
-                          style: theme.textTheme.bodySmall,
-                          isActive: _isActiveMatrixRow(
-                            row,
-                            candidateRanks,
-                            activePositions,
-                          ),
-                        ),
-                      for (final rank in rankOrder)
-                        _RecoveryMatrixCell(
-                          text: row < matrix.length
-                              ? _candidateLabel(matrix[row], rank)
-                              : '-',
-                          style: theme.textTheme.bodySmall,
-                          isSelected: _isSelectedCandidate(
-                            row: row,
-                            rank: rank,
-                            matrix: matrix,
-                            candidateRanks: candidateRanks,
-                            wordIds: wordIds,
-                          ),
-                          isActive: _isActiveMatrixRow(
-                            row,
-                            candidateRanks,
-                            activePositions,
-                          ),
-                        ),
-                    ],
-                  ),
-              ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MatrixStat extends StatelessWidget {
+  const _MatrixStat({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: DS.s8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: palette.isDark ? 0.08 : 0.06),
+        borderRadius: BorderRadius.circular(DS.r6),
+        border: Border.all(color: color.withValues(alpha: 0.24)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: DS.t10,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.6,
+            ),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            value,
+            style: TextStyle(
+              color: palette.textPrimary,
+              fontSize: DS.t11,
+              fontWeight: FontWeight.w600,
+              fontFamilyFallback: DS.monoFallback,
             ),
           ),
         ],
@@ -169,41 +322,64 @@ class RecoveryCandidateMatrixTable extends StatelessWidget {
 class _RecoveryMatrixCell extends StatelessWidget {
   const _RecoveryMatrixCell({
     required this.text,
-    this.style,
+    required this.palette,
     this.isHeader = false,
     this.isSelected = false,
     this.isActive = false,
+    this.accent,
   });
 
   final String text;
-  final TextStyle? style;
+  final HanaPalette palette;
   final bool isHeader;
   final bool isSelected;
   final bool isActive;
+  final Color? accent;
 
   @override
   Widget build(BuildContext context) {
-    final c = Theme.of(context).colorScheme;
-    final color = isSelected
-        ? (isActive ? c.primaryContainer : c.secondaryContainer)
-        : (isActive ? c.surfaceContainerHighest : null);
+    final base = accent ?? palette.accentEmerald;
+    final bgColor = isSelected
+        ? base.withValues(alpha: palette.isDark ? 0.22 : 0.20)
+        : (isActive
+            ? base.withValues(alpha: palette.isDark ? 0.10 : 0.08)
+            : null);
     final foreground = isSelected
-        ? (isActive ? c.onPrimaryContainer : c.onSecondaryContainer)
-        : null;
+        ? Color.lerp(palette.textPrimary, base, 0.42)
+        : isActive
+            ? Color.lerp(palette.textSecondary, base, 0.36)
+            : (isHeader ? palette.textSecondary : palette.textPrimary);
     return AnimatedContainer(
-      duration: const Duration(milliseconds: 140),
-      curve: Curves.easeOutCubic,
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      duration: DS.dQuick,
+      curve: DS.cStandard,
+      padding: const EdgeInsets.symmetric(
+        horizontal: DS.s10,
+        vertical: DS.s8,
+      ),
       decoration: BoxDecoration(
-        color: color,
-        border: isSelected ? Border.all(color: c.primary, width: 1.2) : null,
+        color: bgColor,
+        border: isSelected
+            ? Border.all(color: base.withValues(alpha: 0.55), width: 1.2)
+            : null,
+        boxShadow: isSelected
+            ? [
+                BoxShadow(
+                  color: base.withValues(alpha: 0.36),
+                  blurRadius: 6,
+                ),
+              ]
+            : null,
       ),
       child: SelectableText(
         text,
-        style: style?.copyWith(
-          fontWeight: isHeader ? FontWeight.w700 : style?.fontWeight,
-          fontFamily: isHeader ? null : 'monospace',
+        style: TextStyle(
           color: foreground,
+          fontSize: isHeader ? DS.t11 : DS.t12,
+          fontWeight: isHeader || isSelected
+              ? FontWeight.w700
+              : FontWeight.w500,
+          fontFamily: isHeader ? null : 'monospace',
+          letterSpacing: isHeader ? 0.4 : 0,
         ),
       ),
     );

@@ -679,6 +679,27 @@ class RuntimeDisplayToolCallBlock extends RuntimeDisplayBlock {
   final bool resultIsError;
   final Map<String, dynamic>? resultDetails;
 
+  /// 模型调工具时通过 `_purpose` 字段填入的"一句话中文用途"，UI 上用它代替
+  /// 罗列裸 args。argsJson 还在 streaming 累加、JSON 没拼完整时返回 null；
+  /// 模型漏填或值为空时也返回 null——上层应当回退到工具中文名 + 参数摘要。
+  String? get purpose {
+    final raw = argsJson.trim();
+    if (raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        final value = decoded['_purpose'];
+        if (value is String) {
+          final trimmed = value.trim();
+          if (trimmed.isNotEmpty) return trimmed;
+        }
+      }
+    } catch (_) {
+      // JSON 尚未拼完整或损坏——交给调用方做兜底。
+    }
+    return null;
+  }
+
   RuntimeDisplayToolCallBlock copyWith({
     String? name,
     String? argsJson,

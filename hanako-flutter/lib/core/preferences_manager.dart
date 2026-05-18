@@ -96,4 +96,40 @@ class PreferencesManager {
     }
     _write(p);
   }
+
+  // ===== exec_command 默认超时 =====
+  //
+  // 模型在调 exec_command 时可以显式传 timeout_ms 覆盖。如果模型没传，
+  // 后端用本设置作为兜底，避免命令无限挂死。
+  static const int defaultExecCommandTimeoutSeconds = 300;
+  static const int execCommandTimeoutMinSeconds = 5;
+  static const int execCommandTimeoutMaxSeconds = 600;
+
+  int getExecCommandDefaultTimeoutSeconds() {
+    final codex = _read()['codex'];
+    if (codex is Map) {
+      final raw = codex['exec_command_default_timeout_seconds'];
+      if (raw is num) {
+        return raw.toInt().clamp(
+          execCommandTimeoutMinSeconds,
+          execCommandTimeoutMaxSeconds,
+        );
+      }
+    }
+    return defaultExecCommandTimeoutSeconds;
+  }
+
+  void setExecCommandDefaultTimeoutSeconds(int seconds) {
+    final clamped = seconds.clamp(
+      execCommandTimeoutMinSeconds,
+      execCommandTimeoutMaxSeconds,
+    );
+    final p = Map<String, dynamic>.of(_read());
+    final codex = p['codex'] is Map
+        ? Map<String, dynamic>.of((p['codex'] as Map).cast<String, dynamic>())
+        : <String, dynamic>{};
+    codex['exec_command_default_timeout_seconds'] = clamped;
+    p['codex'] = codex;
+    _write(p);
+  }
 }

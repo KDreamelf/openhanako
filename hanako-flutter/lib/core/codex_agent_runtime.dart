@@ -157,7 +157,7 @@ class CodexToolRegistryBuilder {
     }
     _handlers[name] = handler;
     final spec = handler.spec;
-    if (spec != null) _visibleSpecs.add(spec);
+    if (spec != null) _visibleSpecs.add(_injectPurposeField(spec));
   }
 
   CodexToolRegistry build() {
@@ -166,6 +166,36 @@ class CodexToolRegistryBuilder {
       List.unmodifiable(_visibleSpecs),
     );
   }
+}
+
+/// 在工具 schema 上自动注入 `_purpose` 字段：让模型每次调工具时填一句
+/// 中文说明，UI 把它显示给用户看。required，避免模型遗漏；如果模型仍未
+/// 遵守 schema，UI 会回退到「工具中文名 + 参数摘要」展示，不会崩。
+Tool _injectPurposeField(Tool spec) {
+  final params = Map<String, dynamic>.from(spec.parameters);
+  final rawProperties = params['properties'];
+  final properties = rawProperties is Map
+      ? Map<String, dynamic>.from(rawProperties.cast<String, dynamic>())
+      : <String, dynamic>{};
+  properties['_purpose'] = <String, dynamic>{
+    'type': 'string',
+    'description':
+        '一句话中文说明本次工具调用在做什么，仅用于在 UI 上向用户展示进度，不进入后续推理上下文。'
+        '请用动词开头、限 14 字以内，避免"调用工具"这类无信息词。'
+        '示例：执行 flutter analyze、读取 chat_page.dart、在 C 盘搜索 dart.exe。',
+  };
+  params['properties'] = properties;
+  final rawRequired = params['required'];
+  final required = rawRequired is List
+      ? List<dynamic>.from(rawRequired)
+      : <dynamic>[];
+  if (!required.contains('_purpose')) required.add('_purpose');
+  params['required'] = required;
+  return Tool(
+    name: spec.name,
+    description: spec.description,
+    parameters: params,
+  );
 }
 
 class CodexToolInvocation {
@@ -227,6 +257,7 @@ class CodexToolContext {
     required this.activeAgentId,
     required this.windowsOpsClient,
     required this.permissionPolicy,
+    required this.execCommandDefaultTimeoutSeconds,
     this.sessionPath,
     this.userInputPrompt,
     this.agentControl,
@@ -243,6 +274,11 @@ class CodexToolContext {
   final String? sessionPath;
   final WindowsOpsClient windowsOpsClient;
   final CodexPermissionPolicy permissionPolicy;
+
+  /// 当模型调 exec_command 没传 timeout_ms 时，使用这个秒数作为兜底。
+  /// 由 [PreferencesManager.getExecCommandDefaultTimeoutSeconds] 提供。
+  final int execCommandDefaultTimeoutSeconds;
+
   final CodexUserInputPrompt? userInputPrompt;
   final CodexAgentControl? agentControl;
   final CodexGoalStore? goalStore;
@@ -1118,11 +1154,16 @@ class _ExecCommandToolHandler extends CodexToolHandler {
   Tool get spec => const Tool(
     name: 'exec_command',
     description:
-        '运行本地终端命令并返回 stdout、stderr、exit_code。用于构建、测试、脚本、进程和专用工具覆盖不到的真实终端操作；'
+        '运行本地终端命令并返回 stdout、stderr、exit_code、超时信息。'
+        'cmd 经 `powershell.exe -NoProfile -Command <cmd>` 执行；直接写 PowerShell 表达式即可（如 `Start-Process foo`），'
+        '无需再包一层 `powershell -Command "..."`，那样会多花 1.5-3s 冷启动并可能撞超时。'
+        '用于构建、测试、脚本、进程和专用工具覆盖不到的真实终端操作；'
         '读取文件用 read_file，列目录用 list_dir，搜索文本用 search_text。不要用 cat/type/Get-Content、ls/dir/find、grep/rg 替代这些专用工具，除非专用工具确实不足。'
         '常规文件编辑不要用 shell 重定向、heredoc、echo > file 或 sed -i，改用 apply_patch。'
         '调用时设置合适 workdir，路径含空格要加引号；避免依赖 cd 状态；普通沟通直接输出文本，不要用 echo/printf。'
-        '避免 sleep 轮询；长进程或交互进程使用 tty=true 后再配合 write_stdin。不要绕过 git hooks 或运行未授权的破坏性 git 命令。',
+        '避免 sleep 轮询；长进程或交互进程使用 tty=true 后再配合 write_stdin。不要绕过 git hooks 或运行未授权的破坏性 git 命令。'
+        '若返回 status="timed_out"：命令被强制中止，已脱离本进程树的后台进程（Start-Process / start /b 启动的 GUI 等）可能仍在运行；'
+        '不要直接重试同一命令，先查询目标状态，再视情况延长 timeout_ms 或换更轻量的探测路径。',
     parameters: <String, dynamic>{
       'type': 'object',
       'additionalProperties': false,
@@ -1133,6 +1174,9 @@ class _ExecCommandToolHandler extends CodexToolHandler {
           'type': 'integer',
           'minimum': 1000,
           'maximum': 120000,
+          'description':
+              '命令最长执行时长。超时只代表本次未在限时内拿到 exit_code，不代表命令失败——'
+              '已 detach 的后台进程通常仍在运行。冷启动 GUI / 包管理器建议 ≥10000。',
         },
         'tty': <String, dynamic>{'type': 'boolean'},
         'yield_time_ms': <String, dynamic>{'type': 'integer'},
@@ -1155,7 +1199,10 @@ class _ExecCommandToolHandler extends CodexToolHandler {
         'message': 'exec_command 需要 cmd。',
       }, isError: true);
     }
-    final timeoutSeconds = _timeoutSeconds(invocation.arguments);
+    final modelTimeoutSeconds = _timeoutSeconds(invocation.arguments);
+    final effectiveTimeoutSeconds =
+        modelTimeoutSeconds ?? context.execCommandDefaultTimeoutSeconds;
+    final timeoutSource = modelTimeoutSeconds != null ? 'model' : 'default';
     final workdir = _stringArg(invocation.arguments, 'workdir') ?? context.cwd;
     if (_boolArg(invocation.arguments, 'tty')) {
       try {
@@ -1182,7 +1229,8 @@ class _ExecCommandToolHandler extends CodexToolHandler {
     final body = await _runShellCommand(
       command: cmd,
       workdir: workdir,
-      timeoutSeconds: timeoutSeconds ?? 30,
+      timeoutSeconds: effectiveTimeoutSeconds,
+      timeoutSource: timeoutSource,
       maxOutputTokens: _intArg(invocation.arguments, 'max_output_tokens'),
     );
     return _jsonResult(body, isError: body['ok'] == false);
@@ -2633,8 +2681,10 @@ Future<Map<String, dynamic>> _runShellCommand({
   required String command,
   required String? workdir,
   required int timeoutSeconds,
+  required String timeoutSource,
   required int? maxOutputTokens,
 }) async {
+  final sw = Stopwatch()..start();
   final process = await _startShellProcess(command, workdir);
   await process.stdin.close();
   final stdoutFuture = process.stdout
@@ -2649,25 +2699,97 @@ Future<Map<String, dynamic>> _runShellCommand({
         return all;
       })
       .then((bytes) => _decodeProcessOutput(bytes.takeBytes()));
+
+  var timedOut = false;
   final exitCode = await process.exitCode.timeout(
     Duration(seconds: timeoutSeconds),
-    onTimeout: () {
-      process.kill(ProcessSignal.sigkill);
-      return -1;
+    onTimeout: () async {
+      timedOut = true;
+      await _killShellProcessTree(process.pid);
+      // 给 OS 一点点窗口收尾，避免 stdout/stderr stream 还卡在那儿。
+      try {
+        return await process.exitCode.timeout(const Duration(seconds: 2));
+      } catch (_) {
+        return -1;
+      }
     },
   );
+  sw.stop();
   final maxChars = _maxOutputChars(maxOutputTokens);
   final stdout = await stdoutFuture;
   final stderr = await stderrFuture;
+  final status = timedOut
+      ? 'timed_out'
+      : (exitCode == 0 ? 'ok' : 'exit_failure');
   return <String, dynamic>{
-    'ok': exitCode == 0,
+    'ok': !timedOut && exitCode == 0,
+    'status': status,
     'exit_code': exitCode,
+    'timeout_seconds': timeoutSeconds,
+    'timeout_source': timeoutSource,
+    'elapsed_ms': sw.elapsedMilliseconds,
     'stdout': _tail(stdout, maxChars),
     'stderr': _tail(stderr, maxChars),
     'stdout_truncated': stdout.length > maxChars,
     'stderr_truncated': stderr.length > maxChars,
-    'timed_out': exitCode == -1,
+    'timed_out': timedOut,
+    if (timedOut)
+      'timeout_notice': _composeTimeoutNotice(
+        timeoutSeconds: timeoutSeconds,
+        timeoutSource: timeoutSource,
+      ),
   };
+}
+
+String _composeTimeoutNotice({
+  required int timeoutSeconds,
+  required String timeoutSource,
+}) {
+  final buf = StringBuffer()
+    ..write('命令在 ${timeoutSeconds}s 内未结束，已强制中止并尽量回收子进程树（taskkill /F /T）。');
+  if (timeoutSource == 'model') {
+    buf.write(
+      '本次 timeout_ms 由模型显式传入；冷启动 GUI、包管理器、首次跑的脚本'
+      '通常需要 ≥10000，可以在下一次调用中直接调大该参数。',
+    );
+  } else {
+    buf.write(
+      '本次未显式传入 timeout_ms，使用了客户端默认值（${timeoutSeconds}s，'
+      '可在“设置 → Codex → exec_command 默认超时”里调整）。'
+      '如对当前命令有把握，可在下一次调用中直接传更大的 timeout_ms。',
+    );
+  }
+  buf.write(
+    '注意：通过 Start-Process / start /b 等方式 detach 的进程（如 GUI 程序）'
+    '已脱离本调用进程树，本次中断无法回收，可能仍在运行——'
+    '请勿直接重试同一条命令，先用更轻量的方式查询目标状态再决定。',
+  );
+  return buf.toString();
+}
+
+/// 强制杀掉 [pid] 及其子进程树。
+///
+/// Windows 上用 `taskkill /F /T /PID <pid>` 递归终结整棵进程树（含子
+/// powershell、子 cmd）。但 `Start-Process` / `start /b` 创建的 detached
+/// 进程通过 ShellExecuteEx 启动后**不在**父进程的进程树里，这种情况
+/// 无法被回收——调用方在 timeout_notice 里向模型说明这一点。
+Future<void> _killShellProcessTree(int pid) async {
+  if (Platform.isWindows) {
+    try {
+      await Process.run('taskkill', <String>[
+        '/F',
+        '/T',
+        '/PID',
+        '$pid',
+      ]).timeout(const Duration(seconds: 3));
+      return;
+    } catch (_) {
+      // 走兜底路径。
+    }
+  }
+  try {
+    Process.killPid(pid, ProcessSignal.sigkill);
+  } catch (_) {}
 }
 
 String _decodeProcessOutput(List<int> bytes) {

@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
+import '../design/design.dart';
+
 /// 内置 PerfHUD（参考 flutter-migration-plan/性能优化复盘-20260207.md §5.4）。
 ///
 /// 输出 `FPS / build / raster`，FPS 基于 FramePhase.vsyncStart 间隔计算。
@@ -98,22 +100,57 @@ class _PerfHudState extends State<PerfHud> {
   @override
   Widget build(BuildContext context) {
     if (kReleaseMode) return const SizedBox.shrink();
+    final c = Theme.of(context).colorScheme;
+    final fps = _samples.isEmpty ? null : _samples.last;
+    final fpsGood = fps != null && fps.buildMs < 16.6 && fps.rasterMs < 16.6;
+    final accent = fpsGood ? c.primary : c.tertiary;
     return RepaintBoundary(
       child: IgnorePointer(
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
           decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.55),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: Text(
-            _text,
-            style: const TextStyle(
-              color: Colors.greenAccent,
-              fontFamily: 'monospace',
-              fontSize: 11,
-              height: 1.25,
+            color: c.surface.withValues(alpha: 0.62),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: accent.withValues(alpha: 0.30),
             ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.16),
+                blurRadius: 12,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  color: accent,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: accent.withValues(alpha: 0.6),
+                      blurRadius: 4,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 7),
+              Text(
+                _text,
+                style: TextStyle(
+                  color: c.onSurface.withValues(alpha: 0.78),
+                  fontFamilyFallback: DS.monoFallback,
+                  fontSize: 10.5,
+                  height: 1.3,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ],
           ),
         ),
       ),

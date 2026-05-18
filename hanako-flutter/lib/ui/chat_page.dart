@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui';
 
 import 'package:dio/dio.dart';
 import 'package:file_selector/file_selector.dart';
@@ -17,11 +18,12 @@ import '../core/runtime_session_store.dart';
 import '../experience/experience.dart';
 import '../llm/provider.dart';
 import '../windows_ops/windows_ops.dart';
+import 'design/design.dart';
 import 'desk/desk_page.dart';
 import 'memory/memory_page.dart';
 import 'onboarding/onboarding_page.dart';
-import 'perf/perf_hud.dart';
 import 'skills/skills_page.dart';
+import 'widgets/persistent_sidebar.dart';
 import 'widgets/session_drawer.dart';
 import 'widgets/status_cluster.dart';
 import 'widgets/streaming_message.dart';
@@ -849,29 +851,32 @@ class _ComposerImageChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = Theme.of(context).colorScheme;
+    final palette = context.palette;
+    final accent = palette.accentEmerald;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: DS.s8, vertical: 3),
       decoration: BoxDecoration(
-        color: c.secondaryContainer,
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: c.outlineVariant),
+        color: accent.withValues(alpha: palette.isDark ? 0.16 : 0.10),
+        borderRadius: BorderRadius.circular(DS.rPill),
+        border: Border.all(color: accent.withValues(alpha: 0.32)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.image_outlined, size: 14, color: c.onSecondaryContainer),
-          const SizedBox(width: 4),
+          Icon(Icons.image_outlined, size: 13, color: accent),
+          const SizedBox(width: DS.s4),
           ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 160),
             child: Text(
               label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: Theme.of(
-                context,
-              ).textTheme.labelSmall?.copyWith(color: c.onSecondaryContainer),
+              style: TextStyle(
+                color: accent,
+                fontSize: DS.t11,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
         ],
@@ -958,6 +963,26 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   final _scroll = ScrollController();
   bool _onboardingShown = false;
 
+  /// Codex 待授权请求 — 弹出底部横条而不是 modal dialog，让对话能保持
+  /// 在视野里。当用户做出决定后通过 [_pendingPermissionCompleter] 完成 future。
+  CodexPermissionRequest? _pendingPermissionRequest;
+  Completer<CodexPermissionDecision?>? _pendingPermissionCompleter;
+
+  void _resolvePendingPermission(CodexPermissionDecision? decision) {
+    final completer = _pendingPermissionCompleter;
+    if (completer == null) return;
+    if (!completer.isCompleted) completer.complete(decision);
+    if (mounted) {
+      setState(() {
+        _pendingPermissionRequest = null;
+        _pendingPermissionCompleter = null;
+      });
+    } else {
+      _pendingPermissionRequest = null;
+      _pendingPermissionCompleter = null;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1008,13 +1033,44 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     CodexPermissionRequest request,
   ) async {
     if (!mounted) return null;
-    return showDialog<CodexPermissionDecision>(
+    // 已经有一个待处理请求时，先拒绝旧的让后到的覆盖。
+    if (_pendingPermissionCompleter != null) {
+      _resolvePendingPermission(null);
+    }
+    final completer = Completer<CodexPermissionDecision?>();
+    setState(() {
+      _pendingPermissionRequest = request;
+      _pendingPermissionCompleter = completer;
+    });
+    return completer.future;
+  }
+
+  Future<void> _showPermissionDetailsDialog() async {
+    final request = _pendingPermissionRequest;
+    if (request == null || !mounted) return;
+    final palette = context.palette;
+    final decision = await showDialog<CodexPermissionDecision>(
       context: context,
-      barrierDismissible: false,
+      barrierDismissible: true,
       builder: (ctx) {
-        final colorScheme = Theme.of(ctx).colorScheme;
         final permissionsText = _prettyJson(request.permissions);
         return AlertDialog(
+          icon: Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: palette.accentAmber.withValues(alpha: 0.18),
+              borderRadius: BorderRadius.circular(DS.r8),
+              border: Border.all(
+                color: palette.accentAmber.withValues(alpha: 0.42),
+              ),
+            ),
+            child: Icon(
+              Icons.policy_outlined,
+              color: palette.accentAmber,
+              size: 18,
+            ),
+          ),
           title: const Text('Codex 工具授权'),
           content: SizedBox(
             width: 520,
@@ -1026,31 +1082,45 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                   request.reason?.trim().isNotEmpty == true
                       ? request.reason!.trim()
                       : '模型请求临时提升本地工具权限。',
+                  style: TextStyle(color: palette.textPrimary, height: 1.5),
                 ),
-                const SizedBox(height: 12),
-                Text('请求权限', style: Theme.of(ctx).textTheme.labelLarge),
-                const SizedBox(height: 6),
+                const SizedBox(height: DS.s12),
+                Text(
+                  '请求权限',
+                  style: TextStyle(
+                    color: palette.textSecondary,
+                    fontSize: DS.t12,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.4,
+                  ),
+                ),
+                const SizedBox(height: DS.s6),
                 Container(
                   constraints: const BoxConstraints(maxHeight: 220),
                   decoration: BoxDecoration(
-                    color: colorScheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(8),
+                    color: palette.bgRaised,
+                    borderRadius: BorderRadius.circular(DS.r8),
+                    border: Border.all(color: palette.divider),
                   ),
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(DS.s12),
                   child: SingleChildScrollView(
                     child: SelectableText(
                       permissionsText,
-                      style: Theme.of(
-                        ctx,
-                      ).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+                      style: TextStyle(
+                        fontFamilyFallback: DS.monoFallback,
+                        fontSize: DS.t12,
+                        height: 1.45,
+                        color: palette.textPrimary,
+                      ),
                     ),
                   ),
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: DS.s10),
                 Text(
                   '可以在设置页把 Codex 权限模式改为“完全授权”，后续将自动批准。',
-                  style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
+                  style: TextStyle(
+                    color: palette.textTertiary,
+                    fontSize: DS.t12,
                   ),
                 ),
               ],
@@ -1082,6 +1152,9 @@ class _ChatPageState extends ConsumerState<ChatPage> {
         );
       },
     );
+    if (decision != null) {
+      _resolvePendingPermission(decision);
+    }
   }
 
   Future<CodexUserInputResponse?> _showCodexUserInputDialog(
@@ -1116,9 +1189,9 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                           question.header,
                           style: Theme.of(ctx).textTheme.labelLarge,
                         ),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: DS.s4),
                         Text(question.question),
-                        const SizedBox(height: 8),
+                        const SizedBox(height: DS.s8),
                         for (final option in question.options)
                           _ChoiceRow(
                             selected: selections[question.id] == option.label,
@@ -1143,7 +1216,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                               labelText: '输入自定义答案',
                             ),
                           ),
-                        const SizedBox(height: 14),
+                        const SizedBox(height: DS.s14),
                       ],
                     ],
                   ),
@@ -1209,13 +1282,25 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     );
     final selectedModel = selectedChatModelId(eng);
 
+    final cfg = eng.config.read();
+    final authCfg = cfg['auth'] is Map ? cfg['auth'] as Map : const {};
+    final userCfg = cfg['user'] is Map ? cfg['user'] as Map : const {};
+    String? readStr(Object? v) {
+      if (v is! String && v is! num) return null;
+      final t = '$v'.trim();
+      return t.isEmpty ? null : t;
+    }
+
+    final ownerName = readStr(authCfg['username']) ?? readStr(userCfg['name']);
+    final ownerId = readStr(authCfg['user_id']);
+
     ref.listen<ChatState>(chatProvider, (_, _) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scroll.hasClients) {
           _scroll.animateTo(
             _scroll.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 120),
-            curve: Curves.easeOut,
+            duration: DS.dBase,
+            curve: DS.cStandard,
           );
         }
       });
@@ -1225,108 +1310,175 @@ class _ChatPageState extends ConsumerState<ChatPage> {
         activeAgent != null && identity != null && selectedModel != null;
 
     return Scaffold(
+      backgroundColor: Colors.transparent,
       drawer: SessionDrawer(
         onNewSession: () => ref.read(chatProvider.notifier).createSession(),
         onSwitchSession: (entry) =>
             ref.read(chatProvider.notifier).switchSession(entry.path),
       ),
-      body: Stack(
-        children: [
-          Column(
-            children: [
-              Builder(
-                builder: (shellContext) => _ChatHeader(
-                  activeAgent: activeAgent,
-                  identityReady: identity != null,
-                  selectedModel: selectedModel,
-                  networkStatus: networkStatus,
-                  networkStatusLoading: networkStatusValue.isLoading,
-                  networkStatusError: networkStatusError,
-                  windowsOpsStatus: windowsOpsStatus,
-                  windowsOpsStatusLoading: windowsOpsStatusValue.isLoading,
-                  windowsOpsStatusError: windowsOpsStatusError,
-                  messageCount: state.history.length,
-                  streaming: state.streaming,
-                  canClear: state.history.isNotEmpty && !state.streaming,
-                  onOpenSessions: () => Scaffold.of(shellContext).openDrawer(),
-                  onClear: () => ref.read(chatProvider.notifier).clear(),
-                  onOpenDesk: () => Navigator.of(
-                    context,
-                  ).push(MaterialPageRoute(builder: (_) => const DeskPage())),
-                  onOpenMemory: () => Navigator.of(
-                    context,
-                  ).push(MaterialPageRoute(builder: (_) => const MemoryPage())),
-                  onOpenSkills: () => Navigator.of(
-                    context,
-                  ).push(MaterialPageRoute(builder: (_) => const SkillsPage())),
-                  onOpenSettings: () => WindowFactory.openSettings(context),
-                  onUnlockIdentity: identity == null ? _unlockIdentity : null,
-                  onChooseModel: state.streaming ? null : _chooseModel,
-                ),
-              ),
-              Expanded(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.surfaceContainerLow,
+      body: AmbientBackground(
+        child: LayoutBuilder(
+          builder: (layoutCtx, box) {
+            final wide = box.maxWidth >= 1100;
+            final palette = context.palette;
+            final mainColumn = Column(
+              children: [
+                Builder(
+                  builder: (shellContext) => _ChatHeader(
+                    activeAgent: activeAgent,
+                    identityReady: identity != null,
+                    selectedModel: selectedModel,
+                    networkStatus: networkStatus,
+                    networkStatusLoading: networkStatusValue.isLoading,
+                    networkStatusError: networkStatusError,
+                    windowsOpsStatus: windowsOpsStatus,
+                    windowsOpsStatusLoading: windowsOpsStatusValue.isLoading,
+                    windowsOpsStatusError: windowsOpsStatusError,
+                    messageCount: state.history.length,
+                    streaming: state.streaming,
+                    canClear: state.history.isNotEmpty && !state.streaming,
+                    ownerName: ownerName,
+                    ownerId: ownerId,
+                    hideSessionsButton: wide,
+                    onOpenSessions: () =>
+                        Scaffold.of(shellContext).openDrawer(),
+                    onClear: () => ref.read(chatProvider.notifier).clear(),
+                    onOpenDesk: () => Navigator.of(
+                      context,
+                    ).push(MaterialPageRoute(builder: (_) => const DeskPage())),
+                    onOpenMemory: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const MemoryPage()),
+                    ),
+                    onOpenSkills: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const SkillsPage()),
+                    ),
+                    onOpenSettings: () => WindowFactory.openSettings(context),
+                    onUnlockIdentity: identity == null ? _unlockIdentity : null,
+                    onChooseModel: state.streaming ? null : _chooseModel,
                   ),
+                ),
+                Expanded(
                   child: Align(
                     alignment: Alignment.topCenter,
                     child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 1040),
-                      child: ListView(
-                        controller: _scroll,
-                        padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
-                        children: [
-                          if (state.history.isEmpty && !state.streaming)
-                            _EmptyHint(
-                              activeAgent: activeAgent,
-                              identityReady: identity != null,
-                              selectedModel: selectedModel,
-                            ),
-                          for (var i = 0; i < state.history.length; i++)
-                            _MessageBubble(
-                              index: i,
-                              message: state.history[i],
-                              streaming: state.streaming,
-                            ),
-                          if (state.streaming)
-                            StreamingMessage(
-                              blocks: state.currentBlocks,
-                              streaming: true,
-                            ),
-                          if (state.retrying != null)
-                            _RetryBanner(
-                              notice: state.retrying!,
-                              onStop: () => ref
-                                  .read(chatProvider.notifier)
-                                  .stopRetrying(),
-                            ),
-                          if (state.error != null)
-                            _ErrorBanner(
-                              message: state.error!,
-                              details: state.errorDetails,
-                              statusCode: state.errorStatusCode,
-                            ),
-                        ],
+                      constraints: const BoxConstraints(
+                        maxWidth: DS.workspaceWidth,
+                      ),
+                      child: ScrollConfiguration(
+                        behavior: const _DesktopScrollBehavior(),
+                        child: ListView(
+                          controller: _scroll,
+                          padding: const EdgeInsets.fromLTRB(
+                            DS.s24,
+                            DS.s20,
+                            DS.s24,
+                            DS.s32,
+                          ),
+                          children: [
+                            if (state.history.isEmpty && !state.streaming)
+                              _EmptyHint(
+                                activeAgent: activeAgent,
+                                identityReady: identity != null,
+                                selectedModel: selectedModel,
+                              ),
+                            for (var i = 0; i < state.history.length; i++)
+                              _MessageBubble(
+                                index: i,
+                                message: state.history[i],
+                                streaming: state.streaming,
+                              ),
+                            if (state.streaming)
+                              StreamingMessage(
+                                blocks: state.currentBlocks,
+                                streaming: true,
+                              ),
+                            if (state.retrying != null)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: DS.s8,
+                                ),
+                                child: HanaBanner(
+                                  icon: Icons.autorenew,
+                                  leadingLabel: 'RETRYING',
+                                  title: state.retrying!.title,
+                                  subtitle: state.retrying!.message,
+                                  color: context.palette.accentAmber,
+                                  trailing: GlassButton(
+                                    label: '停止',
+                                    icon: Icons.stop_circle_outlined,
+                                    onPressed: () => ref
+                                        .read(chatProvider.notifier)
+                                        .stopRetrying(),
+                                    dense: true,
+                                  ),
+                                ),
+                              ),
+                            if (state.error != null)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: DS.s8,
+                                ),
+                                child: _ErrorBanner(
+                                  message: state.error!,
+                                  details: state.errorDetails,
+                                  statusCode: state.errorStatusCode,
+                                ),
+                              ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
                 ),
-              ),
-              _ComposerPanel(
-                controller: _input,
-                canSend: canUseComposer,
-                streaming: state.streaming,
-                activeAgent: activeAgent,
-                identityReady: identity != null,
-                selectedModel: selectedModel,
-                onSend: _send,
-                onStop: () => ref.read(chatProvider.notifier).stopRetrying(),
-              ),
-            ],
-          ),
-          const Positioned(top: 12, right: 12, child: PerfHud()),
-        ],
+                if (_pendingPermissionRequest != null)
+                  _PendingPermissionBanner(
+                    request: _pendingPermissionRequest!,
+                    onDeny: () => _resolvePendingPermission(
+                      const CodexPermissionDecision(
+                        approved: false,
+                        scope: 'none',
+                        message: '用户拒绝授权。',
+                      ),
+                    ),
+                    onApprove: () => _resolvePendingPermission(
+                      CodexPermissionDecision(
+                        approved: true,
+                        scope: 'turn',
+                        permissions: _pendingPermissionRequest!.permissions,
+                        message: '用户批准本次授权。',
+                      ),
+                    ),
+                    onShowDetails: _showPermissionDetailsDialog,
+                  ),
+                _ComposerPanel(
+                  controller: _input,
+                  canSend: canUseComposer,
+                  streaming: state.streaming,
+                  activeAgent: activeAgent,
+                  identityReady: identity != null,
+                  selectedModel: selectedModel,
+                  onSend: _send,
+                  onStop: () => ref.read(chatProvider.notifier).stopRetrying(),
+                ),
+              ],
+            );
+
+            if (!wide) return mainColumn;
+
+            return Row(
+              children: [
+                PersistentSidebar(
+                  onNewSession: () =>
+                      ref.read(chatProvider.notifier).createSession(),
+                  onSwitchSession: (entry) =>
+                      ref.read(chatProvider.notifier).switchSession(entry.path),
+                ),
+                Container(width: DS.hairline, color: palette.divider),
+                Expanded(child: mainColumn),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -1389,25 +1541,64 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     }
 
     final current = selectedChatModelId(eng);
+    final palette = context.palette;
     final result = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('选择模型'),
+        icon: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [
+                palette.accentEmerald.withValues(alpha: 0.32),
+                palette.accentCyan.withValues(alpha: 0.20),
+              ],
+            ),
+            borderRadius: BorderRadius.circular(DS.r8),
+            border: Border.all(
+              color: palette.accentEmerald.withValues(alpha: 0.42),
+            ),
+          ),
+          child: Icon(
+            Icons.hub_outlined,
+            color: palette.accentEmerald,
+            size: 18,
+          ),
+        ),
+        title: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('选择模型'),
+            const SizedBox(height: 4),
+            Text(
+              '共 ${models.length} 个可用',
+              style: TextStyle(
+                color: palette.textTertiary,
+                fontSize: DS.t11,
+                fontWeight: FontWeight.w500,
+                letterSpacing: 0.3,
+              ),
+            ),
+          ],
+        ),
         content: SizedBox(
-          width: 420,
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              for (final model in models)
-                ListTile(
-                  title: Text(model.name),
-                  selected: model.id == current,
-                  trailing: model.id == current
-                      ? const Icon(Icons.check, size: 18)
-                      : null,
+          width: 440,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 420),
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: models.length,
+              itemBuilder: (_, i) {
+                final model = models[i];
+                final selected = model.id == current;
+                return _ModelChoiceTile(
+                  model: model,
+                  selected: selected,
                   onTap: () => Navigator.pop(ctx, model.id),
-                ),
-            ],
+                );
+              },
+            ),
           ),
         ),
         actions: [
@@ -1422,6 +1613,183 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     await eng.modelManager.selectModel(result);
     eng.config.writeAt(['models', 'chat'], result);
     if (mounted) setState(() {});
+  }
+}
+
+class _ModelChoiceTile extends StatefulWidget {
+  const _ModelChoiceTile({
+    required this.model,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final dynamic model; // ModelDescriptor — keep dynamic to avoid cross-import
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  State<_ModelChoiceTile> createState() => _ModelChoiceTileState();
+}
+
+class _ModelChoiceTileState extends State<_ModelChoiceTile> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final selected = widget.selected;
+    final accent = palette.accentEmerald;
+    final bgColor = selected
+        ? accent.withValues(alpha: palette.isDark ? 0.14 : 0.10)
+        : _hover
+        ? palette.glassFill
+        : Colors.transparent;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: AnimatedContainer(
+        duration: DS.dFast,
+        margin: const EdgeInsets.symmetric(vertical: 2),
+        decoration: BoxDecoration(
+          color: bgColor,
+          borderRadius: BorderRadius.circular(DS.r10),
+          border: selected
+              ? Border.all(color: accent.withValues(alpha: 0.42))
+              : null,
+        ),
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(DS.r10),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(DS.r10),
+            onTap: widget.onTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: DS.s12,
+                vertical: DS.s10,
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 28,
+                    height: 28,
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? accent.withValues(alpha: 0.22)
+                          : palette.glassFill,
+                      borderRadius: BorderRadius.circular(DS.r6),
+                      border: Border.all(
+                        color: selected
+                            ? accent.withValues(alpha: 0.45)
+                            : palette.glassBorder,
+                      ),
+                    ),
+                    child: Icon(
+                      Icons.hub_outlined,
+                      size: 14,
+                      color: selected ? accent : palette.textSecondary,
+                    ),
+                  ),
+                  const SizedBox(width: DS.s12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          widget.model.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: palette.textPrimary,
+                            fontSize: DS.t14,
+                            fontWeight: selected
+                                ? FontWeight.w700
+                                : FontWeight.w600,
+                            height: 1.2,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          widget.model.id,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: palette.textTertiary,
+                            fontSize: DS.t11,
+                            fontFamilyFallback: DS.monoFallback,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (selected) ...[
+                    const SizedBox(width: DS.s8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: DS.s8,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: accent.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(DS.rPill),
+                        border: Border.all(
+                          color: accent.withValues(alpha: 0.42),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.check_rounded, size: 12, color: accent),
+                          const SizedBox(width: 4),
+                          Text(
+                            'CURRENT',
+                            style: TextStyle(
+                              color: accent,
+                              fontSize: DS.t10,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.8,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DesktopScrollBehavior extends ScrollBehavior {
+  const _DesktopScrollBehavior();
+
+  @override
+  Set<PointerDeviceKind> get dragDevices => {
+    PointerDeviceKind.touch,
+    PointerDeviceKind.mouse,
+    PointerDeviceKind.trackpad,
+    PointerDeviceKind.stylus,
+  };
+
+  @override
+  Widget buildScrollbar(
+    BuildContext context,
+    Widget child,
+    ScrollableDetails details,
+  ) {
+    return Scrollbar(
+      controller: details.controller,
+      thumbVisibility: false,
+      trackVisibility: false,
+      thickness: 6,
+      radius: const Radius.circular(DS.r8),
+      child: child,
+    );
   }
 }
 
@@ -1440,52 +1808,75 @@ class _ChoiceRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return Material(
-      color: selected
-          ? colorScheme.primaryContainer.withValues(alpha: 0.55)
-          : Colors.transparent,
-      borderRadius: BorderRadius.circular(8),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(8),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(
-                selected
-                    ? Icons.radio_button_checked
-                    : Icons.radio_button_unchecked,
-                size: 18,
-                color: selected ? colorScheme.primary : colorScheme.outline,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title),
-                    if (subtitle?.trim().isNotEmpty == true)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 2),
-                        child: Text(
-                          subtitle!.trim(),
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: colorScheme.onSurfaceVariant),
+    final palette = context.palette;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: DS.s4),
+      child: Material(
+        color: selected
+            ? palette.accentEmerald.withValues(alpha: 0.10)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(DS.r8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(DS.r8),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: DS.s10,
+              vertical: DS.s10,
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  selected
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                  size: 18,
+                  color: selected
+                      ? palette.accentEmerald
+                      : palette.textTertiary,
+                ),
+                const SizedBox(width: DS.s10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          color: palette.textPrimary,
+                          fontWeight: selected
+                              ? FontWeight.w700
+                              : FontWeight.w500,
                         ),
                       ),
-                  ],
+                      if (subtitle?.trim().isNotEmpty == true)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            subtitle!.trim(),
+                            style: TextStyle(
+                              color: palette.textSecondary,
+                              fontSize: DS.t12,
+                              height: 1.5,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 }
+
+// =====================================================================
+// Header
+// =====================================================================
 
 class _ChatHeader extends StatelessWidget {
   const _ChatHeader({
@@ -1501,6 +1892,9 @@ class _ChatHeader extends StatelessWidget {
     required this.messageCount,
     required this.streaming,
     required this.canClear,
+    required this.ownerName,
+    required this.ownerId,
+    required this.hideSessionsButton,
     required this.onOpenSessions,
     required this.onClear,
     required this.onOpenDesk,
@@ -1523,6 +1917,13 @@ class _ChatHeader extends StatelessWidget {
   final int messageCount;
   final bool streaming;
   final bool canClear;
+  final String? ownerName;
+  final String? ownerId;
+
+  /// 宽屏（常驻 sidebar 已显示）时设为 true，会话/菜单按钮就不再出现，
+  /// 避免与左侧 sidebar 重复。
+  final bool hideSessionsButton;
+
   final VoidCallback onOpenSessions;
   final VoidCallback onClear;
   final VoidCallback onOpenDesk;
@@ -1534,187 +1935,251 @@ class _ChatHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = Theme.of(context).colorScheme;
+    final palette = context.palette;
+    final subtitleText = activeAgent == null
+        ? '尚未选择 Agent · ${streaming ? "响应中" : "就绪"} · $messageCount 条消息'
+        : '$activeAgent · ${streaming ? "响应中" : "就绪"} · $messageCount 条消息';
+
+    final statusItems = <StatusClusterItem>[
+      StatusClusterItem(
+        icon: Icons.account_tree_outlined,
+        label: activeAgent == null ? '未选 Agent' : 'Agent 已连接',
+        color: activeAgent == null
+            ? palette.accentCrimson
+            : palette.accentEmerald,
+      ),
+      StatusClusterItem(
+        icon: Icons.key_outlined,
+        label: identityReady ? '身份已解锁' : '身份未解锁',
+        color: identityReady ? palette.accentEmerald : palette.accentCrimson,
+        tooltip: identityReady ? null : '尝试解锁本机身份',
+        onPressed: onUnlockIdentity,
+      ),
+      StatusClusterItem(
+        icon: Icons.lan_outlined,
+        label: _networkStatusLabel(
+          networkStatus,
+          loading: networkStatusLoading,
+          error: networkStatusError,
+        ),
+        color: _networkStatusColor(
+          palette,
+          networkStatus,
+          loading: networkStatusLoading,
+          error: networkStatusError,
+        ),
+        tooltip: _networkStatusTooltip(
+          networkStatus,
+          loading: networkStatusLoading,
+          error: networkStatusError,
+        ),
+      ),
+      StatusClusterItem(
+        icon: Icons.ads_click_outlined,
+        label: _windowsOpsStatusLabel(
+          windowsOpsStatus,
+          loading: windowsOpsStatusLoading,
+          error: windowsOpsStatusError,
+        ),
+        color: _windowsOpsStatusColor(
+          palette,
+          windowsOpsStatus,
+          loading: windowsOpsStatusLoading,
+          error: windowsOpsStatusError,
+        ),
+        tooltip: _windowsOpsStatusTooltip(
+          windowsOpsStatus,
+          loading: windowsOpsStatusLoading,
+          error: windowsOpsStatusError,
+        ),
+      ),
+      StatusClusterItem(
+        icon: Icons.memory_outlined,
+        label: selectedModel == null ? '未选模型' : '模型已选择',
+        color: selectedModel == null
+            ? palette.accentAmber
+            : palette.accentEmerald,
+      ),
+    ];
+
     final actions = Wrap(
-      spacing: 8,
-      runSpacing: 8,
+      spacing: DS.s4,
+      runSpacing: DS.s4,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        _HeaderAction(
+        GlassIconButton(
           icon: Icons.cleaning_services_outlined,
           tooltip: '清空当前会话',
           onPressed: canClear ? onClear : null,
         ),
-        _HeaderAction(
+        GlassIconButton(
           icon: Icons.psychology_outlined,
           tooltip: '记忆',
           onPressed: onOpenMemory,
         ),
-        _HeaderAction(
+        GlassIconButton(
           icon: Icons.folder_outlined,
           tooltip: '书桌',
           onPressed: onOpenDesk,
         ),
-        _HeaderAction(
+        GlassIconButton(
           icon: Icons.extension_outlined,
           tooltip: '技能',
           onPressed: onOpenSkills,
         ),
-        _HeaderAction(
+        GlassIconButton(
           icon: Icons.tune,
           tooltip: '设置',
           onPressed: onOpenSettings,
         ),
-        OutlinedButton.icon(
+        GlassButton(
           onPressed: onChooseModel,
-          icon: const Icon(Icons.hub_outlined, size: 18),
-          label: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 180),
-            child: Text(
-              selectedModel ?? '选择模型',
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
+          icon: Icons.hub_outlined,
+          label: selectedModel ?? '选择模型',
+          height: 32,
+          dense: true,
+          tooltip: selectedModel ?? '点击选择模型',
         ),
       ],
     );
 
-    return DecoratedBox(
+    return Container(
       decoration: BoxDecoration(
-        color: c.surface,
-        border: Border(bottom: BorderSide(color: c.outlineVariant)),
+        color: palette.bgRaised.withValues(alpha: palette.isDark ? 0.70 : 0.86),
+        border: Border(
+          bottom: BorderSide(color: palette.divider, width: DS.hairline),
+        ),
       ),
       child: SafeArea(
         bottom: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          padding: const EdgeInsets.symmetric(
+            horizontal: DS.s16,
+            vertical: DS.s10,
+          ),
           child: LayoutBuilder(
             builder: (context, box) {
-              final compact = box.maxWidth < 820;
-              final title = Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '子体控制台',
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      height: 1.2,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    activeAgent == null
-                        ? '尚未选择 Agent'
-                        : '$activeAgent · ${streaming ? "响应中" : "就绪"} · $messageCount 条消息',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodyMedium?.copyWith(color: c.onSurfaceVariant),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              );
-              final statusItems = <StatusClusterItem>[
-                StatusClusterItem(
-                  icon: Icons.account_tree_outlined,
-                  label: activeAgent == null ? '未选 Agent' : 'Agent 已连接',
-                  color: activeAgent == null ? c.error : c.primary,
-                ),
-                StatusClusterItem(
-                  icon: Icons.key_outlined,
-                  label: identityReady ? '身份已解锁' : '身份未解锁',
-                  color: identityReady ? c.primary : c.error,
-                  tooltip: identityReady ? null : '尝试解锁本机身份',
-                  onPressed: onUnlockIdentity,
-                ),
-                StatusClusterItem(
-                  icon: Icons.lan_outlined,
-                  label: _networkStatusLabel(
-                    networkStatus,
-                    loading: networkStatusLoading,
-                    error: networkStatusError,
-                  ),
-                  color: _networkStatusColor(
-                    c,
-                    networkStatus,
-                    loading: networkStatusLoading,
-                    error: networkStatusError,
-                  ),
-                  tooltip: _networkStatusTooltip(
-                    networkStatus,
-                    loading: networkStatusLoading,
-                    error: networkStatusError,
-                  ),
-                ),
-                StatusClusterItem(
-                  icon: Icons.ads_click_outlined,
-                  label: _windowsOpsStatusLabel(
-                    windowsOpsStatus,
-                    loading: windowsOpsStatusLoading,
-                    error: windowsOpsStatusError,
-                  ),
-                  color: _windowsOpsStatusColor(
-                    c,
-                    windowsOpsStatus,
-                    loading: windowsOpsStatusLoading,
-                    error: windowsOpsStatusError,
-                  ),
-                  tooltip: _windowsOpsStatusTooltip(
-                    windowsOpsStatus,
-                    loading: windowsOpsStatusLoading,
-                    error: windowsOpsStatusError,
-                  ),
-                ),
-                StatusClusterItem(
-                  icon: Icons.memory_outlined,
-                  label: selectedModel == null ? '未选模型' : '模型已选择',
-                  color: selectedModel == null ? c.tertiary : c.primary,
-                ),
-              ];
+              final compact = box.maxWidth < 760;
               final status = StatusCluster(
                 items: statusItems,
                 expandLeft: !compact,
+                spacing: DS.s4,
+                runSpacing: DS.s4,
+                collapsedSize: 24,
+                iconSize: 13,
+              );
+
+              final titleBlock = Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          '子体控制台',
+                          style: TextStyle(
+                            color: palette.textPrimary,
+                            fontSize: DS.t18,
+                            fontWeight: FontWeight.w700,
+                            height: 1.1,
+                            letterSpacing: 0.2,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: DS.s8),
+                      _LiveStatusBadge(streaming: streaming),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitleText,
+                    style: TextStyle(
+                      color: palette.textSecondary,
+                      fontSize: DS.t12,
+                      height: 1.3,
+                      letterSpacing: 0.2,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
               );
 
               if (compact) {
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        _HeaderAction(
-                          icon: Icons.menu,
-                          tooltip: '会话',
-                          onPressed: onOpenSessions,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(child: title),
+                        if (!hideSessionsButton) ...[
+                          GlassIconButton(
+                            icon: Icons.menu,
+                            tooltip: '会话',
+                            onPressed: onOpenSessions,
+                          ),
+                          const SizedBox(width: DS.s10),
+                        ],
+                        Expanded(child: titleBlock),
+                        const SizedBox(width: DS.s10),
+                        status,
                       ],
                     ),
-                    const SizedBox(height: 12),
-                    status,
-                    const SizedBox(height: 12),
-                    actions,
+                    const SizedBox(height: DS.s8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Flexible(child: actions),
+                        if (ownerName != null) ...[
+                          const SizedBox(width: DS.s10),
+                          _OwnerCard(name: ownerName!, id: ownerId),
+                        ],
+                      ],
+                    ),
                   ],
                 );
               }
 
               return Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  _HeaderAction(
-                    icon: Icons.menu,
-                    tooltip: '会话',
-                    onPressed: onOpenSessions,
+                  if (!hideSessionsButton) ...[
+                    GlassIconButton(
+                      icon: Icons.menu,
+                      tooltip: '会话',
+                      onPressed: onOpenSessions,
+                    ),
+                    const SizedBox(width: DS.s12),
+                  ],
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 360),
+                    child: titleBlock,
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(child: title),
-                  Flexible(
+                  const SizedBox(width: DS.s14),
+                  Expanded(
                     child: Align(
                       alignment: Alignment.centerRight,
-                      child: status,
+                      child: Wrap(
+                        alignment: WrapAlignment.end,
+                        runAlignment: WrapAlignment.center,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: DS.s12,
+                        runSpacing: DS.s4,
+                        children: [status, actions],
+                      ),
                     ),
                   ),
-                  const SizedBox(width: 16),
-                  actions,
+                  if (ownerName != null) ...[
+                    const SizedBox(width: DS.s16),
+                    Container(width: 1, height: 22, color: palette.divider),
+                    const SizedBox(width: DS.s12),
+                    _OwnerCard(name: ownerName!, id: ownerId),
+                  ],
                 ],
               );
             },
@@ -1724,6 +2189,120 @@ class _ChatHeader extends StatelessWidget {
     );
   }
 }
+
+class _OwnerCard extends StatefulWidget {
+  const _OwnerCard({required this.name, this.id});
+
+  final String name;
+  final String? id;
+
+  @override
+  State<_OwnerCard> createState() => _OwnerCardState();
+}
+
+class _OwnerCardState extends State<_OwnerCard> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: AnimatedContainer(
+        duration: DS.dFast,
+        padding: const EdgeInsets.fromLTRB(DS.s8, 3, DS.s6, 3),
+        decoration: BoxDecoration(
+          color: _hover ? palette.glassFillStrong : Colors.transparent,
+          borderRadius: BorderRadius.circular(DS.rPill),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'LOCAL OWNER',
+                  style: TextStyle(
+                    color: palette.textTertiary,
+                    fontSize: DS.t10,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.4,
+                    height: 1.0,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 140),
+                  child: Text(
+                    widget.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: palette.textPrimary,
+                      fontSize: DS.t13,
+                      fontWeight: FontWeight.w700,
+                      height: 1.0,
+                      letterSpacing: 0.1,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(width: DS.s8),
+            HanaAvatar(label: widget.name, size: 30),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LiveStatusBadge extends StatelessWidget {
+  const _LiveStatusBadge({required this.streaming});
+
+  final bool streaming;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final color = streaming ? palette.accentEmerald : palette.textSecondary;
+    final label = streaming ? '响应中' : '就绪';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: DS.s8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: palette.isDark ? 0.10 : 0.08),
+        borderRadius: BorderRadius.circular(DS.rPill),
+        border: Border.all(
+          color: color.withValues(
+            alpha: streaming ? 0.42 : (palette.isDark ? 0.18 : 0.22),
+          ),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          StatusDot(color: color, size: 6, pulse: streaming, glow: true),
+          const SizedBox(width: DS.s6),
+          Text(
+            label,
+            style: TextStyle(
+              color: Color.lerp(palette.textSecondary, color, 0.7)!,
+              fontSize: DS.t10,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.8,
+              height: 1.0,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// -- Status label / color / tooltip helpers --
 
 String _networkStatusLabel(
   ExperienceNetworkStatus? status, {
@@ -1737,10 +2316,10 @@ String _networkStatusLabel(
     'DHT ${status.connectedDhtCount}/${status.configuredDhtCount}',
   ];
   if (status.ipv6Status == ExperienceNetworkPathStatus.direct) {
-    parts.add('IPv6 可以直连');
+    parts.add('IPv6 直连');
   }
   if (status.ipv4Status == ExperienceNetworkPathStatus.holePunchable) {
-    parts.add('IPv4 打洞成功');
+    parts.add('IPv4 打洞');
   } else if (status.ipv4Status == ExperienceNetworkPathStatus.notPunchable) {
     parts.add('IPv4 不可打洞');
   }
@@ -1751,25 +2330,27 @@ String _networkStatusLabel(
 }
 
 Color _networkStatusColor(
-  ColorScheme c,
+  HanaPalette palette,
   ExperienceNetworkStatus? status, {
   required bool loading,
   String? error,
 }) {
-  if (status == null) return loading ? c.secondary : c.error;
+  if (status == null) {
+    return loading ? palette.accentCyan : palette.accentCrimson;
+  }
   if (error != null || status.error != null || status.connectedDhtCount == 0) {
-    return c.error;
+    return palette.accentCrimson;
   }
   if (status.ipv6Status == ExperienceNetworkPathStatus.direct) {
-    return Colors.green.shade700;
+    return palette.accentEmerald;
   }
   if (status.ipv4Status == ExperienceNetworkPathStatus.holePunchable) {
-    return c.primary;
+    return palette.accentEmerald;
   }
   if (status.ipv4Status == ExperienceNetworkPathStatus.notPunchable) {
-    return c.tertiary;
+    return palette.accentAmber;
   }
-  return c.error;
+  return palette.accentCrimson;
 }
 
 String _networkStatusTooltip(
@@ -1820,23 +2401,25 @@ String _windowsOpsStatusLabel(
 }
 
 Color _windowsOpsStatusColor(
-  ColorScheme c,
+  HanaPalette palette,
   WindowsOpsCapabilities? status, {
   required bool loading,
   String? error,
 }) {
-  if (status == null) return loading ? c.secondary : c.error;
-  if (error != null || !status.sidecar) return c.error;
+  if (status == null) {
+    return loading ? palette.accentCyan : palette.accentCrimson;
+  }
+  if (error != null || !status.sidecar) return palette.accentCrimson;
   if (status.inputMouse &&
       status.inputKeyboard &&
       status.uiParsing &&
       status.ocr) {
-    return Colors.green.shade700;
+    return palette.accentEmerald;
   }
   if (status.inputMouse || status.inputKeyboard || status.uiaTree) {
-    return c.primary;
+    return palette.accentEmerald;
   }
-  return c.tertiary;
+  return palette.accentAmber;
 }
 
 String _windowsOpsStatusTooltip(
@@ -1867,30 +2450,9 @@ String _windowsOpsStatusTooltip(
   return lines.join('\n');
 }
 
-class _HeaderAction extends StatelessWidget {
-  const _HeaderAction({
-    required this.icon,
-    required this.tooltip,
-    required this.onPressed,
-  });
-
-  final IconData icon;
-  final String tooltip;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return IconButton.filledTonal(
-      icon: Icon(icon, size: 20),
-      tooltip: tooltip,
-      onPressed: onPressed,
-      style: IconButton.styleFrom(
-        fixedSize: const Size(40, 40),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      ),
-    );
-  }
-}
+// =====================================================================
+// Composer
+// =====================================================================
 
 class _ComposerPanel extends StatefulWidget {
   const _ComposerPanel({
@@ -1919,12 +2481,14 @@ class _ComposerPanel extends StatefulWidget {
 
 class _ComposerPanelState extends State<_ComposerPanel> {
   late final FocusNode _focusNode;
+  bool _focused = false;
 
   @override
   void initState() {
     super.initState();
     _focusNode = FocusNode(debugLabel: 'chat-composer');
     _focusNode.onKeyEvent = _handleKeyEvent;
+    _focusNode.addListener(_onFocusChanged);
     widget.controller.addListener(_onTextChanged);
   }
 
@@ -1939,13 +2503,20 @@ class _ComposerPanelState extends State<_ComposerPanel> {
   @override
   void dispose() {
     widget.controller.removeListener(_onTextChanged);
+    _focusNode.removeListener(_onFocusChanged);
     _focusNode.dispose();
     super.dispose();
   }
 
+  void _onFocusChanged() {
+    if (!mounted) return;
+    final has = _focusNode.hasFocus;
+    if (has != _focused) setState(() => _focused = has);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final c = Theme.of(context).colorScheme;
+    final palette = context.palette;
     final hintText = widget.activeAgent == null
         ? '请先创建或选择 Agent'
         : !widget.identityReady
@@ -1954,47 +2525,45 @@ class _ComposerPanelState extends State<_ComposerPanel> {
         ? '请先选择模型'
         : widget.streaming
         ? '输入插话，或留空停止当前回复'
-        : '输入消息，Enter 发送，Shift+Enter 换行';
+        : '继续输入：让子体把这个方向落到下一步…';
     final hasContent = widget.controller.hasComposedContent;
     final stopOnly = widget.streaming && !hasContent;
     final buttonEnabled = widget.canSend && (hasContent || stopOnly);
-    final buttonIcon = stopOnly ? Icons.stop : Icons.send;
+    final buttonIcon = stopOnly
+        ? Icons.stop_rounded
+        : Icons.arrow_upward_rounded;
     final buttonLabel = stopOnly ? '停止' : '发送';
     final buttonAction = stopOnly ? widget.onStop : widget.onSend;
 
-    return DecoratedBox(
+    return Container(
       decoration: BoxDecoration(
-        color: c.surface,
-        border: Border(top: BorderSide(color: c.outlineVariant)),
+        color: palette.bgRaised.withValues(alpha: palette.isDark ? 0.55 : 0.86),
+        border: Border(
+          top: BorderSide(color: palette.divider, width: DS.hairline),
+        ),
       ),
       child: SafeArea(
         top: false,
         child: Align(
           alignment: Alignment.center,
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 1040),
+            constraints: const BoxConstraints(maxWidth: DS.workspaceWidth),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 16, 24, 16),
+              padding: const EdgeInsets.fromLTRB(
+                DS.s20,
+                DS.s12,
+                DS.s20,
+                DS.s14,
+              ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  SizedBox(
-                    height: 50,
-                    width: 44,
-                    child: IconButton(
-                      onPressed: widget.canSend ? _pickImageFile : null,
-                      icon: const Icon(Icons.image_outlined, size: 20),
-                      tooltip: '添加图片',
-                    ),
-                  ),
-                  const SizedBox(width: 8),
                   Expanded(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: c.surfaceContainerLowest,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: c.outlineVariant),
-                      ),
+                    child: _ComposerInputShell(
+                      focused: _focused,
+                      leadingIcon: widget.canSend
+                          ? _ComposerAttachButton(onPressed: _pickImageFile)
+                          : const SizedBox(width: DS.s10),
                       child: TextField(
                         focusNode: _focusNode,
                         controller: widget.controller,
@@ -2002,35 +2571,39 @@ class _ComposerPanelState extends State<_ComposerPanel> {
                         minLines: 1,
                         maxLines: 6,
                         keyboardType: TextInputType.multiline,
+                        cursorColor: palette.accentEmerald,
                         decoration: InputDecoration(
                           hintText: hintText,
+                          hintStyle: TextStyle(
+                            color: palette.textTertiary,
+                            fontSize: DS.t15,
+                          ),
                           border: InputBorder.none,
                           enabledBorder: InputBorder.none,
                           focusedBorder: InputBorder.none,
+                          disabledBorder: InputBorder.none,
                           filled: false,
                           contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 14,
+                            horizontal: 0,
+                            vertical: DS.s14,
                           ),
+                          isCollapsed: false,
                         ),
-                        style: const TextStyle(fontSize: 16, height: 1.5),
+                        style: TextStyle(
+                          fontSize: DS.t15,
+                          height: 1.5,
+                          color: palette.textPrimary,
+                        ),
                         textInputAction: TextInputAction.newline,
                       ),
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  SizedBox(
-                    height: 50,
-                    child: FilledButton.icon(
-                      onPressed: buttonEnabled ? buttonAction : null,
-                      icon: Icon(buttonIcon, size: 18),
-                      label: Text(buttonLabel),
-                      style: FilledButton.styleFrom(
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                      ),
-                    ),
+                  const SizedBox(width: DS.s12),
+                  _CircleSendButton(
+                    icon: buttonIcon,
+                    label: buttonLabel,
+                    onPressed: buttonEnabled ? buttonAction : null,
+                    danger: stopOnly,
                   ),
                 ],
               ),
@@ -2140,6 +2713,320 @@ class _ComposerPanelState extends State<_ComposerPanel> {
   }
 }
 
+class _ComposerInputShell extends StatelessWidget {
+  const _ComposerInputShell({
+    required this.focused,
+    required this.leadingIcon,
+    required this.child,
+  });
+
+  /// 父级管理的 focus 状态，统一控制边框高亮。
+  final bool focused;
+
+  /// 左侧内嵌的小附件按钮（可以是 SizedBox.shrink 占位）。
+  final Widget leadingIcon;
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return AnimatedContainer(
+      duration: DS.dQuick,
+      curve: DS.cStandard,
+      decoration: BoxDecoration(
+        color: palette.bgDeep.withValues(alpha: palette.isDark ? 0.66 : 0.50),
+        borderRadius: BorderRadius.circular(DS.r14),
+        border: Border.all(
+          color: focused
+              ? palette.accentEmerald.withValues(alpha: 0.55)
+              : palette.divider,
+          width: focused ? 1.4 : DS.hairline,
+        ),
+        boxShadow: focused
+            ? [
+                BoxShadow(
+                  color: palette.accentEmerald.withValues(alpha: 0.10),
+                  blurRadius: 16,
+                ),
+              ]
+            : null,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: DS.s8),
+            child: leadingIcon,
+          ),
+          Expanded(child: child),
+        ],
+      ),
+    );
+  }
+}
+
+class _ComposerAttachButton extends StatefulWidget {
+  const _ComposerAttachButton({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  State<_ComposerAttachButton> createState() => _ComposerAttachButtonState();
+}
+
+class _ComposerAttachButtonState extends State<_ComposerAttachButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Tooltip(
+      message: '添加图片 (Ctrl+V 粘贴)',
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: AnimatedContainer(
+          duration: DS.dFast,
+          width: 30,
+          height: 30,
+          decoration: BoxDecoration(
+            color: _hover
+                ? palette.accentEmerald.withValues(alpha: 0.12)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(DS.r8),
+          ),
+          child: Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(DS.r8),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(DS.r8),
+              onTap: widget.onPressed,
+              child: Center(
+                child: Icon(
+                  Icons.add_photo_alternate_outlined,
+                  size: 16,
+                  color: _hover ? palette.accentEmerald : palette.textSecondary,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CircleSendButton extends StatefulWidget {
+  const _CircleSendButton({
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+    required this.danger,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onPressed;
+
+  /// 停止状态 — 用 crimson 描边强调。
+  final bool danger;
+
+  @override
+  State<_CircleSendButton> createState() => _CircleSendButtonState();
+}
+
+class _CircleSendButtonState extends State<_CircleSendButton> {
+  bool _hover = false;
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final enabled = widget.onPressed != null;
+    final accent = widget.danger
+        ? palette.accentCrimson
+        : palette.accentEmerald;
+
+    // 设计图: 白色圆形按钮 + 内部深色 icon。
+    // 在浅色主题: bg = pure white; 在深色主题: bg = warm off-white。
+    final baseBg = palette.isDark ? const Color(0xFFEEF2F5) : Colors.white;
+    final bg = !enabled
+        ? baseBg.withValues(alpha: 0.45)
+        : _pressed
+        ? Color.lerp(baseBg, accent.withValues(alpha: 1), 0.10)!
+        : (_hover
+              ? Color.lerp(baseBg, accent.withValues(alpha: 1), 0.06)!
+              : baseBg);
+    final fg = !enabled
+        ? palette.textTertiary
+        : (_hover ? accent : const Color(0xFF0E1A1F));
+    return Tooltip(
+      message: widget.label,
+      child: MouseRegion(
+        cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: AnimatedScale(
+          scale: _pressed ? 0.92 : (_hover && enabled ? 1.04 : 1.0),
+          duration: DS.dFast,
+          curve: DS.cStandard,
+          child: AnimatedContainer(
+            duration: DS.dFast,
+            curve: DS.cStandard,
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: bg,
+              border: Border.all(
+                color: enabled
+                    ? (_hover
+                          ? accent.withValues(alpha: 0.45)
+                          : palette.divider)
+                    : palette.divider,
+                width: _hover && enabled ? 1.4 : DS.hairline,
+              ),
+              boxShadow: enabled
+                  ? [
+                      BoxShadow(
+                        color: Colors.black.withValues(
+                          alpha: palette.isDark ? 0.32 : 0.10,
+                        ),
+                        blurRadius: 14,
+                        offset: const Offset(0, 4),
+                        spreadRadius: -2,
+                      ),
+                      if (_hover)
+                        BoxShadow(
+                          color: accent.withValues(alpha: 0.22),
+                          blurRadius: 18,
+                          spreadRadius: -4,
+                          offset: const Offset(0, 6),
+                        ),
+                    ]
+                  : null,
+            ),
+            child: Material(
+              color: Colors.transparent,
+              shape: const CircleBorder(),
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: widget.onPressed,
+                onHighlightChanged: (v) => setState(() => _pressed = v),
+                splashColor: accent.withValues(alpha: 0.18),
+                hoverColor: Colors.transparent,
+                child: Center(child: Icon(widget.icon, color: fg, size: 22)),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SendButton extends StatefulWidget {
+  const _SendButton({
+    required this.icon,
+    required this.label,
+    required this.accent,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color accent;
+  final VoidCallback? onPressed;
+
+  @override
+  State<_SendButton> createState() => _SendButtonState();
+}
+
+class _SendButtonState extends State<_SendButton>
+    with SingleTickerProviderStateMixin {
+  bool _hover = false;
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final enabled = widget.onPressed != null;
+    final base = widget.accent;
+    final bg = !enabled
+        ? base.withValues(alpha: 0.30)
+        : _pressed
+        ? Color.lerp(base, Colors.black, 0.16)!
+        : (_hover ? Color.lerp(base, Colors.white, 0.10)! : base);
+    final fg = palette.isDark ? const Color(0xFF06120A) : Colors.white;
+    return Tooltip(
+      message: widget.label,
+      child: MouseRegion(
+        cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: AnimatedScale(
+          scale: _pressed ? 0.92 : (_hover && enabled ? 1.04 : 1.0),
+          duration: DS.dFast,
+          curve: DS.cStandard,
+          child: AnimatedContainer(
+            duration: DS.dFast,
+            curve: DS.cStandard,
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: enabled
+                  ? LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [Color.lerp(bg, Colors.white, 0.06)!, bg],
+                    )
+                  : null,
+              color: enabled ? null : bg,
+              boxShadow: enabled
+                  ? [
+                      BoxShadow(
+                        color: base.withValues(alpha: 0.45),
+                        blurRadius: 18,
+                        spreadRadius: -2,
+                        offset: const Offset(0, 6),
+                      ),
+                      BoxShadow(
+                        color: Colors.white.withValues(
+                          alpha: palette.isDark ? 0.18 : 0.32,
+                        ),
+                        blurRadius: 2,
+                        spreadRadius: -1,
+                        offset: const Offset(0, -1),
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Material(
+              color: Colors.transparent,
+              shape: const CircleBorder(),
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: widget.onPressed,
+                onHighlightChanged: (v) => setState(() => _pressed = v),
+                splashColor: Colors.white.withValues(alpha: 0.18),
+                hoverColor: Colors.transparent,
+                child: Center(child: Icon(widget.icon, color: fg, size: 22)),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// =====================================================================
+// Empty hint / message bubble / error
+// =====================================================================
+
 class _EmptyHint extends StatelessWidget {
   final String? activeAgent;
   final bool identityReady;
@@ -2152,126 +3039,159 @@ class _EmptyHint extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = Theme.of(context).colorScheme;
-    return Center(
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 720),
-        margin: const EdgeInsets.symmetric(vertical: 56),
-        padding: const EdgeInsets.all(32),
-        decoration: BoxDecoration(
-          color: c.surfaceContainerLowest,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: c.outlineVariant),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+    final palette = context.palette;
+    final ready = activeAgent != null && identityReady && selectedModel != null;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: DS.s40),
+      child: Center(
+        child: FadeSlideIn(
+          child: GlassSurface(
+            constraints: const BoxConstraints(maxWidth: 600),
+            padding: const EdgeInsets.all(DS.s24),
+            radius: DS.r14,
+            intensity: GlassIntensity.regular,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: c.primaryContainer,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Icon(
-                    Icons.forum_outlined,
-                    color: c.onPrimaryContainer,
-                  ),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            palette.accentEmerald.withValues(alpha: 0.24),
+                            palette.accentCyan.withValues(alpha: 0.18),
+                          ],
+                        ),
+                        borderRadius: BorderRadius.circular(DS.r10),
+                        border: Border.all(
+                          color: palette.accentEmerald.withValues(alpha: 0.32),
+                        ),
+                      ),
+                      child: Icon(
+                        ready
+                            ? Icons.bolt_outlined
+                            : Icons.hourglass_top_outlined,
+                        size: 22,
+                        color: palette.accentEmerald,
+                      ),
+                    ),
+                    const SizedBox(width: DS.s12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            ready ? '准备就绪' : '等待环境就绪',
+                            style: TextStyle(
+                              color: palette.textPrimary,
+                              fontSize: DS.t18,
+                              fontWeight: FontWeight.w700,
+                              height: 1.2,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            ready ? '随时输入指令开启新一轮对话。' : '完成以下项目后即可开始。',
+                            style: TextStyle(
+                              color: palette.textSecondary,
+                              fontSize: DS.t13,
+                              height: 1.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Text(
-                    '开始一次子体会话',
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      height: 1.25,
+                const SizedBox(height: DS.s20),
+                Wrap(
+                  spacing: DS.s6,
+                  runSpacing: DS.s6,
+                  children: [
+                    HanaPill(
+                      icon: Icons.account_tree_outlined,
+                      label: activeAgent == null
+                          ? '等待 Agent'
+                          : 'Agent: $activeAgent',
+                      color: activeAgent == null
+                          ? palette.accentCrimson
+                          : palette.accentEmerald,
+                    ),
+                    HanaPill(
+                      icon: Icons.key_outlined,
+                      label: identityReady ? '身份可用' : '身份待解锁',
+                      color: identityReady
+                          ? palette.accentEmerald
+                          : palette.accentCrimson,
+                    ),
+                    HanaPill(
+                      icon: Icons.memory_outlined,
+                      label: selectedModel == null
+                          ? '模型待选择'
+                          : '模型 · $selectedModel',
+                      color: selectedModel == null
+                          ? palette.accentAmber
+                          : palette.accentEmerald,
+                    ),
+                  ],
+                ),
+                if (ready) ...[
+                  const SizedBox(height: DS.s14),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: DS.s12,
+                      vertical: DS.s10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: palette.bgDeep.withValues(alpha: 0.5),
+                      borderRadius: BorderRadius.circular(DS.r8),
+                      border: Border.all(color: palette.divider),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.keyboard_return_rounded,
+                          size: 14,
+                          color: palette.textTertiary,
+                        ),
+                        const SizedBox(width: DS.s8),
+                        Text(
+                          'Enter 发送',
+                          style: TextStyle(
+                            color: palette.textSecondary,
+                            fontSize: DS.t12,
+                          ),
+                        ),
+                        const SizedBox(width: DS.s14),
+                        Icon(
+                          Icons.keyboard_capslock_outlined,
+                          size: 14,
+                          color: palette.textTertiary,
+                        ),
+                        const SizedBox(width: DS.s8),
+                        Text(
+                          'Shift+Enter 换行',
+                          style: TextStyle(
+                            color: palette.textSecondary,
+                            fontSize: DS.t12,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                ),
+                ],
               ],
             ),
-            const SizedBox(height: 16),
-            Text(
-              '这里保留普通对话客户端的直接性，同时把身份、模型和本地记忆这些子体状态放到第一层。',
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                height: 1.6,
-                color: c.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 24),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _HintStatusPill(
-                  icon: Icons.account_tree_outlined,
-                  label: activeAgent == null
-                      ? '等待 Agent'
-                      : 'Agent: $activeAgent',
-                  color: activeAgent == null ? c.error : c.primary,
-                ),
-                _HintStatusPill(
-                  icon: Icons.key_outlined,
-                  label: identityReady ? '身份可用' : '身份待解锁',
-                  color: identityReady ? c.primary : c.error,
-                ),
-                _HintStatusPill(
-                  icon: Icons.memory_outlined,
-                  label: selectedModel == null ? '模型待选择' : '模型可用',
-                  color: selectedModel == null ? c.tertiary : c.primary,
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _HintStatusPill extends StatelessWidget {
-  const _HintStatusPill({
-    required this.icon,
-    required this.label,
-    required this.color,
-  });
-
-  final IconData icon;
-  final String label;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: color.withAlpha(28),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(999),
-        side: BorderSide(color: color.withAlpha(72)),
-      ),
-      child: Container(
-        height: 30,
-        constraints: const BoxConstraints(maxWidth: 240),
-        padding: const EdgeInsets.symmetric(horizontal: 9),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 14, color: color),
-            const SizedBox(width: 5),
-            Flexible(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: color,
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -2286,57 +3206,30 @@ class _ErrorBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = Theme.of(context).colorScheme;
+    final palette = context.palette;
     final hasDetails = details != null && details!.trim().isNotEmpty;
-    return Padding(
-      padding: const EdgeInsets.all(12),
-      child: Material(
-        color: c.errorContainer,
-        borderRadius: BorderRadius.circular(8),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(Icons.error_outline, color: c.onErrorContainer, size: 20),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      message,
-                      style: TextStyle(
-                        color: c.onErrorContainer,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    if (statusCode != null) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        'HTTP $statusCode',
-                        style: TextStyle(
-                          color: c.onErrorContainer.withAlpha(190),
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              if (hasDetails)
-                TextButton(
-                  onPressed: () => _showDetails(context),
-                  child: const Text('查看详情'),
-                ),
-            ],
-          ),
-        ),
-      ),
+    final subtitle = statusCode == null
+        ? message
+        : 'HTTP $statusCode · $message';
+    return HanaBanner(
+      icon: Icons.error_outline_rounded,
+      leadingLabel: 'ERROR',
+      title: '请求失败',
+      subtitle: subtitle,
+      color: palette.accentCrimson,
+      trailing: hasDetails
+          ? GlassButton(
+              label: '详情',
+              icon: Icons.code_rounded,
+              onPressed: () => _showDetails(context),
+              dense: true,
+            )
+          : null,
     );
   }
 
   void _showDetails(BuildContext context) {
+    final palette = context.palette;
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -2348,7 +3241,11 @@ class _ErrorBanner extends StatelessWidget {
             child: SingleChildScrollView(
               child: SelectableText(
                 details ?? '',
-                style: const TextStyle(fontFamily: 'monospace', height: 1.45),
+                style: TextStyle(
+                  fontFamilyFallback: DS.monoFallback,
+                  height: 1.5,
+                  color: palette.textPrimary,
+                ),
               ),
             ),
           ),
@@ -2357,113 +3254,6 @@ class _ErrorBanner extends StatelessWidget {
           TextButton(
             onPressed: () {
               Clipboard.setData(ClipboardData(text: details ?? ''));
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('详情已复制'),
-                  duration: Duration(seconds: 1),
-                ),
-              );
-            },
-            child: const Text('复制详情'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('关闭'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _RetryBanner extends StatelessWidget {
-  const _RetryBanner({required this.notice, required this.onStop});
-
-  final ChatRetryNotice notice;
-  final VoidCallback onStop;
-
-  @override
-  Widget build(BuildContext context) {
-    const background = Color(0xfffff2c2);
-    const foreground = Color(0xff4b3510);
-    final hasDetails =
-        notice.details != null && notice.details!.trim().isNotEmpty;
-    return Padding(
-      padding: const EdgeInsets.all(12),
-      child: Material(
-        color: background,
-        borderRadius: BorderRadius.circular(8),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Icon(Icons.autorenew, color: foreground, size: 20),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      notice.title,
-                      style: const TextStyle(
-                        color: foreground,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      notice.message,
-                      style: const TextStyle(color: foreground),
-                    ),
-                    if (notice.statusCode != null) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        'HTTP ${notice.statusCode}',
-                        style: TextStyle(
-                          color: foreground.withAlpha(190),
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              if (hasDetails)
-                TextButton(
-                  onPressed: () => _showDetails(context),
-                  child: const Text('查看详情'),
-                ),
-              const SizedBox(width: 8),
-              OutlinedButton(onPressed: onStop, child: const Text('停止')),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _showDetails(BuildContext context) {
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('重试前错误详情'),
-        content: SizedBox(
-          width: 640,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 420),
-            child: SingleChildScrollView(
-              child: SelectableText(
-                notice.details ?? '',
-                style: const TextStyle(fontFamily: 'monospace', height: 1.45),
-              ),
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Clipboard.setData(ClipboardData(text: notice.details ?? ''));
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
                   content: Text('详情已复制'),
@@ -2525,21 +3315,22 @@ class _MessageBubbleState extends ConsumerState<_MessageBubble> {
       ),
     );
     if (result == null || result.isEmpty) return;
+    if (!mounted) return;
     await ref.read(chatProvider.notifier).editUserAt(widget.index, result);
   }
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     final isUser = widget.message.role == 'user';
     final copyText = widget.message.copyText;
-    final c = Theme.of(context).colorScheme;
+    final accent = isUser ? palette.accentLavender : palette.accentEmerald;
+    final roleLabel = isUser ? 'USER' : 'HANAKO';
+
     final actions = <Widget>[
-      IconButton(
-        icon: const Icon(Icons.copy, size: 16),
+      _BubbleAction(
+        icon: Icons.copy_rounded,
         tooltip: '复制',
-        visualDensity: VisualDensity.compact,
-        constraints: const BoxConstraints.tightFor(width: 28, height: 28),
-        padding: EdgeInsets.zero,
         onPressed: () {
           Clipboard.setData(ClipboardData(text: copyText));
           ScaffoldMessenger.of(context).showSnackBar(
@@ -2551,32 +3342,23 @@ class _MessageBubbleState extends ConsumerState<_MessageBubble> {
         },
       ),
       if (isUser)
-        IconButton(
-          icon: const Icon(Icons.edit, size: 16),
+        _BubbleAction(
+          icon: Icons.edit_rounded,
           tooltip: '编辑并重新生成',
-          visualDensity: VisualDensity.compact,
-          constraints: const BoxConstraints.tightFor(width: 28, height: 28),
-          padding: EdgeInsets.zero,
           onPressed: widget.streaming ? null : _editUserMessage,
         )
       else
-        IconButton(
-          icon: const Icon(Icons.refresh, size: 16),
+        _BubbleAction(
+          icon: Icons.refresh_rounded,
           tooltip: '重新生成',
-          visualDensity: VisualDensity.compact,
-          constraints: const BoxConstraints.tightFor(width: 28, height: 28),
-          padding: EdgeInsets.zero,
           onPressed: widget.streaming
               ? null
               : () =>
                     ref.read(chatProvider.notifier).regenerateAt(widget.index),
         ),
-      IconButton(
-        icon: const Icon(Icons.delete_outline, size: 16),
+      _BubbleAction(
+        icon: Icons.delete_outline_rounded,
         tooltip: '删除',
-        visualDensity: VisualDensity.compact,
-        constraints: const BoxConstraints.tightFor(width: 28, height: 28),
-        padding: EdgeInsets.zero,
         onPressed: widget.streaming
             ? null
             : () => ref.read(chatProvider.notifier).removeAt(widget.index),
@@ -2584,55 +3366,258 @@ class _MessageBubbleState extends ConsumerState<_MessageBubble> {
     ];
 
     return RepaintBoundary(
-      child: MouseRegion(
-        onEnter: (_) => setState(() => _hover = true),
-        onExit: (_) => setState(() => _hover = false),
-        child: Align(
-          alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-          child: Column(
-            crossAxisAlignment: isUser
-                ? CrossAxisAlignment.end
-                : CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Text(
-                  isUser ? '你' : '子体',
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: c.onSurfaceVariant,
-                    fontWeight: FontWeight.w600,
+      child: FadeSlideIn(
+        duration: DS.dBase,
+        offset: 6,
+        child: MouseRegion(
+          onEnter: (_) => setState(() => _hover = true),
+          onExit: (_) => setState(() => _hover = false),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: DS.s10),
+            child: Align(
+              alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+              child: Column(
+                crossAxisAlignment: isUser
+                    ? CrossAxisAlignment.end
+                    : CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 4,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: accent,
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: accent.withValues(alpha: 0.6),
+                                blurRadius: 4,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: DS.s6),
+                        Text(
+                          roleLabel,
+                          style: TextStyle(
+                            color: accent,
+                            fontSize: DS.t10,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 1.6,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ),
-              Container(
-                margin: const EdgeInsets.only(bottom: 2),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 12,
-                ),
-                constraints: BoxConstraints(
-                  maxWidth: MediaQuery.of(context).size.width * 0.72,
-                ),
-                decoration: BoxDecoration(
-                  color: isUser ? c.primaryContainer : c.surfaceContainerLowest,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: isUser ? c.primary.withAlpha(64) : c.outlineVariant,
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 2),
+                    constraints: BoxConstraints(
+                      maxWidth: MediaQuery.of(context).size.width * 0.75,
+                    ),
+                    child: GlassSurface(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: DS.s16,
+                        vertical: DS.s12,
+                      ),
+                      radius: DS.r12,
+                      intensity: isUser
+                          ? GlassIntensity.strong
+                          : GlassIntensity.regular,
+                      accent: accent,
+                      elevated: !isUser,
+                      child: MessageBlocksView(blocks: widget.message.blocks),
+                    ),
                   ),
-                ),
-                child: MessageBlocksView(blocks: widget.message.blocks),
+                  AnimatedOpacity(
+                    opacity: _hover ? 1 : 0,
+                    duration: DS.dQuick,
+                    curve: DS.cStandard,
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: actions,
+                      ),
+                    ),
+                  ),
+                ],
               ),
-              AnimatedOpacity(
-                opacity: _hover ? 1 : 0,
-                duration: const Duration(milliseconds: 120),
-                child: Padding(
-                  padding: const EdgeInsets.only(right: 12, left: 12),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: actions),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 底部"待授权动作"横条 — 对应设计图里的 WAITING FOR YOU 红调横条。
+/// 显示在 Composer 上方，给用户快速拒绝/允许的入口；点击查看详情可弹出完整
+/// 权限说明 dialog。
+class _PendingPermissionBanner extends StatelessWidget {
+  const _PendingPermissionBanner({
+    required this.request,
+    required this.onDeny,
+    required this.onApprove,
+    required this.onShowDetails,
+  });
+
+  final CodexPermissionRequest request;
+  final VoidCallback onDeny;
+  final VoidCallback onApprove;
+  final VoidCallback onShowDetails;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final accent = palette.accentCrimson;
+    final reason = request.reason?.trim();
+    final subtitle = reason != null && reason.isNotEmpty
+        ? reason
+        : '模型请求临时提升本地工具权限。';
+    return Container(
+      decoration: BoxDecoration(
+        color: palette.bgRaised.withValues(alpha: palette.isDark ? 0.78 : 0.94),
+        border: Border(
+          top: BorderSide(color: accent.withValues(alpha: 0.36), width: 1.2),
+        ),
+      ),
+      child: SafeArea(
+        bottom: false,
+        top: false,
+        child: Align(
+          alignment: Alignment.center,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: DS.workspaceWidth),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(
+                DS.s20,
+                DS.s12,
+                DS.s20,
+                DS.s12,
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: accent.withValues(alpha: 0.16),
+                      borderRadius: BorderRadius.circular(DS.r8),
+                      border: Border.all(color: accent.withValues(alpha: 0.42)),
+                      boxShadow: [
+                        BoxShadow(
+                          color: accent.withValues(alpha: 0.28),
+                          blurRadius: 10,
+                          spreadRadius: -2,
+                        ),
+                      ],
+                    ),
+                    child: Icon(Icons.policy_outlined, color: accent, size: 18),
+                  ),
+                  const SizedBox(width: DS.s12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'WAITING FOR YOU',
+                              style: TextStyle(
+                                color: accent,
+                                fontSize: DS.t10,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 1.4,
+                              ),
+                            ),
+                            const SizedBox(width: DS.s8),
+                            StatusDot(color: accent, size: 5, pulse: true),
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '待授权动作',
+                          style: TextStyle(
+                            color: palette.textPrimary,
+                            fontSize: DS.t14,
+                            fontWeight: FontWeight.w700,
+                            height: 1.25,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          subtitle,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: palette.textSecondary,
+                            fontSize: DS.t12,
+                            height: 1.45,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: DS.s10),
+                  GlassButton(
+                    icon: Icons.code_rounded,
+                    label: '详情',
+                    onPressed: onShowDetails,
+                    dense: true,
+                  ),
+                  const SizedBox(width: DS.s6),
+                  GlassButton(label: '拒绝', onPressed: onDeny, dense: true),
+                  const SizedBox(width: DS.s6),
+                  GlassButton(
+                    label: '授权一次',
+                    icon: Icons.check_rounded,
+                    onPressed: onApprove,
+                    accent: accent,
+                    filled: true,
+                    dense: true,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BubbleAction extends StatelessWidget {
+  const _BubbleAction({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final enabled = onPressed != null;
+    return Tooltip(
+      message: tooltip,
+      child: IconButton(
+        icon: Icon(icon, size: 15),
+        visualDensity: VisualDensity.compact,
+        constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+        padding: EdgeInsets.zero,
+        color: palette.textSecondary,
+        disabledColor: palette.textDisabled,
+        splashRadius: 18,
+        onPressed: enabled ? onPressed : null,
       ),
     );
   }

@@ -13,6 +13,8 @@ import 'package:re_highlight/languages/yaml.dart';
 import 'package:re_highlight/styles/atom-one-dark.dart';
 import 'package:re_highlight/styles/atom-one-light.dart';
 
+import '../design/design.dart';
+
 /// 编辑器子窗口：用 re_editor + re_highlight 替代 CodeMirror 6。
 /// 支持：行号 / 自动语言识别 / 暗色亮色主题 / 保存（Ctrl+S）。
 class EditorWindow extends StatefulWidget {
@@ -99,119 +101,208 @@ class _EditorWindowState extends State<EditorWindow> {
     };
   }
 
+  String _ext() => widget.filePath.split('.').last.toLowerCase();
+
+  String _shortName() {
+    if (widget.filePath.isEmpty) return '(新文件)';
+    final normalized = widget.filePath.replaceAll('\\', '/');
+    final ix = normalized.lastIndexOf('/');
+    return ix < 0 ? normalized : normalized.substring(ix + 1);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final bg = isDark ? const Color(0xFF071426) : const Color(0xFFF6FAFF);
+    final palette = context.palette;
+    final isDark = palette.isDark;
+    final bg = palette.bgDeep;
     final lang = _detectLanguage();
 
     return Scaffold(
-      appBar: AppBar(
-        title: Row(
-          children: [
-            Icon(
-              Icons.edit_note,
-              size: 20,
-              color: Theme.of(context).colorScheme.primary,
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                widget.filePath.isEmpty ? '（新文件）' : widget.filePath,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            if (_modified)
-              const Padding(
-                padding: EdgeInsets.only(left: 6),
-                child: Text(
-                  '•',
-                  style: TextStyle(fontSize: 22, color: Colors.orange),
-                ),
-              ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            icon: _saving
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.save),
-            tooltip: '保存 (Ctrl+S)',
-            onPressed: _saving ? null : _save,
-          ),
-        ],
-      ),
-      body: Stack(
+      backgroundColor: bg,
+      body: Column(
         children: [
-          Shortcuts(
-            shortcuts: const {
-              SingleActivator(LogicalKeyboardKey.keyS, control: true):
-                  _SaveIntent(),
-            },
-            child: Actions(
-              actions: <Type, Action<Intent>>{
-                _SaveIntent: CallbackAction<_SaveIntent>(
-                  onInvoke: (_) {
-                    _save();
-                    return null;
-                  },
+          Container(
+            decoration: BoxDecoration(
+              color: palette.bgRaised
+                  .withValues(alpha: palette.isDark ? 0.86 : 0.94),
+              border: Border(
+                bottom: BorderSide(color: palette.divider, width: DS.hairline),
+              ),
+            ),
+            child: SafeArea(
+              bottom: false,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: DS.s14,
+                  vertical: DS.s10,
                 ),
-              },
-              child: Focus(
-                autofocus: true,
-                child: CodeEditor(
-                  controller: _controller,
-                  style: CodeEditorStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 13,
-                    backgroundColor: bg,
-                    codeTheme: CodeHighlightTheme(
-                      languages: {
-                        if (lang != null)
-                          (widget.filePath.split('.').last.toLowerCase()):
-                              CodeHighlightThemeMode(mode: lang),
-                      },
-                      theme: isDark ? atomOneDarkTheme : atomOneLightTheme,
+                child: Row(
+                  children: [
+                    Container(
+                      width: 30,
+                      height: 30,
+                      decoration: BoxDecoration(
+                        color: palette.accentLavender.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(DS.r6),
+                        border: Border.all(
+                          color:
+                              palette.accentLavender.withValues(alpha: 0.36),
+                        ),
+                      ),
+                      child: Icon(
+                        Icons.edit_note_rounded,
+                        size: 16,
+                        color: palette.accentLavender,
+                      ),
+                    ),
+                    const SizedBox(width: DS.s10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                _shortName(),
+                                style: TextStyle(
+                                  color: palette.textPrimary,
+                                  fontSize: DS.t14,
+                                  fontWeight: FontWeight.w700,
+                                  height: 1.15,
+                                ),
+                              ),
+                              if (_modified) ...[
+                                const SizedBox(width: 6),
+                                Container(
+                                  width: 6,
+                                  height: 6,
+                                  decoration: BoxDecoration(
+                                    color: palette.accentAmber,
+                                    shape: BoxShape.circle,
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: palette.accentAmber
+                                            .withValues(alpha: 0.6),
+                                        blurRadius: 4,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                          if (widget.filePath.isNotEmpty)
+                            Text(
+                              widget.filePath,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: palette.textTertiary,
+                                fontSize: DS.t11,
+                                fontFamilyFallback: DS.monoFallback,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    if (_ext().isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(right: DS.s8),
+                        child: HanaPill(
+                          label: _ext(),
+                          color: palette.accentCyan,
+                          dense: true,
+                          outlined: false,
+                        ),
+                      ),
+                    GlassButton(
+                      icon: Icons.save_rounded,
+                      label: _saving ? '保存中…' : '保存',
+                      tooltip: 'Ctrl+S',
+                      accent: palette.accentEmerald,
+                      filled: true,
+                      onPressed: _saving ? null : _save,
+                      dense: true,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Expanded(
+            child: Stack(
+              children: [
+                Shortcuts(
+                  shortcuts: const {
+                    SingleActivator(LogicalKeyboardKey.keyS, control: true):
+                        _SaveIntent(),
+                  },
+                  child: Actions(
+                    actions: <Type, Action<Intent>>{
+                      _SaveIntent: CallbackAction<_SaveIntent>(
+                        onInvoke: (_) {
+                          _save();
+                          return null;
+                        },
+                      ),
+                    },
+                    child: Focus(
+                      autofocus: true,
+                      child: CodeEditor(
+                        controller: _controller,
+                        style: CodeEditorStyle(
+                          fontFamily: DS.monoPrimary,
+                          fontSize: 13,
+                          backgroundColor: bg,
+                          codeTheme: CodeHighlightTheme(
+                            languages: {
+                              if (lang != null)
+                                _ext(): CodeHighlightThemeMode(mode: lang),
+                            },
+                            theme: isDark ? atomOneDarkTheme : atomOneLightTheme,
+                          ),
+                        ),
+                        indicatorBuilder: (
+                          context,
+                          editingController,
+                          chunkController,
+                          notifier,
+                        ) {
+                          return Row(
+                            children: [
+                              DefaultCodeLineNumber(
+                                controller: editingController,
+                                notifier: notifier,
+                              ),
+                              DefaultCodeChunkIndicator(
+                                width: 14,
+                                controller: chunkController,
+                                notifier: notifier,
+                              ),
+                            ],
+                          );
+                        },
+                      ),
                     ),
                   ),
-                  indicatorBuilder:
-                      (context, editingController, chunkController, notifier) {
-                        return Row(
-                          children: [
-                            DefaultCodeLineNumber(
-                              controller: editingController,
-                              notifier: notifier,
-                            ),
-                            DefaultCodeChunkIndicator(
-                              width: 14,
-                              controller: chunkController,
-                              notifier: notifier,
-                            ),
-                          ],
-                        );
-                      },
                 ),
-              ),
+                if (_error != null)
+                  Positioned(
+                    left: DS.s14,
+                    right: DS.s14,
+                    bottom: DS.s14,
+                    child: HanaBanner(
+                      icon: Icons.error_outline_rounded,
+                      title: '编辑器错误',
+                      subtitle: _error!,
+                      color: palette.accentCrimson,
+                    ),
+                  ),
+              ],
             ),
           ),
-          if (_error != null)
-            Positioned(
-              left: 12,
-              right: 12,
-              bottom: 12,
-              child: Material(
-                color: Theme.of(context).colorScheme.errorContainer,
-                borderRadius: BorderRadius.circular(6),
-                child: Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: Text(_error!),
-                ),
-              ),
-            ),
         ],
       ),
     );

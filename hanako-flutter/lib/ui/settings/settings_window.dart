@@ -13,10 +13,12 @@ import '../../app/providers.dart';
 import '../../core/browser_manager.dart';
 import '../../core/bridge_source_manager.dart';
 import '../../core/heartbeat_runtime.dart';
+import '../../core/preferences_manager.dart';
 import '../../experience/experience.dart';
 import '../../identity/identity.dart';
 import '../../local_tools/local_tools.dart';
 import '../../windows_ops/windows_ops.dart';
+import '../design/design.dart';
 import '../onboarding/onboarding_page.dart';
 import '../widgets/recovery_matrix_table.dart';
 import '../widgets/status_cluster.dart';
@@ -138,7 +140,7 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
                     child: SelectableText(
                       details.body,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        fontFamily: 'monospace',
+                        fontFamilyFallback: DS.monoFallback,
                         height: 1.45,
                       ),
                     ),
@@ -234,6 +236,29 @@ class _SettingsWindowState extends ConsumerState<SettingsWindow> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(const SnackBar(content: Text('Codex 权限模式已更新')));
+  }
+
+  /// exec_command 默认超时（秒）。模型调 exec_command 没传 timeout_ms 时使用。
+  int _execCommandDefaultTimeoutSeconds() {
+    final codex = _stringKeyMap(_prefs?['codex']);
+    final raw = codex['exec_command_default_timeout_seconds'];
+    if (raw is num) {
+      return raw.toInt().clamp(
+        PreferencesManager.execCommandTimeoutMinSeconds,
+        PreferencesManager.execCommandTimeoutMaxSeconds,
+      );
+    }
+    return PreferencesManager.defaultExecCommandTimeoutSeconds;
+  }
+
+  Future<void> _setExecCommandDefaultTimeoutSeconds(int seconds) async {
+    final eng = ref.read(engineProvider);
+    eng.preferences.setExecCommandDefaultTimeoutSeconds(seconds);
+    await _refresh();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('exec_command 默认超时已更新为 ${seconds} 秒')),
+    );
   }
 
   Future<void> _refresh() async {
@@ -1786,22 +1811,25 @@ ${input.instructions.trim()}
           );
 
     return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            _SettingsHeader(
-              onRefresh: _refreshAll,
-              onClose: () => Navigator.of(context).maybePop(),
-              networkStatus: networkStatus,
-              networkStatusLoading: networkStatusValue.isLoading,
-              networkStatusError: networkStatusError,
-              dhtClientConfig: _dhtClientConfig,
-              windowsOpsStatus: windowsOpsStatus,
-              windowsOpsStatusLoading: windowsOpsStatusValue.isLoading,
-              windowsOpsStatusError: windowsOpsStatusError,
-            ),
-            Expanded(child: content),
-          ],
+      backgroundColor: Colors.transparent,
+      body: AmbientBackground(
+        child: SafeArea(
+          child: Column(
+            children: [
+              _SettingsHeader(
+                onRefresh: _refreshAll,
+                onClose: () => Navigator.of(context).maybePop(),
+                networkStatus: networkStatus,
+                networkStatusLoading: networkStatusValue.isLoading,
+                networkStatusError: networkStatusError,
+                dhtClientConfig: _dhtClientConfig,
+                windowsOpsStatus: windowsOpsStatus,
+                windowsOpsStatusLoading: windowsOpsStatusValue.isLoading,
+                windowsOpsStatusError: windowsOpsStatusError,
+              ),
+              Expanded(child: content),
+            ],
+          ),
         ),
       ),
     );
@@ -1856,7 +1884,7 @@ ${input.instructions.trim()}
     return _Section(
       title: '我的',
       subtitle: '账号、本机身份和恢复信息。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           children: [
             Padding(
@@ -2025,7 +2053,7 @@ ${input.instructions.trim()}
     return _Section(
       title: 'Agent 管理',
       subtitle: '子体的会话身份与源模板。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           children: [
             for (final a in _agents!)
@@ -2098,10 +2126,17 @@ ${input.instructions.trim()}
 
   Widget _buildCodexRuntimeSection() {
     final mode = _codexPermissionMode();
+    final execTimeout = _execCommandDefaultTimeoutSeconds();
+    const execTimeoutPresets = <int>[60, 180, 300, 600];
+    final execTimeoutSelected = execTimeoutPresets.contains(execTimeout)
+        ? execTimeout
+        : execTimeoutPresets.reduce(
+            (a, b) => (execTimeout - a).abs() < (execTimeout - b).abs() ? a : b,
+          );
     return _Section(
       title: 'Codex 引擎',
       subtitle: 'Agent 执行引擎、工具授权与本地权限策略。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           children: [
             const ListTile(
@@ -2157,6 +2192,45 @@ ${input.instructions.trim()}
               ),
             ),
             const Divider(height: 0),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'exec_command 默认超时',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 8),
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: SegmentedButton<int>(
+                      segments: const [
+                        ButtonSegment(value: 60, label: Text('1 分钟')),
+                        ButtonSegment(value: 180, label: Text('3 分钟')),
+                        ButtonSegment(value: 300, label: Text('5 分钟')),
+                        ButtonSegment(value: 600, label: Text('10 分钟')),
+                      ],
+                      selected: {execTimeoutSelected},
+                      onSelectionChanged: (selected) =>
+                          _setExecCommandDefaultTimeoutSeconds(selected.first),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    execTimeoutSelected == execTimeout
+                        ? '当前 $execTimeout 秒。模型调 exec_command 没传 timeout_ms 时使用此值兜底，'
+                              '避免命令无限挂死。模型也可在单次调用中显式传更大的 timeout_ms 覆盖默认值。'
+                        : '当前自定义值 $execTimeout 秒（不在预设挡位内）。选择上方预设可覆盖，'
+                              '或直接编辑 preferences.json 里的 codex.exec_command_default_timeout_seconds。',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 0),
             _buildToolCapabilitiesTile(),
           ],
         ),
@@ -2198,7 +2272,7 @@ ${input.instructions.trim()}
     return _Section(
       title: '消息来源',
       subtitle: 'Telegram、飞书/Lark、QQ 外部入口。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           children: [
             for (final source in _bridgeSources)
@@ -2244,7 +2318,7 @@ ${input.instructions.trim()}
     return _Section(
       title: '经验',
       subtitle: '本地文件树、元数据与网络经验入口。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           children: [
             if (_experienceItems.isEmpty)
@@ -2456,7 +2530,7 @@ ${input.instructions.trim()}
     return _Section(
       title: 'DHT 节点',
       subtitle: '添加本地节点、查看公开列表、切换公开状态。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -2799,7 +2873,7 @@ ${input.instructions.trim()}
     return _Section(
       title: 'Browser',
       subtitle: '网页工具状态与权限开关。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           children: [
             SwitchListTile(
@@ -2844,7 +2918,7 @@ ${input.instructions.trim()}
     return _Section(
       title: '工作',
       subtitle: '工作目录、巡检、Cron 和后台活动。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           children: [
             SwitchListTile(
@@ -3006,7 +3080,7 @@ ${input.instructions.trim()}
     return _Section(
       title: '外观',
       subtitle: '本地显示偏好，保存到当前设备。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           children: [
             ListTile(
@@ -3058,7 +3132,7 @@ ${input.instructions.trim()}
     return _Section(
       title: '快捷键',
       subtitle: '桌面端常用操作入口。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           children: [
             for (final s in shortcuts)
@@ -3076,7 +3150,7 @@ ${input.instructions.trim()}
                   child: Text(
                     s.key,
                     style: const TextStyle(
-                      fontFamily: 'monospace',
+                      fontFamilyFallback: DS.monoFallback,
                       fontSize: 12,
                     ),
                   ),
@@ -3102,7 +3176,7 @@ ${input.instructions.trim()}
     return _Section(
       title: '路径',
       subtitle: '子体本地数据、技能、日志和配置位置。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           children: [
             for (final (label, path) in entries)
@@ -3111,7 +3185,7 @@ ${input.instructions.trim()}
                 title: Text(label),
                 subtitle: SelectableText(
                   path,
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  style: const TextStyle(fontFamilyFallback: DS.monoFallback, fontSize: 12),
                 ),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -3147,7 +3221,7 @@ ${input.instructions.trim()}
     return _Section(
       title: 'Preferences (raw)',
       subtitle: '直接查看当前偏好配置。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           children: [
             for (final entry in (_prefs ?? {}).entries)
@@ -3167,7 +3241,7 @@ ${input.instructions.trim()}
     return _Section(
       title: '关于',
       subtitle: '当前子体实现与底层引擎来源。',
-      child: Card(
+      child: _SettingsPanel(
         child: Column(
           children: [
             const ListTile(
@@ -3238,33 +3312,44 @@ class _SettingsHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = Theme.of(context).colorScheme;
-    return DecoratedBox(
+    final palette = context.palette;
+    return Container(
       decoration: BoxDecoration(
-        color: c.surface,
-        border: Border(bottom: BorderSide(color: c.outlineVariant)),
+        color: palette.bgRaised.withValues(alpha: palette.isDark ? 0.70 : 0.86),
+        border: Border(
+          bottom: BorderSide(color: palette.divider, width: DS.hairline),
+        ),
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 18, 24, 18),
+        padding: const EdgeInsets.fromLTRB(DS.s20, DS.s14, DS.s20, DS.s14),
         child: LayoutBuilder(
           builder: (context, box) {
             final compact = box.maxWidth < 1020;
             final title = Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  '子体设置',
-                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    height: 1.2,
-                  ),
+                Row(
+                  children: [
+                    Text(
+                      '子体设置',
+                      style: TextStyle(
+                        color: palette.textPrimary,
+                        fontSize: DS.t22,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.2,
+                        height: 1.15,
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 4),
                 Text(
                   '管理本地 Agent、外观、路径和项目来源信息。',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(color: c.onSurfaceVariant),
+                  style: TextStyle(
+                    color: palette.textSecondary,
+                    fontSize: DS.t13,
+                    height: 1.5,
+                  ),
                 ),
               ],
             );
@@ -3277,7 +3362,7 @@ class _SettingsHeader extends StatelessWidget {
                   error: networkStatusError,
                 ),
                 color: _networkStatusColor(
-                  c,
+                  Theme.of(context).colorScheme,
                   networkStatus,
                   loading: networkStatusLoading,
                   error: networkStatusError,
@@ -3291,7 +3376,10 @@ class _SettingsHeader extends StatelessWidget {
               StatusClusterItem(
                 icon: Icons.sync_alt_outlined,
                 label: _experienceRelayStatusLabel(dhtClientConfig),
-                color: _experienceRelayStatusColor(c, dhtClientConfig),
+                color: _experienceRelayStatusColor(
+                  Theme.of(context).colorScheme,
+                  dhtClientConfig,
+                ),
                 tooltip: _experienceRelayStatusTooltip(dhtClientConfig),
               ),
               StatusClusterItem(
@@ -3302,7 +3390,7 @@ class _SettingsHeader extends StatelessWidget {
                   error: windowsOpsStatusError,
                 ),
                 color: _windowsOpsStatusColor(
-                  c,
+                  Theme.of(context).colorScheme,
                   windowsOpsStatus,
                   loading: windowsOpsStatusLoading,
                   error: windowsOpsStatusError,
@@ -3317,50 +3405,67 @@ class _SettingsHeader extends StatelessWidget {
             final status = StatusCluster(
               items: statusItems,
               expandLeft: !compact,
+              collapsedSize: 26,
+              iconSize: 14,
             );
             final leading = <Widget>[
-              IconButton.filledTonal(
-                icon: const Icon(Icons.arrow_back),
-                onPressed: onClose,
+              GlassIconButton(
+                icon: Icons.arrow_back_rounded,
                 tooltip: '返回',
-                style: IconButton.styleFrom(
-                  fixedSize: const Size(40, 40),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
+                onPressed: onClose,
+                size: 36,
+                iconSize: 17,
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: DS.s12),
               Container(
-                width: 44,
-                height: 44,
+                width: 40,
+                height: 40,
                 decoration: BoxDecoration(
-                  color: c.primaryContainer,
-                  borderRadius: BorderRadius.circular(8),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      palette.accentEmerald,
+                      palette.accentCyan,
+                    ],
+                  ),
+                  borderRadius: BorderRadius.circular(DS.r8),
+                  boxShadow: [
+                    BoxShadow(
+                      color: palette.accentEmerald.withValues(alpha: 0.36),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
                 ),
-                child: Icon(Icons.tune, color: c.onPrimaryContainer),
+                child: Icon(
+                  Icons.tune_rounded,
+                  color: palette.isDark
+                      ? const Color(0xFF06120A)
+                      : Colors.white,
+                  size: 18,
+                ),
               ),
-              const SizedBox(width: 16),
+              const SizedBox(width: DS.s14),
             ];
             final actions = Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                IconButton.filledTonal(
-                  icon: const Icon(Icons.refresh),
-                  onPressed: onRefresh,
+                GlassIconButton(
+                  icon: Icons.refresh_rounded,
                   tooltip: '刷新',
-                  style: IconButton.styleFrom(
-                    fixedSize: const Size(40, 40),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                  ),
+                  onPressed: onRefresh,
+                  size: 36,
+                  iconSize: 17,
                 ),
-                const SizedBox(width: 12),
-                FilledButton.icon(
-                  icon: const Icon(Icons.check),
-                  label: const Text('完成'),
+                const SizedBox(width: DS.s10),
+                GlassButton(
+                  icon: Icons.check_rounded,
+                  label: '完成',
                   onPressed: onClose,
+                  accent: palette.accentEmerald,
+                  filled: true,
+                  dense: true,
                 ),
               ],
             );
@@ -3373,11 +3478,11 @@ class _SettingsHeader extends StatelessWidget {
                     children: [
                       ...leading,
                       Expanded(child: title),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: DS.s10),
                       actions,
                     ],
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: DS.s10),
                   status,
                 ],
               );
@@ -3387,11 +3492,11 @@ class _SettingsHeader extends StatelessWidget {
               children: [
                 ...leading,
                 Expanded(child: title),
-                const SizedBox(width: 16),
+                const SizedBox(width: DS.s14),
                 Flexible(
                   child: Align(alignment: Alignment.centerRight, child: status),
                 ),
-                const SizedBox(width: 16),
+                const SizedBox(width: DS.s14),
                 actions,
               ],
             );
@@ -3586,36 +3691,111 @@ class _Section extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = Theme.of(context).colorScheme;
+    final palette = context.palette;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(4, 0, 4, 10),
-          child: Column(
+          padding: const EdgeInsets.fromLTRB(DS.s4, 0, DS.s4, DS.s10),
+          child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                title,
-                style: Theme.of(
-                  context,
-                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-              ),
-              if (subtitle != null) ...[
-                const SizedBox(height: 4),
-                Text(
-                  subtitle!,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: c.onSurfaceVariant,
-                    height: 1.5,
+              Container(
+                width: 3,
+                height: 22,
+                margin: const EdgeInsets.only(top: 6, right: DS.s10),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      palette.accentEmerald,
+                      palette.accentCyan,
+                    ],
                   ),
+                  borderRadius: BorderRadius.circular(2),
+                  boxShadow: [
+                    BoxShadow(
+                      color: palette.accentEmerald.withValues(alpha: 0.36),
+                      blurRadius: 6,
+                    ),
+                  ],
                 ),
-              ],
+              ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        color: palette.textPrimary,
+                        fontSize: DS.t16,
+                        fontWeight: FontWeight.w700,
+                        height: 1.3,
+                        letterSpacing: 0.2,
+                      ),
+                    ),
+                    if (subtitle != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle!,
+                        style: TextStyle(
+                          color: palette.textSecondary,
+                          fontSize: DS.t12,
+                          height: 1.55,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
             ],
           ),
         ),
         child,
       ],
+    );
+  }
+}
+
+/// 设置页面板 — 用代替 [Card]，提供统一的玻璃质感和细描边。
+///
+/// 接受单个 [child] 参数，与 [Card] 用法一致：
+/// `_SettingsPanel(child: Column(...))`
+class _SettingsPanel extends StatelessWidget {
+  const _SettingsPanel({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            palette.bgFloating.withValues(alpha: palette.isDark ? 0.55 : 0.94),
+            palette.bgRaised.withValues(alpha: palette.isDark ? 0.45 : 0.86),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(DS.r12),
+        border: Border.all(color: palette.divider, width: DS.hairline),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(
+              alpha: palette.isDark ? 0.24 : 0.04,
+            ),
+            blurRadius: 22,
+            offset: const Offset(0, 8),
+            spreadRadius: -8,
+          ),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: child,
     );
   }
 }
@@ -4146,7 +4326,7 @@ class _ExperiencePreviewDialogState extends State<_ExperiencePreviewDialog> {
                                         ? '空文件'
                                         : file.content.trimRight(),
                                     style: theme.textTheme.bodySmall?.copyWith(
-                                      fontFamily: 'monospace',
+                                      fontFamilyFallback: DS.monoFallback,
                                       height: 1.45,
                                     ),
                                   ),
@@ -4782,7 +4962,7 @@ class _ProtocolLoginCodeDialogState extends State<_ProtocolLoginCodeDialog> {
                   border: OutlineInputBorder(),
                 ),
                 style: theme.textTheme.bodySmall?.copyWith(
-                  fontFamily: 'monospace',
+                  fontFamilyFallback: DS.monoFallback,
                 ),
               ),
               if (_error != null) ...[
@@ -4811,7 +4991,7 @@ class _ProtocolLoginCodeDialogState extends State<_ProtocolLoginCodeDialog> {
                 SelectableText(
                   result.code,
                   style: theme.textTheme.bodySmall?.copyWith(
-                    fontFamily: 'monospace',
+                    fontFamilyFallback: DS.monoFallback,
                   ),
                 ),
               ],
@@ -5643,7 +5823,7 @@ class _MnemonicDialog extends StatelessWidget {
               const SizedBox(height: 16),
               SelectableText(
                 words.join(' '),
-                style: const TextStyle(fontFamily: 'monospace'),
+                style: const TextStyle(fontFamilyFallback: DS.monoFallback),
               ),
               const SizedBox(height: 12),
               Text(

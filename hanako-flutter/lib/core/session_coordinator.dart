@@ -547,6 +547,8 @@ class SessionCoordinator {
           mode: CodexPermissionMode.fromPreferences(preferences),
           prompt: codexPermissionPrompt,
         ),
+        execCommandDefaultTimeoutSeconds:
+            preferences.getExecCommandDefaultTimeoutSeconds(),
         userInputPrompt: codexUserInputPrompt,
         agentControl: _codexAgentControl,
         goalStore: _codexGoalStore,

@@ -23,6 +23,7 @@ import '../../memory/database.dart';
 import '../../memory/fact_store.dart';
 import '../../memory/memory_compile.dart';
 import '../../memory/session_summary.dart';
+import '../design/design.dart';
 
 class MemoryPage extends ConsumerStatefulWidget {
   const MemoryPage({super.key});
@@ -102,6 +103,7 @@ class _MemoryPageState extends ConsumerState<MemoryPage> {
   }
 
   Future<void> _delete(FactView fact) async {
+    final palette = context.palette;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -114,7 +116,8 @@ class _MemoryPageState extends ConsumerState<MemoryPage> {
           ),
           FilledButton(
             style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
+              backgroundColor: palette.accentCrimson,
+              foregroundColor: Colors.white,
             ),
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('删除'),
@@ -178,7 +181,7 @@ class _MemoryPageState extends ConsumerState<MemoryPage> {
                     hintText: r'C:\path\memory.md 或 facts.json',
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: DS.s12),
                 TextField(
                   controller: tagsController,
                   decoration: const InputDecoration(
@@ -219,11 +222,12 @@ class _MemoryPageState extends ConsumerState<MemoryPage> {
 
   Future<void> _clearAll() async {
     if (_store == null) return;
+    final palette = context.palette;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('清空事实库'),
-        content: const Text('此操作会删除当前 Agent 的全部事实记忆。'),
+        content: const Text('此操作会删除当前 Agent 的全部事实记忆，不可撤销。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -231,7 +235,8 @@ class _MemoryPageState extends ConsumerState<MemoryPage> {
           ),
           FilledButton(
             style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
+              backgroundColor: palette.accentCrimson,
+              foregroundColor: Colors.white,
             ),
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('清空'),
@@ -451,96 +456,354 @@ class _MemoryPageState extends ConsumerState<MemoryPage> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          _agentId == null
-              ? 'Memory'
-              : 'Memory · ${_facts.length} 条  ·  agent=$_agentId',
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: '刷新',
-            onPressed: _busy ? null : _refresh,
-          ),
-          IconButton(
-            icon: const Icon(Icons.upload_file),
-            tooltip: '导入',
-            onPressed: _busy ? null : _import,
-          ),
-          IconButton(
-            icon: const Icon(Icons.auto_fix_high),
-            tooltip: '编译记忆',
-            onPressed: _busy ? null : _compileMemory,
-          ),
-          IconButton(
-            icon: const Icon(Icons.download),
-            tooltip: '导出 Markdown',
-            onPressed: _facts.isEmpty || _busy ? null : _export,
-          ),
-          IconButton(
-            icon: const Icon(Icons.delete_sweep),
-            tooltip: '清空',
-            onPressed: _facts.isEmpty || _busy ? null : _clearAll,
-          ),
-        ],
-      ),
-      body: _error != null
-          ? Center(child: Text(_error!))
-          : _store == null
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: TextField(
-                    decoration: const InputDecoration(
-                      prefixIcon: Icon(Icons.search, size: 20),
-                      hintText: '搜索事实（FTS5）…',
-                      isDense: true,
-                      border: OutlineInputBorder(),
-                    ),
-                    onChanged: (v) {
-                      _query = v;
-                      _refresh();
-                    },
-                  ),
-                ),
-                if (_busy) const LinearProgressIndicator(minHeight: 2),
-                Expanded(
-                  child: _facts.isEmpty
-                      ? const Center(
-                          child: Text(
-                            '还没有事实记录\n（与子体对话时自动累积）',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.grey),
-                          ),
-                        )
-                      : ListView.separated(
-                          itemCount: _facts.length,
-                          separatorBuilder: (context, index) =>
-                              const Divider(height: 1),
-                          itemBuilder: (ctx, i) {
-                            final f = _facts[i];
-                            return _FactTile(
-                              fact: f,
-                              onDelete: () => _delete(f),
-                              onCopy: () {
-                                Clipboard.setData(ClipboardData(text: f.fact));
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('内容已复制'),
-                                    duration: Duration(seconds: 1),
-                                  ),
-                                );
-                              },
-                            );
-                          },
-                        ),
-                ),
-              ],
+      backgroundColor: Colors.transparent,
+      body: AmbientBackground(
+        child: Column(
+          children: [
+            _MemoryHeader(
+              agentId: _agentId,
+              factCount: _facts.length,
+              busy: _busy,
+              hasFacts: _facts.isNotEmpty,
+              onRefresh: _busy ? null : _refresh,
+              onImport: _busy || _store == null ? null : _import,
+              onCompile: _busy || _agentId == null ? null : _compileMemory,
+              onExport: _facts.isEmpty || _busy ? null : _export,
+              onClear: _facts.isEmpty || _busy ? null : _clearAll,
+              onClose: () => Navigator.of(context).pop(),
             ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.all(DS.s16),
+                child: HanaBanner(
+                  icon: Icons.error_outline,
+                  title: '记忆库错误',
+                  subtitle: _error!,
+                  color: palette.accentCrimson,
+                ),
+              )
+            else if (_store == null)
+              const Expanded(
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  DS.s20,
+                  DS.s12,
+                  DS.s20,
+                  DS.s10,
+                ),
+                child: _MemorySearchField(
+                  onChanged: (v) {
+                    _query = v;
+                    _refresh();
+                  },
+                ),
+              ),
+              if (_busy)
+                LinearProgressIndicator(
+                  minHeight: 2,
+                  color: palette.accentEmerald,
+                  backgroundColor: Colors.transparent,
+                ),
+              Expanded(
+                child: _facts.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.psychology_alt_outlined,
+                              size: 36,
+                              color: palette.textTertiary,
+                            ),
+                            const SizedBox(height: DS.s10),
+                            Text(
+                              _query.isEmpty ? '还没有事实记录' : '搜索结果为空',
+                              style: TextStyle(
+                                color: palette.textSecondary,
+                                fontSize: DS.t13,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _query.isEmpty
+                                  ? '与子体对话时会自动累积事实'
+                                  : '试试更宽泛的关键词',
+                              style: TextStyle(
+                                color: palette.textTertiary,
+                                fontSize: DS.t11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(
+                          DS.s20,
+                          DS.s4,
+                          DS.s20,
+                          DS.s20,
+                        ),
+                        itemCount: _facts.length,
+                        itemBuilder: (ctx, i) {
+                          final f = _facts[i];
+                          return _FactCard(
+                            fact: f,
+                            onDelete: () => _delete(f),
+                            onCopy: () {
+                              Clipboard.setData(ClipboardData(text: f.fact));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('内容已复制'),
+                                  duration: Duration(seconds: 1),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MemoryHeader extends StatelessWidget {
+  const _MemoryHeader({
+    required this.agentId,
+    required this.factCount,
+    required this.busy,
+    required this.hasFacts,
+    required this.onRefresh,
+    required this.onImport,
+    required this.onCompile,
+    required this.onExport,
+    required this.onClear,
+    required this.onClose,
+  });
+
+  final String? agentId;
+  final int factCount;
+  final bool busy;
+  final bool hasFacts;
+  final VoidCallback? onRefresh;
+  final VoidCallback? onImport;
+  final VoidCallback? onCompile;
+  final VoidCallback? onExport;
+  final VoidCallback? onClear;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Container(
+      decoration: BoxDecoration(
+        color: palette.bgRaised.withValues(alpha: palette.isDark ? 0.70 : 0.86),
+        border: Border(
+          bottom: BorderSide(color: palette.divider, width: DS.hairline),
+        ),
+      ),
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: DS.s16,
+            vertical: DS.s12,
+          ),
+          child: Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            runSpacing: DS.s8,
+            spacing: DS.s8,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  GlassIconButton(
+                    icon: Icons.arrow_back_rounded,
+                    tooltip: '返回',
+                    onPressed: onClose,
+                  ),
+                  const SizedBox(width: DS.s12),
+                  Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          palette.accentLavender.withValues(alpha: 0.32),
+                          palette.accentCyan.withValues(alpha: 0.20),
+                        ],
+                      ),
+                      borderRadius: BorderRadius.circular(DS.r8),
+                      border: Border.all(
+                        color: palette.accentLavender.withValues(alpha: 0.42),
+                      ),
+                    ),
+                    child: Icon(
+                      Icons.psychology_outlined,
+                      size: 18,
+                      color: palette.accentLavender,
+                    ),
+                  ),
+                  const SizedBox(width: DS.s10),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '记忆库',
+                            style: TextStyle(
+                              color: palette.textPrimary,
+                              fontSize: DS.t18,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.2,
+                              height: 1.15,
+                            ),
+                          ),
+                          if (factCount > 0) ...[
+                            const SizedBox(width: DS.s10),
+                            HanaPill(
+                              label: '$factCount 条事实',
+                              color: palette.accentLavender,
+                              dense: true,
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        agentId == null
+                            ? '未关联 Agent'
+                            : 'Agent · $agentId · FTS5 全文索引',
+                        style: TextStyle(
+                          color: palette.textSecondary,
+                          fontSize: DS.t12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              Wrap(
+                spacing: DS.s4,
+                runSpacing: DS.s4,
+                children: [
+                  GlassIconButton(
+                    icon: Icons.refresh_rounded,
+                    tooltip: '刷新',
+                    onPressed: onRefresh,
+                  ),
+                  GlassIconButton(
+                    icon: Icons.upload_file_outlined,
+                    tooltip: '导入',
+                    onPressed: onImport,
+                  ),
+                  GlassButton(
+                    icon: Icons.auto_fix_high_outlined,
+                    label: '编译记忆',
+                    onPressed: onCompile,
+                    dense: true,
+                    accent: palette.accentCyan,
+                  ),
+                  GlassIconButton(
+                    icon: Icons.download_outlined,
+                    tooltip: '导出 Markdown',
+                    onPressed: onExport,
+                  ),
+                  GlassIconButton(
+                    icon: Icons.delete_sweep_outlined,
+                    tooltip: '清空',
+                    accent: palette.accentCrimson,
+                    onPressed: onClear,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MemorySearchField extends StatefulWidget {
+  const _MemorySearchField({required this.onChanged});
+
+  final ValueChanged<String> onChanged;
+
+  @override
+  State<_MemorySearchField> createState() => _MemorySearchFieldState();
+}
+
+class _MemorySearchFieldState extends State<_MemorySearchField> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Focus(
+      onFocusChange: (v) => setState(() => _focused = v),
+      child: FocusScope(
+        onFocusChange: (v) => setState(() => _focused = v),
+        child: AnimatedContainer(
+          duration: DS.dQuick,
+          decoration: BoxDecoration(
+            color: palette.bgDeep.withValues(alpha: palette.isDark ? 0.5 : 0.4),
+            borderRadius: BorderRadius.circular(DS.r10),
+            border: Border.all(
+              color: _focused
+                  ? palette.accentLavender.withValues(alpha: 0.55)
+                  : palette.divider,
+              width: _focused ? 1.4 : DS.hairline,
+            ),
+            boxShadow: _focused
+                ? [
+                    BoxShadow(
+                      color: palette.accentLavender.withValues(alpha: 0.10),
+                      blurRadius: 14,
+                    ),
+                  ]
+                : null,
+          ),
+          child: TextField(
+            decoration: InputDecoration(
+              prefixIcon: Icon(
+                Icons.search_rounded,
+                size: 18,
+                color: palette.textTertiary,
+              ),
+              hintText: '搜索事实（FTS5 全文索引）…',
+              hintStyle: TextStyle(color: palette.textTertiary),
+              isDense: true,
+              border: InputBorder.none,
+              enabledBorder: InputBorder.none,
+              focusedBorder: InputBorder.none,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 0,
+                vertical: DS.s12,
+              ),
+            ),
+            cursorColor: palette.accentLavender,
+            onChanged: widget.onChanged,
+            style: TextStyle(
+              color: palette.textPrimary,
+              fontSize: DS.t14,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -595,8 +858,8 @@ class _UnavailableLlmProvider implements LlmProvider {
   }
 }
 
-class _FactTile extends StatelessWidget {
-  const _FactTile({
+class _FactCard extends StatefulWidget {
+  const _FactCard({
     required this.fact,
     required this.onDelete,
     required this.onCopy,
@@ -607,78 +870,154 @@ class _FactTile extends StatelessWidget {
   final VoidCallback onCopy;
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return ListTile(
-      title: Text(fact.fact, maxLines: 4, overflow: TextOverflow.ellipsis),
-      subtitle: Padding(
-        padding: const EdgeInsets.only(top: 6),
-        child: Wrap(
-          spacing: 6,
-          runSpacing: 4,
-          children: [
-            if (fact.time != null)
-              _Chip(icon: Icons.access_time, text: fact.time!),
-            if (fact.sessionId != null)
-              _Chip(icon: Icons.chat_bubble_outline, text: fact.sessionId!),
-            for (final t in fact.tags)
-              _Chip(icon: Icons.label_outline, text: t),
-            _Chip(
-              icon: Icons.calendar_today_outlined,
-              text: fact.createdAt.split('T').first,
-              dim: true,
-            ),
-          ],
-        ),
-      ),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          IconButton(
-            icon: const Icon(Icons.copy, size: 18),
-            tooltip: '复制内容',
-            onPressed: onCopy,
-          ),
-          IconButton(
-            icon: Icon(
-              Icons.delete_outline,
-              size: 18,
-              color: theme.colorScheme.error,
-            ),
-            tooltip: '删除',
-            onPressed: onDelete,
-          ),
-        ],
-      ),
-    );
-  }
+  State<_FactCard> createState() => _FactCardState();
 }
 
-class _Chip extends StatelessWidget {
-  const _Chip({required this.icon, required this.text, this.dim = false});
-  final IconData icon;
-  final String text;
-  final bool dim;
+class _FactCardState extends State<_FactCard> {
+  bool _hover = false;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final color = dim
-        ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.6)
-        : theme.colorScheme.onSurfaceVariant;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 12, color: color),
-          const SizedBox(width: 4),
-          Text(text, style: theme.textTheme.bodySmall?.copyWith(color: color)),
-        ],
+    final palette = context.palette;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: AnimatedContainer(
+        duration: DS.dFast,
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        decoration: BoxDecoration(
+          color: _hover
+              ? palette.glassFillStrong
+              : palette.glassFill,
+          borderRadius: BorderRadius.circular(DS.r10),
+          border: Border.all(
+            color: _hover
+                ? palette.accentLavender.withValues(alpha: 0.36)
+                : palette.divider,
+          ),
+        ),
+        padding: const EdgeInsets.fromLTRB(DS.s14, DS.s12, DS.s10, DS.s12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 3,
+              constraints: const BoxConstraints(minHeight: 28),
+              decoration: BoxDecoration(
+                color: palette.accentLavender.withValues(
+                  alpha: _hover ? 0.85 : 0.45,
+                ),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(width: DS.s10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        '#${widget.fact.id}',
+                        style: TextStyle(
+                          color: palette.textTertiary,
+                          fontSize: DS.t11,
+                          fontFamilyFallback: DS.monoFallback,
+                        ),
+                      ),
+                      const SizedBox(width: DS.s10),
+                      Text(
+                        widget.fact.createdAt.split('T').first,
+                        style: TextStyle(
+                          color: palette.textTertiary,
+                          fontSize: DS.t11,
+                        ),
+                      ),
+                      if (widget.fact.time != null) ...[
+                        const SizedBox(width: DS.s10),
+                        Icon(
+                          Icons.access_time_rounded,
+                          size: 11,
+                          color: palette.textTertiary,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          widget.fact.time!,
+                          style: TextStyle(
+                            color: palette.textTertiary,
+                            fontSize: DS.t11,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  SelectableText(
+                    widget.fact.fact,
+                    style: TextStyle(
+                      color: palette.textPrimary,
+                      fontSize: DS.t13,
+                      height: 1.55,
+                    ),
+                  ),
+                  if (widget.fact.tags.isNotEmpty ||
+                      widget.fact.sessionId != null) ...[
+                    const SizedBox(height: DS.s8),
+                    Wrap(
+                      spacing: DS.s6,
+                      runSpacing: 4,
+                      children: [
+                        for (final t in widget.fact.tags)
+                          HanaPill(
+                            icon: Icons.label_outline_rounded,
+                            label: t,
+                            color: palette.accentCyan,
+                            dense: true,
+                          ),
+                        if (widget.fact.sessionId != null)
+                          HanaPill(
+                            icon: Icons.chat_bubble_outline_rounded,
+                            label: widget.fact.sessionId!,
+                            color: palette.accentEmerald,
+                            dense: true,
+                          ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            AnimatedOpacity(
+              opacity: _hover ? 1 : 0.55,
+              duration: DS.dFast,
+              child: Column(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.copy_rounded, size: 15),
+                    tooltip: '复制',
+                    visualDensity: VisualDensity.compact,
+                    constraints:
+                        const BoxConstraints.tightFor(width: 28, height: 28),
+                    padding: EdgeInsets.zero,
+                    color: palette.textSecondary,
+                    onPressed: widget.onCopy,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline_rounded, size: 15),
+                    tooltip: '删除',
+                    visualDensity: VisualDensity.compact,
+                    constraints:
+                        const BoxConstraints.tightFor(width: 28, height: 28),
+                    padding: EdgeInsets.zero,
+                    color: palette.accentCrimson,
+                    onPressed: widget.onDelete,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

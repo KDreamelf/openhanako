@@ -13,6 +13,7 @@ import 'app/ipc_registry.dart';
 import 'app/protocol_login_service.dart';
 import 'app/providers.dart';
 import 'app/window_factory.dart';
+import 'app/windows_title_bar.dart';
 import 'core/engine.dart';
 import 'ui/auth/protocol_login_confirm_dialog.dart';
 import 'ui/browser/browser_window.dart';
@@ -93,6 +94,17 @@ void main(List<String> args) async {
     'dark' => AppThemeMode.dark,
     _ => AppThemeMode.system,
   };
+
+  // 在 Flutter build 之前先同步 Windows 标题栏的明暗，
+  // 这样启动时不会出现"短暂浅色按钮在浅色背景看不清"的闪烁。
+  final initialBrightnessDark = switch (themeMode) {
+    AppThemeMode.dark => true,
+    AppThemeMode.light => false,
+    AppThemeMode.system =>
+      WidgetsBinding.instance.platformDispatcher.platformBrightness ==
+          Brightness.dark,
+  };
+  applyWindowsTitleBarBrightness(initialBrightnessDark);
 
   runApp(
     ProviderScope(
@@ -178,6 +190,16 @@ class HanakoApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final mode = ref.watch(themeModeProvider);
+    final systemDark =
+        MediaQuery.platformBrightnessOf(context) == Brightness.dark;
+    final effectiveDark = switch (mode) {
+      AppThemeMode.dark => true,
+      AppThemeMode.light => false,
+      AppThemeMode.system => systemDark,
+    };
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      applyWindowsTitleBarBrightness(effectiveDark);
+    });
     return MaterialApp(
       title: '幻宙01',
       debugShowCheckedModeBanner: false,
