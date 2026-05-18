@@ -1773,6 +1773,8 @@ ${input.instructions.trim()}
                       const SizedBox(height: 24),
                       _buildCodexRuntimeSection(),
                       const SizedBox(height: 24),
+                      _buildMemorySection(),
+                      const SizedBox(height: 24),
                       _buildExperienceSection(),
                       const SizedBox(height: 24),
                       _buildDhtSection(),
@@ -2298,6 +2300,117 @@ ${input.instructions.trim()}
                 ),
               ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMemorySection() {
+    final eng = ref.read(engineProvider);
+    final available = eng.modelManager.availableModels
+        .map((m) => m.id)
+        .toList(growable: false);
+    final current = eng.preferences.getMemoryAuxModel();
+    final chatModel = eng.modelManager.currentModelId;
+    final effectiveModel =
+        current ?? (chatModel != null && chatModel.isNotEmpty ? chatModel : null);
+    return _Section(
+      title: '记忆',
+      subtitle: 'Claude Code 风格：离散 .md + MEMORY.md 索引；辅助检索与抽取的模型可独立配置。',
+      child: _SettingsPanel(
+        child: Column(
+          children: [
+            const ListTile(
+              leading: Icon(Icons.psychology_outlined),
+              title: Text('记忆系统'),
+              subtitle: Text(
+                '模型在对话中主动写 .md 到 agent/memory/ 并把索引行加入 '
+                'MEMORY.md。MEMORY.md 自动注入系统提示词（最多 200 行 / 25KB）；'
+                '具体 .md 内容由模型按需 read。',
+              ),
+              isThreeLine: true,
+            ),
+            const Divider(height: 0),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '辅助检索 / 抽取模型',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '用于 findRelevantMemories（每轮按描述语义筛 ≤5 条相关记忆注入上下文）'
+                    '和 extractMemories（轮次结束的背景抽取）。未设置时使用当前对话模型。',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  if (available.isEmpty)
+                    Text(
+                      '当前可用模型列表为空。先在 "我" 板块解锁身份并同步模型。',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    )
+                  else
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String?>(
+                            initialValue: available.contains(current)
+                                ? current
+                                : null,
+                            isExpanded: true,
+                            decoration: const InputDecoration(
+                              isDense: true,
+                              border: OutlineInputBorder(),
+                              labelText: '记忆模型',
+                            ),
+                            items: <DropdownMenuItem<String?>>[
+                              DropdownMenuItem<String?>(
+                                value: null,
+                                child: Text(
+                                  effectiveModel == null
+                                      ? '使用当前对话模型（尚未选定）'
+                                      : '使用当前对话模型（$effectiveModel）',
+                                ),
+                              ),
+                              for (final id in available)
+                                DropdownMenuItem<String?>(
+                                  value: id,
+                                  child: Text(id),
+                                ),
+                            ],
+                            onChanged: (value) =>
+                                _setMemoryAuxModel(value),
+                          ),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _setMemoryAuxModel(String? model) async {
+    final eng = ref.read(engineProvider);
+    eng.preferences.setMemoryAuxModel(model);
+    await _refresh();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          model == null
+              ? '已恢复使用当前对话模型处理记忆辅助 LLM'
+              : '记忆辅助模型已设为 $model',
         ),
       ),
     );

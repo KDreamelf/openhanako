@@ -132,4 +132,44 @@ class PreferencesManager {
     p['codex'] = codex;
     _write(p);
   }
+
+  // ===== 记忆系统配置 =====
+  //
+  // 记忆系统走 Claude Code 风格（离散 .md + MEMORY.md 索引）。模型在主对话
+  // 中保存 / 读取记忆是核心路径；下面这些设置控制**辅助**链路：
+  //   - findRelevantMemories（每轮 recall 时按 description 语义筛选 ≤N 条）
+  //   - extractMemories（turn 结束时背景抽取候选记忆）
+  // 这两条都需要额外 LLM 调用，因此允许独立配置使用的模型。
+
+  /// 用于 findRelevantMemories / extractMemories 等辅助 LLM 调用的模型 ID。
+  /// 未设置时返回 null，调用方应 fallback 到主对话模型。
+  String? getMemoryAuxModel() {
+    final memory = _read()['memory'];
+    if (memory is Map) {
+      final raw = memory['aux_model'];
+      if (raw is String && raw.trim().isNotEmpty) return raw.trim();
+    }
+    return null;
+  }
+
+  void setMemoryAuxModel(String? model) {
+    final p = Map<String, dynamic>.of(_read());
+    final memory = p['memory'] is Map
+        ? Map<String, dynamic>.of(
+            (p['memory'] as Map).cast<String, dynamic>(),
+          )
+        : <String, dynamic>{};
+    final clean = model?.trim();
+    if (clean == null || clean.isEmpty) {
+      memory.remove('aux_model');
+    } else {
+      memory['aux_model'] = clean;
+    }
+    if (memory.isEmpty) {
+      p.remove('memory');
+    } else {
+      p['memory'] = memory;
+    }
+    _write(p);
+  }
 }
