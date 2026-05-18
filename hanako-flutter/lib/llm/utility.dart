@@ -44,7 +44,8 @@ Future<String> callProviderText({
                 ToolCallStart() ||
                 ToolCallArgsDelta() ||
                 ToolCallEnd() ||
-                ToolCallResult():
+                ToolCallResult() ||
+                TokenUsage():
               // utility 调用忽略
               break;
           }

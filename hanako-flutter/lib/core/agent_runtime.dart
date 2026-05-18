@@ -152,6 +152,8 @@ class AgentRuntimeLoop {
               break;
             case MessageDone():
               break;
+            case TokenUsage():
+              yield event;
             case LlmError():
               error = event;
           }

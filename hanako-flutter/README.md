@@ -75,9 +75,6 @@ hanako/
 │   ├── bridge/                       # Lark (webhook + AES + tenant token) + QQ (规划中)
 │   ├── ui/                           # 主窗口 / Settings / Editor (re_editor) / Browser (webview) / Onboarding (5 step)
 │   └── shared/                       # HanaHome / YamlIo / Result
-├── bin/
-│   ├── hanako.dart                   # CLI 入口
-│   └── server.dart                   # shelf headless server
 ├── windows/runner/main.cpp           # Nvidia/AMD 高性能 GPU 导出 + UIThreadPolicy
 ├── installers/windows.iss            # Inno Setup 模板
 ├── test/

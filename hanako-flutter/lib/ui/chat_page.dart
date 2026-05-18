@@ -551,6 +551,8 @@ class ChatNotifier extends StateNotifier<ChatState> {
               ),
               hadProgress: hadProgress,
             );
+          case TokenUsage():
+            break;
         }
       }
       if (currentBlocks.isNotEmpty) {

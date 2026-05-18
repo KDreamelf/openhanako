@@ -1775,6 +1775,27 @@ Iterable<LlmEvent> _chatDeltaEvents(
   }
   final content = parsed['content'];
   if (content is String && content.isNotEmpty) yield TextDelta(content);
+
+  // OpenAI 标准 usage 字段（通常在最后一个 chunk 附带一次）。
+  final usage = parsed['usage'];
+  if (usage is Map) {
+    final prompt = _intFromAny(usage['prompt_tokens']) ?? 0;
+    final completion = _intFromAny(usage['completion_tokens']) ?? 0;
+    final total = _intFromAny(usage['total_tokens']) ?? (prompt + completion);
+    final cached = _intFromAny(
+      usage['prompt_tokens_details'] is Map
+          ? (usage['prompt_tokens_details'] as Map)['cached_tokens']
+          : usage['cached_tokens'],
+    );
+    if (total > 0) {
+      yield TokenUsage(
+        promptTokens: prompt,
+        completionTokens: completion,
+        totalTokens: total,
+        cachedTokens: cached,
+      );
+    }
+  }
 }
 
 LlmError? _streamErrorEvent(Map parsed) {

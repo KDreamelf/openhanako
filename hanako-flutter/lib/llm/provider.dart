@@ -104,6 +104,21 @@ class MessageDone extends LlmEvent {
   const MessageDone({this.finishReason});
 }
 
+/// 流式响应中附带的 token 用量（通常在最后一个 chunk 里出现一次）。
+/// 对应 OpenAI 标准的 `usage` 字段。
+class TokenUsage extends LlmEvent {
+  final int promptTokens;
+  final int completionTokens;
+  final int totalTokens;
+  final int? cachedTokens;
+  const TokenUsage({
+    required this.promptTokens,
+    required this.completionTokens,
+    required this.totalTokens,
+    this.cachedTokens,
+  });
+}
+
 class LlmError extends LlmEvent {
   final String message;
   final int? statusCode;

@@ -35,7 +35,15 @@ class ModelManager {
       unique.add(id);
     }
 
-    _availableModels = [for (final id in unique) ModelInfo(id: id, name: id)];
+    _availableModels = [
+      for (final id in unique)
+        ModelInfo(
+          id: id,
+          name: id,
+          contextWindow: _knownContextWindow(id),
+          maxOutputTokens: _knownMaxOutputTokens(id),
+        ),
+    ];
 
     final preferred = preferredModelId?.trim();
     final current = _currentModel?.id;
@@ -46,7 +54,14 @@ class ModelManager {
         : unique.isNotEmpty
         ? unique.first
         : null;
-    _currentModel = nextId == null ? null : ModelInfo(id: nextId, name: nextId);
+    _currentModel = nextId == null
+        ? null
+        : ModelInfo(
+            id: nextId,
+            name: nextId,
+            contextWindow: _knownContextWindow(nextId),
+            maxOutputTokens: _knownMaxOutputTokens(nextId),
+          );
     await _saveCache();
   }
 
@@ -56,7 +71,12 @@ class ModelManager {
     if (!_containsId(id)) {
       throw ArgumentError.value(modelId, 'modelId', '模型不在网关授权列表中');
     }
-    _currentModel = ModelInfo(id: id, name: id);
+    _currentModel = ModelInfo(
+      id: id,
+      name: id,
+      contextWindow: _knownContextWindow(id),
+      maxOutputTokens: _knownMaxOutputTokens(id),
+    );
     await _saveCache();
   }
 
@@ -107,10 +127,43 @@ class ModelManager {
 }
 
 class ModelInfo {
-  const ModelInfo({required this.id, required this.name});
+  const ModelInfo({
+    required this.id,
+    required this.name,
+    this.contextWindow = defaultContextWindow,
+    this.maxOutputTokens = defaultMaxOutputTokens,
+  });
 
   final String id;
   final String name;
+  final int contextWindow;
+  final int maxOutputTokens;
 
-  Map<String, dynamic> toJson() => {'id': id, 'name': name};
+  static const int defaultContextWindow = 128000;
+  static const int defaultMaxOutputTokens = 8000;
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'contextWindow': contextWindow,
+    'maxOutputTokens': maxOutputTokens,
+  };
 }
+
+/// 已知模型的上下文窗口大小。新增模型在此 map 里添加即可；不在列表
+/// 内的走默认值（128K / 8K）。
+///
+/// 数据来源：各供应商公开文档。如果 AI 网关以后下发 model metadata，
+/// 这个 map 可以被动态数据覆盖。
+const _knownModels = <String, ({int contextWindow, int maxOutputTokens})>{
+  'gpt-5.5': (contextWindow: 200000, maxOutputTokens: 32000),
+  'gpt-5.4': (contextWindow: 128000, maxOutputTokens: 16000),
+  'LongCat-Flash-Chat': (contextWindow: 64000, maxOutputTokens: 8000),
+  'LongCat-Flash-Lite': (contextWindow: 64000, maxOutputTokens: 8000),
+};
+
+int _knownContextWindow(String modelId) =>
+    _knownModels[modelId]?.contextWindow ?? ModelInfo.defaultContextWindow;
+
+int _knownMaxOutputTokens(String modelId) =>
+    _knownModels[modelId]?.maxOutputTokens ?? ModelInfo.defaultMaxOutputTokens;
