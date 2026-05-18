@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:drift/drift.dart';
 
+import '../shared/pii_scrubber.dart';
 import 'database.dart';
 
 /// FactStore 业务接口，与 legacy fact-store.js 一一对应。
@@ -17,7 +18,7 @@ class FactStore {
     String? time,
     String? sessionId,
   }) async {
-    final cleaned = _scrubPii(fact);
+    final cleaned = scrubPii(fact);
     final existingId = await _findDuplicateId(cleaned);
     if (existingId != null) return existingId;
 
@@ -194,24 +195,6 @@ class FactStore {
       if (tag.isEmpty || !seen.add(tag)) continue;
       out.add(tag);
     }
-    return out;
-  }
-
-  /// 与 legacy lib/pii-guard.js 思路对齐：扫描 4 类常见 PII，redact 替换。
-  /// Phase 1 仅实现最常见 4 类（信用卡 / 身份证 / 手机 / 邮箱），
-  /// Phase 2 再扩展（IP / 银行卡变体 / token 关键字）。
-  static String _scrubPii(String text) {
-    var out = text;
-    out = out.replaceAll(
-      RegExp(r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'),
-      '[REDACTED:CARD]',
-    );
-    out = out.replaceAll(RegExp(r'\b\d{17}[\dXx]\b'), '[REDACTED:ID]');
-    out = out.replaceAll(RegExp(r'\b1[3-9]\d{9}\b'), '[REDACTED:PHONE]');
-    out = out.replaceAll(
-      RegExp(r'\b[\w.+-]+@[\w-]+\.[\w.-]+\b'),
-      '[REDACTED:EMAIL]',
-    );
     return out;
   }
 

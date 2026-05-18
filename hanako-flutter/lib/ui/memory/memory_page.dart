@@ -9,20 +9,14 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../../app/providers.dart';
-import '../../core/engine.dart';
-import '../../llm/provider.dart';
 import '../../memory/database.dart';
 import '../../memory/fact_store.dart';
-import '../../memory/memory_compile.dart';
-import '../../memory/session_summary.dart';
 import '../design/design.dart';
 
 class MemoryPage extends ConsumerStatefulWidget {
@@ -258,54 +252,6 @@ class _MemoryPageState extends ConsumerState<MemoryPage> {
     }
   }
 
-  Future<void> _compileMemory() async {
-    final agentId = _agentId;
-    if (agentId == null) return;
-
-    final eng = ref.read(engineProvider);
-    final memoryDir = eng.home.agentMemory(agentId);
-    final summaries = SessionSummaryStore(
-      Directory(p.join(memoryDir.path, 'summaries')),
-    );
-    final identity = eng.identityRepository.current;
-    final model = eng.modelManager.currentModelId;
-    final canCallLlm = identity != null && model != null && model.isNotEmpty;
-    final compiler = MemoryCompiler(
-      memoryDir: memoryDir,
-      summaries: summaries,
-      compilerProvider: canCallLlm
-          ? _GatewayLlmProvider(eng)
-          : const _UnavailableLlmProvider(),
-      compilerModel: model ?? '',
-    );
-
-    setState(() => _busy = true);
-    try {
-      if (!canCallLlm) {
-        await compiler.assemble();
-        _showSnack('已重新组装 memory.md；完整编译需要先解锁身份并选择模型。');
-        return;
-      }
-
-      await eng.backendClient.handshake(keyPair: identity.keyPair);
-      final statuses = <String, CompileStatus>{
-        'today': await compiler.compileToday(),
-        'week': await compiler.compileWeek(),
-        'longterm': await compiler.compileLongterm(),
-        'facts': await compiler.compileFacts(),
-      };
-      await compiler.assemble();
-      final text = statuses.entries
-          .map((entry) => '${entry.key}=${entry.value.name}')
-          .join(', ');
-      _showSnack('记忆编译完成：$text');
-    } catch (e) {
-      _showSnack('编译失败：$e');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
   Future<void> _export() async {
     if (_facts.isEmpty) return;
     try {
@@ -469,7 +415,6 @@ class _MemoryPageState extends ConsumerState<MemoryPage> {
               hasFacts: _facts.isNotEmpty,
               onRefresh: _busy ? null : _refresh,
               onImport: _busy || _store == null ? null : _import,
-              onCompile: _busy || _agentId == null ? null : _compileMemory,
               onExport: _facts.isEmpty || _busy ? null : _export,
               onClear: _facts.isEmpty || _busy ? null : _clearAll,
               onClose: () => Navigator.of(context).pop(),
@@ -583,7 +528,6 @@ class _MemoryHeader extends StatelessWidget {
     required this.hasFacts,
     required this.onRefresh,
     required this.onImport,
-    required this.onCompile,
     required this.onExport,
     required this.onClear,
     required this.onClose,
@@ -595,7 +539,6 @@ class _MemoryHeader extends StatelessWidget {
   final bool hasFacts;
   final VoidCallback? onRefresh;
   final VoidCallback? onImport;
-  final VoidCallback? onCompile;
   final VoidCallback? onExport;
   final VoidCallback? onClear;
   final VoidCallback onClose;
@@ -710,13 +653,6 @@ class _MemoryHeader extends StatelessWidget {
                     tooltip: '导入',
                     onPressed: onImport,
                   ),
-                  GlassButton(
-                    icon: Icons.auto_fix_high_outlined,
-                    label: '编译记忆',
-                    onPressed: onCompile,
-                    dense: true,
-                    accent: palette.accentCyan,
-                  ),
                   GlassIconButton(
                     icon: Icons.download_outlined,
                     tooltip: '导出 Markdown',
@@ -813,49 +749,6 @@ class _MemoryImportRequest {
 
   final String path;
   final List<String> tags;
-}
-
-class _GatewayLlmProvider implements LlmProvider {
-  const _GatewayLlmProvider(this.engine);
-
-  final HanaEngine engine;
-
-  @override
-  String get name => 'hanako_gateway';
-
-  @override
-  Stream<LlmEvent> chat({
-    required List<Message> messages,
-    required String model,
-    List<Tool>? tools,
-    bool? thinking,
-    CancelToken? cancelToken,
-  }) {
-    return engine.backendClient.chatEvents(
-      model: model,
-      messages: messages.map((message) => message.toJson()).toList(),
-      tools: tools,
-      cancelToken: cancelToken,
-    );
-  }
-}
-
-class _UnavailableLlmProvider implements LlmProvider {
-  const _UnavailableLlmProvider();
-
-  @override
-  String get name => 'unavailable';
-
-  @override
-  Stream<LlmEvent> chat({
-    required List<Message> messages,
-    required String model,
-    List<Tool>? tools,
-    bool? thinking,
-    CancelToken? cancelToken,
-  }) async* {
-    yield const LlmError(message: 'LLM 未配置');
-  }
 }
 
 class _FactCard extends StatefulWidget {

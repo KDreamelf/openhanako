@@ -9,6 +9,7 @@ import '../core/cron_store.dart';
 import '../core/skill_manager.dart';
 import '../experience/experience.dart';
 import '../memory/claude_memory.dart';
+import '../shared/pii_scrubber.dart';
 import '../llm/provider.dart';
 
 class LocalToolRegistry {
@@ -196,7 +197,7 @@ class LocalToolRegistry {
     String? agentDir,
   ) async {
     final dir = _requireAgentDir(agentDir);
-    final content = _scrubPii(_requiredString(args, 'content'));
+    final content = scrubPii(_requiredString(args, 'content'));
     final file = File(p.join(dir, 'pinned.md'));
     file.parent.createSync(recursive: true);
     final existing = file.existsSync() ? await file.readAsString() : '';
@@ -761,21 +762,6 @@ class LocalToolRegistry {
   static String _truncate(String text, int maxLength) {
     if (text.length <= maxLength) return text;
     return '${text.substring(0, maxLength)}\n\n[... 内容已截断，共 ${text.length} 字符]';
-  }
-
-  static String _scrubPii(String text) {
-    var out = text;
-    out = out.replaceAll(
-      RegExp(r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'),
-      '[REDACTED:CARD]',
-    );
-    out = out.replaceAll(RegExp(r'\b\d{17}[\dXx]\b'), '[REDACTED:ID]');
-    out = out.replaceAll(RegExp(r'\b1[3-9]\d{9}\b'), '[REDACTED:PHONE]');
-    out = out.replaceAll(
-      RegExp(r'\b[\w.+-]+@[\w-]+\.[\w.-]+\b'),
-      '[REDACTED:EMAIL]',
-    );
-    return out;
   }
 
   static bool _isRedirect(int code) =>
