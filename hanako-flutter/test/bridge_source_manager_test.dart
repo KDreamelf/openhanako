@@ -83,33 +83,6 @@ void main() {
     if (tmp.existsSync()) tmp.deleteSync(recursive: true);
   });
 
-  test('保存、禁用和删除 Telegram 配置', () async {
-    await sources.save(
-      const BridgeSourceConfig(
-        platform: 'telegram',
-        enabled: false,
-        agentId: 'agent_01',
-        credentials: {'token': '123:abc'},
-      ),
-    );
-
-    final telegram = sources.listSources().firstWhere(
-      (source) => source.platform == 'telegram',
-    );
-    expect(telegram.configured, true);
-    expect(telegram.enabled, false);
-    expect(telegram.agentId, 'agent_01');
-
-    await sources.setEnabled('telegram', false);
-    expect(sources.status('telegram').state, 'disabled');
-
-    await sources.delete('telegram');
-    final deleted = sources.listSources().firstWhere(
-      (source) => source.platform == 'telegram',
-    );
-    expect(deleted.configured, false);
-  });
-
   test('QQ 保留配置模型并给出 adapter 占位状态', () async {
     await sources.save(
       const BridgeSourceConfig(
@@ -127,17 +100,20 @@ void main() {
     expect(sources.status('qq').error, contains('QQ 当前只保存配置'));
   });
 
-  test('Telegram 外部消息按配置进入指定 Agent 会话', () async {
+  test('飞书外部消息按配置进入指定 Agent 会话', () async {
     backend.rounds.add([const TextDelta('桥接回复')]);
     await sources.save(
       const BridgeSourceConfig(
-        platform: 'telegram',
+        platform: 'feishu',
         enabled: false,
         agentId: 'agent_02',
-        credentials: {'token': '123:abc'},
+        credentials: {
+          'appId': 'cli_dummy',
+          'appSecret': 'secret_dummy',
+        },
       ),
     );
-    final adapter = _FakeBridgeAdapter('telegram');
+    final adapter = _FakeBridgeAdapter('feishu');
     await bridgeSessions.register(adapter);
 
     adapter.add(
@@ -180,8 +156,8 @@ void main() {
       ),
     );
     final index = jsonDecode(indexFile.readAsStringSync()) as Map;
-    expect(index['tg_dm_u1']['agentId'], 'agent_02');
-    expect(index['tg_dm_u1']['sessionPath'], targetSessions.single.path);
+    expect(index['fs_dm_u1']['agentId'], 'agent_02');
+    expect(index['fs_dm_u1']['sessionPath'], targetSessions.single.path);
     expect(backend.requests.single.toString(), contains('当前 Agent：目标 Agent'));
   });
 }

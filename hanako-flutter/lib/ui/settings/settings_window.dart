@@ -1583,9 +1583,6 @@ ${input.instructions.trim()}
 
   Future<void> _editBridgeSource(BridgeSourceConfig current) async {
     final agentIdCtrl = TextEditingController(text: current.agentId ?? '');
-    final tokenCtrl = TextEditingController(
-      text: current.credentials['token'] ?? '',
-    );
     final appIdCtrl = TextEditingController(
       text: current.credentials['appId'] ?? current.credentials['appID'] ?? '',
     );
@@ -1617,12 +1614,6 @@ ${input.instructions.trim()}
                     ),
                   ),
                   const SizedBox(height: 12),
-                  if (current.platform == 'telegram')
-                    TextField(
-                      controller: tokenCtrl,
-                      decoration: const InputDecoration(labelText: 'Bot Token'),
-                      obscureText: true,
-                    ),
                   if (current.platform == 'feishu') ...[
                     TextField(
                       controller: appIdCtrl,
@@ -1695,8 +1686,6 @@ ${input.instructions.trim()}
 
     final credentials = <String, String>{};
     switch (current.platform) {
-      case 'telegram':
-        credentials['token'] = tokenCtrl.text;
       case 'feishu':
         credentials
           ..['appId'] = appIdCtrl.text
@@ -2271,7 +2260,7 @@ ${input.instructions.trim()}
   Widget _buildBridgeSection() {
     return _Section(
       title: '消息来源',
-      subtitle: 'Telegram、飞书/Lark、QQ 外部入口。',
+      subtitle: '飞书/Lark、QQ 外部入口。',
       child: _SettingsPanel(
         child: Column(
           children: [
@@ -2858,7 +2847,6 @@ ${input.instructions.trim()}
   };
 
   IconData _bridgeIcon(String platform) => switch (platform) {
-    'telegram' => Icons.send_outlined,
     'feishu' || 'lark' => Icons.business_center_outlined,
     'qq' => Icons.chat_bubble_outline,
     _ => Icons.forum_outlined,

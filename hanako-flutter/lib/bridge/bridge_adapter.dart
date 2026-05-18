@@ -1,6 +1,6 @@
 /// Bridge 适配器抽象。每个外部平台一个实现。
 abstract class BridgeAdapter {
-  String get platform; // 'telegram' / 'wecom' / 'lark' / 'qq'
+  String get platform; // 'lark' / 'feishu' / 'qq'
   Stream<IncomingMessage> get messages;
   Future<BridgeResult> send(OutgoingMessage msg);
   Future<void> dispose();

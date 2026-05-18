@@ -1,5 +1,4 @@
 import '../bridge/lark_bridge.dart';
-import '../bridge/telegram_bridge.dart';
 import 'bridge_session_manager.dart';
 import 'preferences_manager.dart';
 
@@ -66,15 +65,6 @@ class BridgeSourceManager {
         throw StateError('${config.label} 缺少必要凭证');
       }
       switch (config.platform) {
-        case 'telegram':
-          final token = config.credentials['token'] ?? '';
-          final adapter = TelegramBridge(token: token);
-          await bridgeSessionManager.register(adapter);
-          await adapter.start();
-          _statuses[platform] = BridgeSourceStatus(
-            platform: platform,
-            state: 'connected',
-          );
         case 'feishu':
         case 'lark':
           final adapter = LarkBridge(
@@ -167,14 +157,12 @@ class BridgeSourceConfig {
   final Map<String, String> credentials;
 
   String get label => switch (platform) {
-    'telegram' => 'Telegram',
     'feishu' || 'lark' => '飞书/Lark',
     'qq' => 'QQ',
     _ => platform,
   };
 
   bool get configured => switch (platform) {
-    'telegram' => (credentials['token'] ?? '').isNotEmpty,
     'feishu' || 'lark' =>
       (credentials['appId'] ?? '').isNotEmpty &&
           (credentials['appSecret'] ?? '').isNotEmpty,
@@ -238,4 +226,4 @@ class BridgeSourceStatus {
   };
 }
 
-const _platforms = ['telegram', 'feishu', 'qq'];
+const _platforms = ['feishu', 'qq'];

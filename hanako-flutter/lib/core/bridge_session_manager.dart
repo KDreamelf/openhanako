@@ -126,7 +126,6 @@ class BridgeSessionManager {
         (msg.chatId != null && msg.chatId!.startsWith('oc_')) ||
         (msg.raw['message']?['chat_type'] == 'group');
     final platformPrefix = switch (platform) {
-      'telegram' => 'tg',
       'feishu' => 'fs',
       'lark' => 'fs',
       'qq' => 'qq',
@@ -263,11 +262,10 @@ class BridgeSessionManager {
 
   /// session_key 解析（platform / type）。
   ({String? platform, String? type, String? id}) parseSessionKey(String key) {
-    final m = RegExp(r'^(tg|fs|qq)_(dm|group)_(.+)$').firstMatch(key);
+    final m = RegExp(r'^(fs|qq)_(dm|group)_(.+)$').firstMatch(key);
     if (m == null) return (platform: null, type: null, id: null);
     return (
       platform: switch (m.group(1)) {
-        'tg' => 'telegram',
         'fs' => 'feishu',
         'qq' => 'qq',
         _ => null,

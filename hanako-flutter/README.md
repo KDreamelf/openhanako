@@ -53,7 +53,7 @@ HANA_PORT=4000 dart run bin/server.dart
 - **流式渲染**：thinking / text / tool_call 三类事件，`RepaintBoundary` 隔离
 - **PerfHUD**：debug/profile 模式实时显示 fps/build/raster
 - **PromptToolStreamParser**：工具调用 / thinking 块跨 chunk 增量解析（防 N-BUG-1）
-- **Bridge**：Telegram HTTP long polling 完整；Lark/飞书 webhook + AES 加解密 + tenant_access_token 完整
+- **Bridge**：Lark/飞书 webhook + AES 加解密 + tenant_access_token 完整；QQ 适配器规划中
 - **Channel**：`.md` 文件读写 + frontmatter + 消息追加 + 退群清理
 - **Skill**：**Anthropic Agent Skills 标准格式**——`{name}/SKILL.md` + frontmatter（`name` / `description` / `license` / `allowed-tools`）。SkillManager 只负责发现 + 解析 + 注入 system prompt 列表，不做 "执行"——模型按需用 `read_file` 加载完整 SKILL.md，用 `bash` / `python` 等通用工具执行其中的 scripts。1s debounce watch + per-agent 隔离 + legacy `title` 字段兼容。
 - **Onboarding**：5 步流程，每步可跳过（规避 BUG-5）
@@ -72,7 +72,7 @@ hanako/
 │   │   ├── streaming/sse_parser.dart # 跨 chunk SSE 解析（防 N-BUG-1）
 │   │   └── tool_format/prompt_tool.dart
 │   ├── memory/                       # Drift schema + FactStore
-│   ├── bridge/                       # Telegram (完整) + Lark (webhook + AES + tenant token)
+│   ├── bridge/                       # Lark (webhook + AES + tenant token) + QQ (规划中)
 │   ├── ui/                           # 主窗口 / Settings / Editor (re_editor) / Browser (webview) / Onboarding (5 step)
 │   └── shared/                       # HanaHome / YamlIo / Result
 ├── bin/
