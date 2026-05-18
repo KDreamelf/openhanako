@@ -10,6 +10,7 @@ import '../identity/identity.dart';
 import '../llm/backend_llm_provider.dart';
 import '../llm/provider.dart';
 import '../memory/claude_memory.dart';
+import '../memory/extract_memories.dart';
 import '../memory/find_relevant_memories.dart';
 import '../shared/hana_home.dart';
 import '../shared/yaml_io.dart';
@@ -82,6 +83,9 @@ class SessionCoordinator {
   Session? _current;
   final _uuid = const Uuid();
   Future<WindowsOpsCapabilities>? _windowsOpsCapabilities;
+  // 当前正在跑后台 extract 的 session.path 集合。turn 结束后 unawaited 触发
+  // extract，避免连续短轮触发并行；同 session 同时只跑一个。
+  final Set<String> _extractingSessionPaths = <String>{};
 
   Session? get current => _current;
 
@@ -260,6 +264,9 @@ class SessionCoordinator {
       userQuery: userQuery.isEmpty ? null : userQuery,
       run: (runtime) => runtime.runUserPromptBlocks(blocks),
     );
+    // turn 已结束（MessageDone 或 LlmError）。把抽取丢到后台跑，
+    // 不阻塞返回给 chat UI 的 stream close。
+    unawaited(_maybeRunExtraction());
   }
 
   /// 基于当前已落盘上下文继续当前轮次，不追加新的 user 消息。
@@ -643,6 +650,69 @@ class SessionCoordinator {
     if (selected != null && selected.isNotEmpty) {
       config.writeAt(['models', 'chat'], selected);
     }
+  }
+
+  /// turn 结束后异步调用：把近端对话喂给辅助模型抽 memory 候选写入
+  /// agent/memory/。不阻塞主对话；失败 silent，仅 logForDebug 风格写到 stderr。
+  ///
+  /// 节流策略：同 session 同时只跑一个；其他触发条件（最少消息数、最小间隔
+  /// 等）暂不做，等使用一阵看实际节奏再调。
+  Future<void> _maybeRunExtraction() async {
+    final session = _current;
+    if (session == null) return;
+    if (!session.memoryEnabled) return;
+    if (_extractingSessionPaths.contains(session.path)) return;
+
+    final identity = identityRepository.current;
+    if (identity == null) return;
+
+    final auxModel =
+        preferences.getMemoryAuxModel() ?? modelManager.currentModelId;
+    if (auxModel == null || auxModel.trim().isEmpty) return;
+
+    final channel = backendClient.channel;
+    if (channel == null || DateTime.now().isAfter(channel.expiresAt)) return;
+
+    final memoryRoot = getClaudeMemoryRoot(home.agentDir(session.agentId));
+    final transcript = _collectRecentTranscript(session, maxMessages: 12);
+    if (transcript.trim().isEmpty) return;
+
+    _extractingSessionPaths.add(session.path);
+    try {
+      await extractMemories(
+        memoryRoot: memoryRoot,
+        transcript: transcript,
+        provider: BackendLlmProvider(backendClient),
+        model: auxModel,
+      );
+    } catch (_) {
+      // 后台路径不能让主对话出错。任何异常吞掉。
+    } finally {
+      _extractingSessionPaths.remove(session.path);
+    }
+  }
+
+  String _collectRecentTranscript(Session session, {required int maxMessages}) {
+    final messages = RuntimeSessionStore.loadVisibleMessages(session.path);
+    if (messages.isEmpty) return '';
+    final recent = messages.length > maxMessages
+        ? messages.sublist(messages.length - maxMessages)
+        : messages;
+    final buf = StringBuffer();
+    for (final m in recent) {
+      final role = switch (m.role) {
+        'user' => '用户',
+        'assistant' => 'AI',
+        _ => m.role,
+      };
+      final content = m.content.trim();
+      if (content.isEmpty) continue;
+      buf
+        ..writeln('### $role')
+        ..writeln(content)
+        ..writeln();
+    }
+    return buf.toString().trim();
   }
 
   Future<String> _buildSystemPrompt(
