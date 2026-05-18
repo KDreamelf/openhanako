@@ -410,6 +410,10 @@ description: 用于检查 prompt 注入。
       models: models,
     );
     final backend = _FakeBackendClient([
+      // 第一轮：findRelevantMemories 的 aux 调用，返回空选择以快速放过。
+      // 不能直接返回 []——callProviderText 看不到 MessageDone 不会 complete。
+      [const TextDelta('{"selected_memories": []}')],
+      // 第二轮：主对话本身。
       [const TextDelta('ok')],
     ]);
     final coordinator = _coordinator(
@@ -425,7 +429,7 @@ description: 用于检查 prompt 注入。
     await _drain(coordinator.prompt('检查记忆'));
 
     final systemPrompt =
-        backend.requests.single.firstWhere(
+        backend.requests.last.firstWhere(
               (message) => message['role'] == 'system',
             )['content']
             as String;

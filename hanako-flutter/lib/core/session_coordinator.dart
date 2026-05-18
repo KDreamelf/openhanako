@@ -7,8 +7,10 @@ import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 
 import '../identity/identity.dart';
+import '../llm/backend_llm_provider.dart';
 import '../llm/provider.dart';
 import '../memory/claude_memory.dart';
+import '../memory/find_relevant_memories.dart';
 import '../shared/hana_home.dart';
 import '../shared/yaml_io.dart';
 import '../windows_ops/windows_ops_capabilities.dart';
@@ -248,8 +250,14 @@ class SessionCoordinator {
     List<RuntimeContentBlock> blocks, {
     CancelToken? cancelToken,
   }) async* {
+    final userQuery = blocks
+        .whereType<RuntimeTextBlock>()
+        .map((b) => b.text)
+        .join(' ')
+        .trim();
     yield* _runRuntimeTurn(
       cancelToken: cancelToken,
+      userQuery: userQuery.isEmpty ? null : userQuery,
       run: (runtime) => runtime.runUserPromptBlocks(blocks),
     );
   }
@@ -267,6 +275,7 @@ class SessionCoordinator {
 
   Stream<LlmEvent> _runRuntimeTurn({
     CancelToken? cancelToken,
+    String? userQuery,
     required Stream<LlmEvent> Function(AgentRuntimeLoop runtime) run,
   }) async* {
     if (_current == null) {
@@ -279,6 +288,7 @@ class SessionCoordinator {
     yield* _runRuntimeTurnForSession(
       session,
       cancelToken: cancelToken,
+      userQuery: userQuery,
       run: run,
     );
   }
@@ -446,6 +456,7 @@ class SessionCoordinator {
     Session session, {
     CancelToken? cancelToken,
     String? modelOverride,
+    String? userQuery,
     required Stream<LlmEvent> Function(AgentRuntimeLoop runtime) run,
   }) async* {
     final cfg = session.agentId == config.agentId
@@ -497,7 +508,7 @@ class SessionCoordinator {
       final selectedModelId = modelId.trim();
       final runtime = AgentRuntimeLoop(
         history: RuntimeSessionStore.loadRuntimeMessages(session.path),
-        systemPrompt: await _buildSystemPrompt(session),
+        systemPrompt: await _buildSystemPrompt(session, userQuery: userQuery),
         tools: toolRuntime.modelVisibleTools,
         streamChat: ({required messages, required tools, Object? toolChoice}) =>
             _chatEventsForRuntime(
@@ -634,7 +645,10 @@ class SessionCoordinator {
     }
   }
 
-  Future<String> _buildSystemPrompt(Session session) async {
+  Future<String> _buildSystemPrompt(
+    Session session, {
+    String? userQuery,
+  }) async {
     final agent = await agentManager.getAgent(session.agentId);
     final cfg = session.agentId == config.agentId
         ? config.read()
@@ -658,10 +672,33 @@ class SessionCoordinator {
             teamMemoryRoot: teamMemoryRoot,
           )
         : '';
+    // 当前轮的相关记忆段：仅在启用 memory + 有 user query 时跑。
+    // 调辅助小模型按 .md 描述筛 ≤5 条；失败/空 → 返回空串不影响主流程。
+    String relevantBlock = '';
+    if (session.memoryEnabled &&
+        userQuery != null &&
+        userQuery.trim().isNotEmpty) {
+      final auxModel =
+          preferences.getMemoryAuxModel() ?? modelManager.currentModelId;
+      if (auxModel != null && auxModel.trim().isNotEmpty) {
+        try {
+          final picked = await findRelevantMemories(
+            memoryRoot: memoryRoot,
+            query: userQuery,
+            provider: BackendLlmProvider(backendClient),
+            model: auxModel,
+          );
+          relevantBlock = formatRelevantMemoriesBlock(picked);
+        } catch (_) {
+          // recall 失败不挡主流程
+        }
+      }
+    }
     final permissionMode = CodexPermissionMode.fromPreferences(preferences);
     final parts = <String>[
       _ph01CodexSystemPrompt(permissionMode),
       if (memoryPrompt.trim().isNotEmpty) memoryPrompt,
+      if (relevantBlock.trim().isNotEmpty) relevantBlock,
       '<environment_context>',
       if (session.cwd != null && session.cwd!.trim().isNotEmpty)
         'cwd: ${session.cwd}',
