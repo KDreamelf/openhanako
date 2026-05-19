@@ -2110,9 +2110,9 @@ class ExperienceDhtHttpClient {
     DateTime? now,
   }) async {
     final resp = await _dio.getUri<Map<String, dynamic>>(
-      Uri.parse('$dhtBaseUrl/api/v1/peers').replace(
-        queryParameters: {'limit': '$limit'},
-      ),
+      Uri.parse(
+        '$dhtBaseUrl/api/v1/peers',
+      ).replace(queryParameters: {'limit': '$limit'}),
       options: Options(contentType: Headers.jsonContentType),
     );
     final items = resp.data?['items'];
@@ -2125,9 +2125,41 @@ class ExperienceDhtHttpClient {
             item.cast<String, dynamic>(),
           ),
         )
-        .where((record) => record.expiresAt == null ||
-            record.expiresAt!.isAfter(timestamp))
+        .where((record) => record.isUsable(timestamp))
         .toList(growable: false);
+  }
+
+  /// 向 DHT 节点提交一朵小红花（服务证明）。
+  /// 对应服务端 `POST /api/v1/trust/flowers`。
+  Future<void> submitFlower({
+    required DHTServiceFlower flower,
+    required HanakoKeyPair keyPair,
+  }) async {
+    final signed = ph01.signRequest(
+      keyPair: keyPair,
+      businessPayload: flower.toJson(),
+    );
+    await _dio.postUri<void>(
+      Uri.parse('$dhtBaseUrl/api/v1/trust/flowers'),
+      data: signed.toJson(),
+      options: Options(contentType: Headers.jsonContentType),
+    );
+  }
+
+  /// 查询 DHT 节点的信任包（花环 + 散花 + PoW）。
+  /// 对应服务端 `GET /api/v1/trust/bundle`。
+  Future<DHTTrustBundle?> fetchTrustBundle() async {
+    try {
+      final resp = await _dio.getUri<Map<String, dynamic>>(
+        Uri.parse('$dhtBaseUrl/api/v1/trust/bundle'),
+        options: Options(contentType: Headers.jsonContentType),
+      );
+      final data = resp.data;
+      if (data == null) return null;
+      return DHTTrustBundle.fromJson(data);
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<ExperiencePackageRequestRecord> publishPackageRequest({

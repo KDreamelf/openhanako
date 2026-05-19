@@ -1,14 +1,10 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'p2p_message.dart';
 
-typedef P2pMessageHandler = void Function(
-  P2pEnvelope envelope,
-  InternetAddress sender,
-  int senderPort,
-);
+typedef P2pMessageHandler =
+    void Function(P2pEnvelope envelope, InternetAddress sender, int senderPort);
 
 class P2pTransport {
   P2pTransport({this.bindPort = 0});
@@ -45,15 +41,22 @@ class P2pTransport {
     } catch (_) {}
   }
 
-  Future<Duration?> probe(String host, int port, {Duration timeout = const Duration(seconds: 3)}) async {
+  Future<Duration?> probe(
+    String host,
+    int port, {
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
     final probeId = DateTime.now().microsecondsSinceEpoch.toString();
     final envelope = P2pEnvelope(
       type: P2pMessageType.probe,
-      payload: {'probeId': probeId, 'sentAt': DateTime.now().millisecondsSinceEpoch},
+      payload: {
+        'probeId': probeId,
+        'sentAt': DateTime.now().millisecondsSinceEpoch,
+      },
     );
     final start = DateTime.now();
     final completer = Completer<Duration?>();
-    void listener(P2pEnvelope env, InternetAddress _, int __) {
+    void listener(P2pEnvelope env, InternetAddress address, int port) {
       if (env.type == P2pMessageType.probeAck &&
           env.payload['probeId'] == probeId) {
         if (!completer.isCompleted) {
@@ -61,6 +64,7 @@ class P2pTransport {
         }
       }
     }
+
     final prevHandler = onMessage;
     onMessage = (env, addr, port) {
       listener(env, addr, port);

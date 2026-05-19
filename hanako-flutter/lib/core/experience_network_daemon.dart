@@ -190,7 +190,8 @@ class ExperienceNetworkDaemon {
     if (_cachedDhtClient != null) return _cachedDhtClient;
 
     final now = DateTime.now();
-    if (_nextDhtResolveAttempt != null && now.isBefore(_nextDhtResolveAttempt!)) {
+    if (_nextDhtResolveAttempt != null &&
+        now.isBefore(_nextDhtResolveAttempt!)) {
       return null;
     }
 
@@ -219,10 +220,13 @@ class ExperienceNetworkDaemon {
 
   void _onDhtResolveFailed() {
     _dhtResolveFailures++;
-    final backoffSeconds = (30 * _dhtResolveFailures)
-        .clamp(30, _maxDhtResolveBackoff.inSeconds);
-    _nextDhtResolveAttempt =
-        DateTime.now().add(Duration(seconds: backoffSeconds));
+    final backoffSeconds = (30 * _dhtResolveFailures).clamp(
+      30,
+      _maxDhtResolveBackoff.inSeconds,
+    );
+    _nextDhtResolveAttempt = DateTime.now().add(
+      Duration(seconds: backoffSeconds),
+    );
   }
 
   void invalidateDhtClient() {
@@ -251,7 +255,7 @@ class ExperienceNetworkDaemon {
 
     final overlay = _overlay;
     if (overlay != null) {
-      overlay.publishDemand(P2pDemandPacket(
+      final packet = P2pDemandPacket(
         demandId: demandId,
         requesterPubKey: identity.keyPair.publicKeyHex,
         signature: '',
@@ -259,7 +263,8 @@ class ExperienceNetworkDaemon {
         tags: keywords,
         maxResponses: 3,
         createdAt: DateTime.now().millisecondsSinceEpoch,
-      ));
+      )..signWith(identity.keyPair);
+      overlay.publishDemand(packet);
     }
 
     final dhtClient = await _resolveDhtClient();

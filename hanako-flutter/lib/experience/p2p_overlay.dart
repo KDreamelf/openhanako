@@ -1,8 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
-
-import 'package:path/path.dart' as p;
 
 import '../identity/keypair.dart';
 import 'experience_network.dart';
@@ -64,25 +61,30 @@ class ExperienceP2pOverlay {
 
   /// 发起需求：requester 把自己加入 forwardPath，然后广播。
   void publishDemand(P2pDemandPacket demand) {
-    demand.forwardPath.add(P2pPathEntry(
-      nodeId: localNodeId,
-      host: transport.localAddress?.address ?? '',
-      port: transport.localPort ?? 0,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
-    ));
+    demand.forwardPath.add(
+      P2pPathEntry(
+        nodeId: localNodeId,
+        host: transport.localAddress?.address ?? '',
+        port: transport.localPort ?? 0,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
     _seenDemandIds.add(demand.demandId);
     _demandMaxResponses[demand.demandId] = demand.maxResponses;
     _demandResponseSets[demand.demandId] = {};
     _demandForwardPaths[demand.demandId] = List.from(demand.forwardPath);
-    _broadcastToNeighbors(P2pEnvelope(
-      type: P2pMessageType.demand,
-      payload: demand.toJson(),
-    ));
+    _broadcastToNeighbors(
+      P2pEnvelope(type: P2pMessageType.demand, payload: demand.toJson()),
+    );
   }
 
   // ---- message dispatch ----
 
-  void _onMessage(P2pEnvelope envelope, InternetAddress sender, int senderPort) {
+  void _onMessage(
+    P2pEnvelope envelope,
+    InternetAddress sender,
+    int senderPort,
+  ) {
     switch (envelope.type) {
       case P2pMessageType.demand:
         _handleDemand(envelope.payload, sender, senderPort);
@@ -105,21 +107,28 @@ class ExperienceP2pOverlay {
 
   // ---- demand handling (§3) ----
 
-  void _handleDemand(Map<String, dynamic> payload, InternetAddress sender, int senderPort) {
+  void _handleDemand(
+    Map<String, dynamic> payload,
+    InternetAddress sender,
+    int senderPort,
+  ) {
     final demand = P2pDemandPacket.fromJson(payload);
     if (demand == null) return;
+    if (!demand.verifySignature()) return;
 
     if (_seenDemandIds.contains(demand.demandId)) return;
     _seenDemandIds.add(demand.demandId);
     _demandMaxResponses[demand.demandId] = demand.maxResponses;
     _demandResponseSets.putIfAbsent(demand.demandId, () => {});
 
-    demand.forwardPath.add(P2pPathEntry(
-      nodeId: localNodeId,
-      host: transport.localAddress?.address ?? '',
-      port: transport.localPort ?? 0,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
-    ));
+    demand.forwardPath.add(
+      P2pPathEntry(
+        nodeId: localNodeId,
+        host: transport.localAddress?.address ?? '',
+        port: transport.localPort ?? 0,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
 
     // 存储 forwardPath 快照——回包路由要用。
     _demandForwardPaths[demand.demandId] = List.from(demand.forwardPath);
@@ -141,27 +150,36 @@ class ExperienceP2pOverlay {
       if (results.isEmpty) return;
 
       final fingerprints = <P2pPackageFingerprint>[];
-      Uint8List? firstPackageData;
 
       for (final result in results) {
-        fingerprints.add(P2pPackageFingerprint(
-          packageHash: result.experienceId,
-          sizeBytes: 0,
-          title: result.title,
-        ));
-        if (firstPackageData == null) {
-          firstPackageData = await _readCachedPackageBytes(result.experienceId);
-        }
+        final package = await store.readReviewedCachedPackage(
+          result.experienceId,
+        );
+        if (package == null) continue;
+        await dhtClient.uploadCachedPackage(
+          packageHash: package.packageHash,
+          packageBytes: package.hxpBytes,
+          experienceId: package.experienceId,
+        );
+        fingerprints.add(
+          P2pPackageFingerprint(
+            packageHash: package.packageHash,
+            sizeBytes: package.hxpBytes.length,
+            title: result.title,
+            cacheBaseUrl: dhtClient.dhtBaseUrl,
+          ),
+        );
       }
+      if (fingerprints.isEmpty) return;
 
       final response = P2pResponsePacket(
         demandId: demand.demandId,
         providerPubKey: keyPair.publicKeyHex,
         providerSig: '',
         fingerprints: fingerprints,
-        packageData: firstPackageData,
         forwardPath: List.from(demand.forwardPath),
       );
+      response.signWith(keyPair);
 
       _routeResponseBackward(response);
 
@@ -170,23 +188,14 @@ class ExperienceP2pOverlay {
         providedPackageHashes: fingerprints.map((f) => f.packageHash).toList(),
         providerPubKey: keyPair.publicKeyHex,
         providerSig: '',
+      )..signWith(keyPair);
+      _broadcastToNeighbors(
+        P2pEnvelope(
+          type: P2pMessageType.offerAnnounce,
+          payload: announce.toJson(),
+        ),
       );
-      _broadcastToNeighbors(P2pEnvelope(
-        type: P2pMessageType.offerAnnounce,
-        payload: announce.toJson(),
-      ));
     } catch (_) {}
-  }
-
-  Future<Uint8List?> _readCachedPackageBytes(String experienceId) async {
-    try {
-      final cacheDir = Directory(p.join(store.rootDir.path, 'cache'));
-      final hxpFile = File(p.join(cacheDir.path, '$experienceId.hxp'));
-      if (await hxpFile.exists()) return hxpFile.readAsBytes();
-      return null;
-    } catch (_) {
-      return null;
-    }
   }
 
   // ---- response routing (§4.3, §4.4) ----
@@ -207,20 +216,20 @@ class ExperienceP2pOverlay {
 
     if (myIdx < 0) return;
     if (myIdx == 0) {
-      // 我就是 requester，直接导入包。
-      if (response.packageData != null && response.packageData!.isNotEmpty) {
-        unawaited(_importReceivedPackage(response.packageData!));
-      }
+      // 我就是 requester，从 DHT cache 拉取回包指向的包并导入。
+      unawaited(_importResponsePackages(response));
       return;
     }
 
     final nextHop = path[myIdx - 1];
-    response.returnPath.add(P2pPathEntry(
-      nodeId: localNodeId,
-      host: transport.localAddress?.address ?? '',
-      port: transport.localPort ?? 0,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
-    ));
+    response.returnPath.add(
+      P2pPathEntry(
+        nodeId: localNodeId,
+        host: transport.localAddress?.address ?? '',
+        port: transport.localPort ?? 0,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
     transport.sendTo(
       P2pEnvelope(type: P2pMessageType.response, payload: response.toJson()),
       nextHop.host,
@@ -231,6 +240,7 @@ class ExperienceP2pOverlay {
   void _handleResponse(Map<String, dynamic> payload) {
     final response = P2pResponsePacket.fromJson(payload);
     if (response == null) return;
+    if (!response.verifySignature()) return;
 
     final responseSet = _demandResponseSets[response.demandId];
     if (responseSet != null) {
@@ -240,10 +250,8 @@ class ExperienceP2pOverlay {
       }
     }
 
-    // 转发即持有（§6.1）：回包经过本节点时，缓存完整包到本地经验库。
-    if (response.packageData != null && response.packageData!.isNotEmpty) {
-      unawaited(_cachePackageLocally(response.packageData!));
-    }
+    // 转发即持有（§6.1）：回包经过本节点时，从 DHT cache 拉取并导入。
+    unawaited(_importResponsePackages(response));
 
     // 用存储的 forwardPath 或 response 自带的做反向路由。
     if (response.forwardPath.isEmpty) {
@@ -258,12 +266,19 @@ class ExperienceP2pOverlay {
 
   // ---- offer announce (§5) ----
 
-  void _handleOfferAnnounce(Map<String, dynamic> payload, InternetAddress sender, int senderPort) {
+  void _handleOfferAnnounce(
+    Map<String, dynamic> payload,
+    InternetAddress sender,
+    int senderPort,
+  ) {
     final announce = P2pOfferAnnounce.fromJson(payload);
     if (announce == null) return;
+    if (!announce.verifySignature()) return;
 
-    final responseSet =
-        _demandResponseSets.putIfAbsent(announce.demandId, () => {});
+    final responseSet = _demandResponseSets.putIfAbsent(
+      announce.demandId,
+      () => {},
+    );
     var newHashes = false;
     for (final hash in announce.providedPackageHashes) {
       if (responseSet.add(hash)) newHashes = true;
@@ -274,7 +289,10 @@ class ExperienceP2pOverlay {
 
     if (!newHashes) return;
     _broadcastToNeighbors(
-      P2pEnvelope(type: P2pMessageType.offerAnnounce, payload: announce.toJson()),
+      P2pEnvelope(
+        type: P2pMessageType.offerAnnounce,
+        payload: announce.toJson(),
+      ),
       excludeHost: sender.address,
       excludePort: senderPort,
     );
@@ -282,16 +300,26 @@ class ExperienceP2pOverlay {
 
   // ---- package import ----
 
-  Future<void> _cachePackageLocally(Uint8List bytes) async {
-    try {
-      await store.importNetworkPackage(bytes);
-    } catch (_) {}
-  }
-
-  Future<void> _importReceivedPackage(Uint8List bytes) async {
-    try {
-      await store.importNetworkPackage(bytes);
-    } catch (_) {}
+  Future<void> _importResponsePackages(P2pResponsePacket response) async {
+    for (final fp in response.fingerprints) {
+      try {
+        final bytes = await dhtClient.downloadCachedPackage(
+          packageHash: fp.packageHash,
+          returnPath: fp.cacheBaseUrl.trim().isEmpty
+              ? const []
+              : [
+                  ExperienceDemandReturnHop(
+                    nodeId: 'p2p_provider_cache',
+                    apiBaseUrl: fp.cacheBaseUrl,
+                  ),
+                ],
+        );
+        await store.importNetworkPackage(
+          bytes,
+          expectedPackageHash: fp.packageHash,
+        );
+      } catch (_) {}
+    }
   }
 
   // ---- broadcast ----

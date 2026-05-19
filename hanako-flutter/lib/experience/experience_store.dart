@@ -28,6 +28,32 @@ class ExperienceStore {
     await cacheDir.create(recursive: true);
   }
 
+  Future<ReviewedExperiencePackage?> readReviewedCachedPackage(
+    String experienceId, {
+    ExperienceReviewTrustAnchor? trustAnchor,
+    DateTime? now,
+  }) async {
+    await init();
+    _validateExperienceId(experienceId);
+    final cacheFile = File(p.join(cacheDir.path, '$experienceId.hxp'));
+    if (!await cacheFile.exists()) return null;
+    final bytes = await cacheFile.readAsBytes();
+    if (bytes.isEmpty) return null;
+    final info = _readOuterPackage(bytes);
+    final verification = _verifyReviewedOuterPackage(
+      info,
+      trustAnchor: trustAnchor,
+      now: now,
+    );
+    if (!verification.ok) return null;
+    return ReviewedExperiencePackage(
+      experienceId: info.publisher.experienceId,
+      packageHash: info.publisher.packageHash,
+      hxpBytes: bytes,
+      publisher: info.publisher,
+    );
+  }
+
   Future<ExperienceSaveResult> savePrivateExperience({
     required String title,
     required String conversation,
@@ -252,6 +278,7 @@ class ExperienceStore {
     Uint8List hxpBytes, {
     ExperienceReviewTrustAnchor? trustAnchor,
     DateTime? now,
+    String expectedPackageHash = '',
   }) async {
     await init();
     late final _OuterPackageInfo info;
@@ -267,6 +294,11 @@ class ExperienceStore {
     );
     if (!verification.ok) {
       return ExperienceImportResult.failed(verification.message);
+    }
+    final expectedHash = _normalizePackageHashForCheck(expectedPackageHash);
+    if (expectedHash.isNotEmpty &&
+        !_stringsEqualIgnoreCase(info.publisher.packageHash, expectedHash)) {
+      return ExperienceImportResult.failed('下载到的经验包 Hash 与预期不一致');
     }
     final id = info.publisher.experienceId;
     _validateExperienceId(id);
@@ -1195,8 +1227,7 @@ class ExperienceDemandPullWorkflow {
     if (bytes == null &&
         keyPair != null &&
         requesterPeerId != null &&
-        offer.availableTransports
-            .contains(ExperienceTransport.ipv4HolePunch) &&
+        offer.availableTransports.contains(ExperienceTransport.ipv4HolePunch) &&
         offer.providerAddrs.any((e) => !e.isIPv6 && e.isValid)) {
       bytes = await _tryHolePunchTransfer(
         offer,
@@ -1833,6 +1864,20 @@ class ExperienceImportResult {
   final String? path;
   final String? cachePath;
   final String? packageHash;
+}
+
+class ReviewedExperiencePackage {
+  const ReviewedExperiencePackage({
+    required this.experienceId,
+    required this.packageHash,
+    required this.hxpBytes,
+    required this.publisher,
+  });
+
+  final String experienceId;
+  final String packageHash;
+  final Uint8List hxpBytes;
+  final ExperiencePublisher publisher;
 }
 
 class ExperienceSearchResult {

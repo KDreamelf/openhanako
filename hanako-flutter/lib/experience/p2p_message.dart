@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'experience_network.dart';
+import 'package:crypto/crypto.dart' as crypto;
+
+import '../identity/keypair.dart';
 
 enum P2pMessageType {
   demand,
@@ -43,10 +45,7 @@ class P2pEnvelope {
       final json = utf8.decode(data.sublist(12, 12 + payloadLen));
       final map = jsonDecode(json);
       if (map is! Map<String, dynamic>) return null;
-      return P2pEnvelope(
-        type: P2pMessageType.values[typeIndex],
-        payload: map,
-      );
+      return P2pEnvelope(type: P2pMessageType.values[typeIndex], payload: map);
     } catch (_) {
       return null;
     }
@@ -102,7 +101,7 @@ class P2pDemandPacket {
 
   final String demandId;
   final String requesterPubKey;
-  final String signature;
+  String signature;
   final String query;
   final List<String> tags;
   final int maxResponses;
@@ -120,6 +119,27 @@ class P2pDemandPacket {
     'forwardPath': forwardPath.map((e) => e.toJson()).toList(),
   };
 
+  Map<String, dynamic> signingPayload() => {
+    'demandId': demandId,
+    'requesterPubKey': requesterPubKey,
+    'query': query,
+    'tags': tags,
+    'maxResponses': maxResponses,
+    'createdAt': createdAt,
+  };
+
+  void signWith(HanakoKeyPair keyPair) {
+    signature = _signJson(keyPair, signingPayload());
+  }
+
+  bool verifySignature() {
+    return _verifyJson(
+      publicKeyHex: requesterPubKey,
+      signatureHex: signature,
+      payload: signingPayload(),
+    );
+  }
+
   static P2pDemandPacket? fromJson(Map<String, dynamic> json) {
     final demandId = json['demandId'];
     final requesterPubKey = json['requesterPubKey'];
@@ -136,10 +156,11 @@ class P2pDemandPacket {
       requesterPubKey: requesterPubKey,
       signature: signature,
       query: query,
-      tags: (json['tags'] as List?)?.cast<String>() ?? const [],
+      tags: _stringList(json['tags']),
       maxResponses: (json['maxResponses'] as int?) ?? 3,
       createdAt: (json['createdAt'] as int?) ?? 0,
-      forwardPath: (json['forwardPath'] as List?)
+      forwardPath:
+          (json['forwardPath'] as List?)
               ?.map(P2pPathEntry.fromJson)
               .whereType<P2pPathEntry>()
               .toList() ??
@@ -153,16 +174,19 @@ class P2pPackageFingerprint {
     required this.packageHash,
     required this.sizeBytes,
     this.title = '',
+    this.cacheBaseUrl = '',
   });
 
   final String packageHash;
   final int sizeBytes;
   final String title;
+  final String cacheBaseUrl;
 
   Map<String, dynamic> toJson() => {
     'packageHash': packageHash,
     'sizeBytes': sizeBytes,
     'title': title,
+    if (cacheBaseUrl.trim().isNotEmpty) 'cacheBaseUrl': cacheBaseUrl.trim(),
   };
 
   static P2pPackageFingerprint? fromJson(Object? raw) {
@@ -173,6 +197,7 @@ class P2pPackageFingerprint {
       packageHash: hash,
       sizeBytes: (raw['sizeBytes'] as int?) ?? 0,
       title: (raw['title'] as String?) ?? '',
+      cacheBaseUrl: (raw['cacheBaseUrl'] as String?)?.trim() ?? '',
     );
   }
 }
@@ -185,17 +210,15 @@ class P2pResponsePacket {
     required this.fingerprints,
     List<P2pPathEntry>? forwardPath,
     List<P2pPathEntry>? returnPath,
-    this.packageData,
   }) : forwardPath = forwardPath ?? [],
        returnPath = returnPath ?? [];
 
   final String demandId;
   final String providerPubKey;
-  final String providerSig;
+  String providerSig;
   final List<P2pPackageFingerprint> fingerprints;
   final List<P2pPathEntry> forwardPath;
   final List<P2pPathEntry> returnPath;
-  final Uint8List? packageData;
 
   Map<String, dynamic> toJson() => {
     'demandId': demandId,
@@ -204,8 +227,26 @@ class P2pResponsePacket {
     'fingerprints': fingerprints.map((f) => f.toJson()).toList(),
     'forwardPath': forwardPath.map((e) => e.toJson()).toList(),
     'returnPath': returnPath.map((e) => e.toJson()).toList(),
-    if (packageData != null) 'packageData': base64Encode(packageData!),
   };
+
+  Map<String, dynamic> signingPayload() => {
+    'demandId': demandId,
+    'providerPubKey': providerPubKey,
+    'fingerprints': fingerprints.map((f) => f.toJson()).toList(),
+    'forwardPath': forwardPath.map((e) => e.toJson()).toList(),
+  };
+
+  void signWith(HanakoKeyPair keyPair) {
+    providerSig = _signJson(keyPair, signingPayload());
+  }
+
+  bool verifySignature() {
+    return _verifyJson(
+      publicKeyHex: providerPubKey,
+      signatureHex: providerSig,
+      payload: signingPayload(),
+    );
+  }
 
   static P2pResponsePacket? fromJson(Map<String, dynamic> json) {
     final demandId = json['demandId'];
@@ -216,39 +257,34 @@ class P2pResponsePacket {
         providerSig is! String) {
       return null;
     }
-    Uint8List? data;
-    final rawData = json['packageData'];
-    if (rawData is String && rawData.isNotEmpty) {
-      try {
-        data = base64Decode(rawData);
-      } catch (_) {}
-    }
     return P2pResponsePacket(
       demandId: demandId,
       providerPubKey: providerPubKey,
       providerSig: providerSig,
-      fingerprints: (json['fingerprints'] as List?)
+      fingerprints:
+          (json['fingerprints'] as List?)
               ?.map(P2pPackageFingerprint.fromJson)
               .whereType<P2pPackageFingerprint>()
               .toList() ??
           const [],
-      forwardPath: (json['forwardPath'] as List?)
+      forwardPath:
+          (json['forwardPath'] as List?)
               ?.map(P2pPathEntry.fromJson)
               .whereType<P2pPathEntry>()
               .toList() ??
           const [],
-      returnPath: (json['returnPath'] as List?)
+      returnPath:
+          (json['returnPath'] as List?)
               ?.map(P2pPathEntry.fromJson)
               .whereType<P2pPathEntry>()
               .toList() ??
           const [],
-      packageData: data,
     );
   }
 }
 
 class P2pOfferAnnounce {
-  const P2pOfferAnnounce({
+  P2pOfferAnnounce({
     required this.demandId,
     required this.providedPackageHashes,
     required this.providerPubKey,
@@ -258,7 +294,7 @@ class P2pOfferAnnounce {
   final String demandId;
   final List<String> providedPackageHashes;
   final String providerPubKey;
-  final String providerSig;
+  String providerSig;
 
   Map<String, dynamic> toJson() => {
     'demandId': demandId,
@@ -266,6 +302,24 @@ class P2pOfferAnnounce {
     'providerPubKey': providerPubKey,
     'providerSig': providerSig,
   };
+
+  Map<String, dynamic> signingPayload() => {
+    'demandId': demandId,
+    'providedPackageHashes': providedPackageHashes,
+    'providerPubKey': providerPubKey,
+  };
+
+  void signWith(HanakoKeyPair keyPair) {
+    providerSig = _signJson(keyPair, signingPayload());
+  }
+
+  bool verifySignature() {
+    return _verifyJson(
+      publicKeyHex: providerPubKey,
+      signatureHex: providerSig,
+      payload: signingPayload(),
+    );
+  }
 
   static P2pOfferAnnounce? fromJson(Map<String, dynamic> json) {
     final demandId = json['demandId'];
@@ -278,10 +332,84 @@ class P2pOfferAnnounce {
     }
     return P2pOfferAnnounce(
       demandId: demandId,
-      providedPackageHashes:
-          (json['providedPackageHashes'] as List?)?.cast<String>() ?? const [],
+      providedPackageHashes: _stringList(json['providedPackageHashes']),
       providerPubKey: providerPubKey,
       providerSig: providerSig,
     );
   }
+}
+
+String p2pPeerIdFromPublicKey(String publicKeyHex) {
+  try {
+    return crypto.sha256.convert(_hexDecode(publicKeyHex)).toString();
+  } catch (_) {
+    return '';
+  }
+}
+
+String _signJson(HanakoKeyPair keyPair, Map<String, dynamic> payload) {
+  final bytes = Uint8List.fromList(utf8.encode(_canonicalJson(payload)));
+  return _hexEncode(keyPair.sign(bytes));
+}
+
+bool _verifyJson({
+  required String publicKeyHex,
+  required String signatureHex,
+  required Map<String, dynamic> payload,
+}) {
+  try {
+    return HanakoKeyPair.verify(
+      message: Uint8List.fromList(utf8.encode(_canonicalJson(payload))),
+      signature64: _hexDecode(signatureHex),
+      publicKeyBytes65: _hexDecode(publicKeyHex),
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+String _canonicalJson(Map<String, dynamic> value) =>
+    jsonEncode(_sortJson(value));
+
+Object? _sortJson(Object? value) {
+  if (value is Map) {
+    final out = <String, Object?>{};
+    final keys = value.keys.map((key) => key.toString()).toList()..sort();
+    for (final key in keys) {
+      out[key] = _sortJson(value[key]);
+    }
+    return out;
+  }
+  if (value is List) return value.map(_sortJson).toList(growable: false);
+  return value;
+}
+
+List<String> _stringList(Object? value) {
+  if (value is! List) return const [];
+  return value
+      .whereType<String>()
+      .where((item) => item.trim().isNotEmpty)
+      .toList(growable: false);
+}
+
+String _hexEncode(Uint8List bytes) {
+  const chars = '0123456789abcdef';
+  final buf = StringBuffer();
+  for (final b in bytes) {
+    buf.write(chars[(b >> 4) & 0x0f]);
+    buf.write(chars[b & 0x0f]);
+  }
+  return buf.toString();
+}
+
+Uint8List _hexDecode(String hex) {
+  final clean = hex.trim().replaceAll(' ', '');
+  if (clean.length.isOdd) {
+    throw const FormatException('hex length must be even');
+  }
+  final out = Uint8List(clean.length ~/ 2);
+  for (var i = 0; i < out.length; i++) {
+    out[i] = int.parse(clean.substring(i * 2, i * 2 + 2), radix: 16);
+  }
+  return out;
 }
