@@ -98,16 +98,16 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}
 ; 不删 HANA_HOME（用户数据），仅清理 app 内安装文件
 Type: filesandordirs; Name: "{app}"
 
+[UninstallRun]
+; 卸载前杀掉可能在运行的 connector 进程，避免文件占用
+Filename: "taskkill.exe"; Parameters: "/F /IM python.exe /FI ""MODULES eq camoufox"""; Flags: runhidden; RunOnceId: "KillCamoufox"
+
 [Code]
 // ============================================================
 // Camoufox 浏览器环境自举
 //
-// 逻辑：
-//   1. 检测系统 PATH 中是否有 Python 3.10+ 和 uv
-//   2. 没有则解压内置的 Python embeddable + uv
-//   3. 用 uv 创建 venv 并安装 camoufox + camoufox-connector
-//   4. 解压内置 Camoufox 浏览器二进制到数据目录
-//   5. 写入 config.json 供客户端读取
+// 策略：总是使用内置 Python embeddable + uv 创建隔离 venv。
+// 不依赖系统 Python，避免版本/依赖冲突。
 // ============================================================
 
 var
@@ -116,34 +116,17 @@ var
   BrowserVenvDir: String;
   BrowserDataDir: String;
 
-function FindPythonInPath(): String;
+function EscapeJsonPath(const S: String): String;
 var
-  Output: String;
-  ResultCode: Integer;
+  I: Integer;
 begin
   Result := '';
-  if Exec('cmd.exe', '/C python --version 2>&1', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  for I := 1 to Length(S) do
   begin
-    if ResultCode = 0 then
-    begin
-      if Exec('cmd.exe', '/C where python', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-      begin
-        if ResultCode = 0 then
-          Result := 'python';
-      end;
-    end;
-  end;
-end;
-
-function FindUvInPath(): String;
-var
-  ResultCode: Integer;
-begin
-  Result := '';
-  if Exec('cmd.exe', '/C uv --version', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-  begin
-    if ResultCode = 0 then
-      Result := 'uv';
+    if S[I] = '\' then
+      Result := Result + '\\'
+    else
+      Result := Result + S[I];
   end;
 end;
 
@@ -154,7 +137,6 @@ var
 begin
   PythonDir := ExpandConstant('{app}\browser\python');
   ForceDirectories(PythonDir);
-  // 使用 PowerShell 解压 zip
   Exec('powershell.exe',
     '-NoProfile -Command "Expand-Archive -Force -Path ''' +
     ExpandConstant('{tmp}\python-3.12-embed-amd64.zip') +
@@ -184,12 +166,15 @@ begin
   BrowserVenvDir := ExpandConstant('{app}\browser\venv');
   VenvPython := BrowserVenvDir + '\Scripts\python.exe';
 
-  // 创建 venv
+  // uv 不依赖系统 pip，可以直接对 embeddable Python 创建 venv
   Exec(BrowserUv, 'venv "' + BrowserVenvDir + '" --python "' + BrowserPython + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-  // 安装 camoufox + connector（使用国内镜像加速）
-  Exec(BrowserUv, 'pip install --python "' + VenvPython + '" -i https://mirrors.aliyun.com/pypi/simple/ camoufox[geoip] camoufox-connector',
+  // 安装 camoufox + connector（阿里云镜像 + 隔离 venv）
+  Exec(BrowserUv, 'pip install --python "' + VenvPython +
+    '" -i https://mirrors.aliyun.com/pypi/simple/' +
+    ' --trusted-host mirrors.aliyun.com' +
+    ' camoufox[geoip] camoufox-connector',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
@@ -204,9 +189,9 @@ begin
   BrowserDataDir := ExpandConstant('{app}\browser\camoufox-data');
   ConfigContent :=
     '{' + #13#10 +
-    '  "venvPython": "' + VenvPython + '",' + #13#10 +
+    '  "venvPython": "' + EscapeJsonPath(VenvPython) + '",' + #13#10 +
     '  "connectorModule": "camoufox_connector",' + #13#10 +
-    '  "browserDataDir": "' + BrowserDataDir + '",' + #13#10 +
+    '  "browserDataDir": "' + EscapeJsonPath(BrowserDataDir) + '",' + #13#10 +
     '  "defaultPort": 0,' + #13#10 +
     '  "headless": "virtual"' + #13#10 +
     '}';
@@ -214,37 +199,22 @@ begin
 end;
 
 procedure PrepareBrowserEnvironment();
-var
-  SystemPython: String;
-  SystemUv: String;
 begin
   WizardForm.StatusLabel.Caption := '正在配置浏览器环境...';
 
-  // 1. Python
-  SystemPython := FindPythonInPath();
-  if SystemPython <> '' then
-    BrowserPython := SystemPython
-  else
-  begin
-    WizardForm.StatusLabel.Caption := '正在解压内置 Python...';
-    ExtractBundledPython();
-  end;
+  // 1. 总是使用内置 Python（隔离，不污染系统环境）
+  WizardForm.StatusLabel.Caption := '正在解压内置 Python...';
+  ExtractBundledPython();
 
-  // 2. uv
-  SystemUv := FindUvInPath();
-  if SystemUv <> '' then
-    BrowserUv := SystemUv
-  else
-  begin
-    BrowserUv := ExpandConstant('{app}\browser\uv.exe');
-    FileCopy(ExpandConstant('{tmp}\uv.exe'), BrowserUv, False);
-  end;
+  // 2. 总是使用内置 uv
+  BrowserUv := ExpandConstant('{app}\browser\uv.exe');
+  FileCopy(ExpandConstant('{tmp}\uv.exe'), BrowserUv, False);
 
   // 3. venv + packages
   WizardForm.StatusLabel.Caption := '正在安装 Camoufox 依赖...';
   SetupBrowserVenv();
 
-  // 4. Camoufox 浏览器二进制
+  // 4. Camoufox 浏览器二进制（安装包内置，不走网络）
   WizardForm.StatusLabel.Caption := '正在解压 Camoufox 浏览器...';
   ExtractBundledCamoufox();
 

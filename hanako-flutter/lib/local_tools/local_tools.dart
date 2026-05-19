@@ -188,6 +188,14 @@ class LocalToolRegistry {
       };
     }
     await browserManager.start();
+    if (!browserManager.isRunning) {
+      return {
+        'ok': false,
+        'error': 'camoufox_not_available',
+        'message': 'Camoufox 浏览器未安装或启动失败。web_search 需要 Camoufox 才能执行。'
+            ' 可以先用 web_fetch 读取已知 URL。',
+      };
+    }
     final encodedQuery = Uri.encodeComponent(query);
     final navResult = await browserManager.execute({
       'action': 'navigate',

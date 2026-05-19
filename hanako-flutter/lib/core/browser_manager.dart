@@ -142,9 +142,23 @@ class BrowserManager {
       _connectorProcess = null;
     });
 
-    // 等待 WS 就绪
+    // 等待 WS 就绪（带 connector 进程存活检查）
     final deadline = DateTime.now().add(const Duration(seconds: 30));
     while (DateTime.now().isBefore(deadline)) {
+      // 如果 connector 进程已退出，不再等待
+      final proc = _connectorProcess;
+      if (proc == null) break;
+      final exited = proc.exitCode;
+      if (exited is Future<int>) {
+        final done = await Future.any([
+          exited.then((_) => true),
+          Future.delayed(const Duration(milliseconds: 100), () => false),
+        ]);
+        if (done) {
+          _connectorProcess = null;
+          break;
+        }
+      }
       try {
         _ws = await WebSocket.connect('ws://localhost:$_wsPort')
             .timeout(const Duration(seconds: 2));
