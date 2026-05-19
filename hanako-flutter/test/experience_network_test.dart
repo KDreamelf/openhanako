@@ -983,6 +983,234 @@ void main() {
     expect(providers.single.endpoints.single.requiresHolePunch, isTrue);
   });
 
+  test('客户端可从 DHT 查询活跃 peer 并过滤不可用记录', () async {
+    final dio = Dio();
+    dio.httpClientAdapter = _StaticAdapter((options) async {
+      expect(options.method, 'GET');
+      expect(options.uri.path, '/api/v1/peers');
+      expect(options.uri.queryParameters['limit'], '50');
+      return ResponseBody.fromString(
+        jsonEncode({
+          'items': [
+            {
+              'peer_id': 'peer_active',
+              'endpoints': [
+                {
+                  'network': 'udp',
+                  'host': '198.51.100.2',
+                  'port': 41002,
+                  'requires_hole_punch': true,
+                },
+              ],
+              'package_hashes': ['sha256:abc'],
+              'expires_at': '2026-05-09T10:00:00Z',
+              'updated_at': '2026-05-09T09:55:00Z',
+            },
+            {
+              'peer_id': 'expired_peer',
+              'endpoints': [
+                {'network': 'udp', 'host': '198.51.100.3', 'port': 41003},
+              ],
+              'expires_at': '2026-05-09T08:55:00Z',
+              'updated_at': '2026-05-09T08:50:00Z',
+            },
+            {
+              'peer_id': 'no_endpoint',
+              'endpoints': [],
+              'expires_at': '2026-05-09T10:00:00Z',
+              'updated_at': '2026-05-09T09:55:00Z',
+            },
+            {
+              'peer_id': '',
+              'endpoints': [
+                {'network': 'udp', 'host': '198.51.100.4', 'port': 41004},
+              ],
+              'expires_at': '2026-05-09T10:00:00Z',
+              'updated_at': '2026-05-09T09:55:00Z',
+            },
+          ],
+          'total': 4,
+        }),
+        200,
+        headers: {
+          Headers.contentTypeHeader: [Headers.jsonContentType],
+        },
+      );
+    });
+    final client = ExperienceDhtHttpClient(
+      dhtBaseUrl: 'https://dht.test/',
+      dio: dio,
+    );
+
+    final peers = await client.fetchActivePeers(
+      limit: 50,
+      now: DateTime.utc(2026, 5, 9, 9),
+    );
+
+    expect(peers.map((item) => item.peerId).toList(), ['peer_active']);
+    expect(peers.single.endpoints.single.isUdpCandidate, isTrue);
+  });
+
+  test('P2P gossip demand 签名可验，篡改查询后失败', () {
+    final requester = HanakoKeyPair.generate();
+    final demand = P2pDemandPacket(
+      demandId: 'dem_p2p',
+      requesterPubKey: requester.publicKeyHex,
+      signature: '',
+      query: '窗口自动化经验',
+      tags: const ['窗口', '自动化'],
+      maxResponses: 2,
+      createdAt: DateTime.utc(2026, 5, 9, 9).millisecondsSinceEpoch,
+    )..signWith(requester);
+
+    final decoded = P2pDemandPacket.fromJson(demand.toJson());
+    expect(decoded, isNotNull);
+    expect(decoded!.signature, isNotEmpty);
+    expect(decoded.verifySignature(), isTrue);
+
+    final tamperedJson = Map<String, dynamic>.from(demand.toJson())
+      ..['query'] = '别的查询';
+    final tampered = P2pDemandPacket.fromJson(tamperedJson);
+    expect(tampered, isNotNull);
+    expect(tampered!.verifySignature(), isFalse);
+
+    final dirty = P2pDemandPacket.fromJson({
+      ...demand.toJson(),
+      'tags': ['ok', 123, '', null],
+    });
+    expect(dirty?.tags, ['ok']);
+  });
+
+  test('P2P gossip response 只签名包指纹，不携带 UDP 包体', () {
+    final provider = HanakoKeyPair.generate();
+    final response = P2pResponsePacket(
+      demandId: 'dem_p2p',
+      providerPubKey: provider.publicKeyHex,
+      providerSig: '',
+      fingerprints: const [
+        P2pPackageFingerprint(
+          packageHash: 'sha256:abc',
+          sizeBytes: 1234,
+          title: '窗口经验',
+        ),
+      ],
+      forwardPath: const [
+        P2pPathEntry(
+          nodeId: 'requester',
+          host: '198.51.100.10',
+          port: 41001,
+          timestamp: 1778323200000,
+        ),
+      ],
+    )..signWith(provider);
+
+    final json = response.toJson();
+    expect(json.containsKey('packageData'), isFalse);
+    final decoded = P2pResponsePacket.fromJson(json);
+    expect(decoded, isNotNull);
+    expect(decoded!.verifySignature(), isTrue);
+
+    decoded.returnPath.add(
+      const P2pPathEntry(
+        nodeId: 'relay',
+        host: '198.51.100.20',
+        port: 41002,
+        timestamp: 1778323201000,
+      ),
+    );
+    expect(decoded.verifySignature(), isTrue);
+
+    final tamperedJson = Map<String, dynamic>.from(json)
+      ..['fingerprints'] = [
+        {
+          'packageHash': 'sha256:tampered',
+          'sizeBytes': 1234,
+          'title': '窗口经验',
+        },
+      ];
+    final tampered = P2pResponsePacket.fromJson(tamperedJson);
+    expect(tampered, isNotNull);
+    expect(tampered!.verifySignature(), isFalse);
+  });
+
+  test('P2P 缓存导入会拒绝与签名指纹不一致的经验包', () async {
+    final tmp = Directory.systemTemp.createTempSync('hanako_p2p_hash_guard_');
+    addTearDown(() {
+      if (tmp.existsSync()) tmp.deleteSync(recursive: true);
+    });
+
+    final source = ExperienceStore(agentDir: Directory('${tmp.path}/source'));
+    final keyPair = HanakoKeyPair.generate();
+    final saved = await source.savePrivateExperience(
+      title: 'P2P Hash Guard',
+      conversation: '[2026-05-09T00:00:00Z] 用户: 指纹保护\n',
+      now: DateTime.utc(2026, 5, 9, 1, 2, 3),
+    );
+    final generated = await source.packagePrivateExperience(
+      experienceId: saved.experienceId,
+      keyPair: keyPair,
+    );
+    final review = _reviewFixture(generated.publisher);
+    final attached = await source.attachReviewMaterialsToPrivatePackage(
+      experienceId: saved.experienceId,
+      reviewMaterials: review.materials,
+      trustAnchor: review.anchor,
+      now: DateTime.utc(2026, 5, 9),
+    );
+    final bytes = File(attached.cachePath!).readAsBytesSync();
+    final target = ExperienceStore(agentDir: Directory('${tmp.path}/target'));
+
+    final mismatch = await target.importNetworkPackage(
+      bytes,
+      trustAnchor: review.anchor,
+      expectedPackageHash:
+          'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+      now: DateTime.utc(2026, 5, 9),
+    );
+    expect(mismatch.ok, isFalse);
+    expect(
+      Directory(
+        '${tmp.path}/target/experience/network/${saved.experienceId}',
+      ).existsSync(),
+      isFalse,
+    );
+
+    final imported = await target.importNetworkPackage(
+      bytes,
+      trustAnchor: review.anchor,
+      expectedPackageHash: generated.packageHash,
+      now: DateTime.utc(2026, 5, 9),
+    );
+    expect(imported.ok, isTrue);
+    expect(imported.packageHash, generated.packageHash);
+  });
+
+  test('P2P offer announce 签名可验，篡改 hash 后失败', () {
+    final provider = HanakoKeyPair.generate();
+    final announce = P2pOfferAnnounce(
+      demandId: 'dem_p2p',
+      providedPackageHashes: const ['sha256:abc'],
+      providerPubKey: provider.publicKeyHex,
+      providerSig: '',
+    )..signWith(provider);
+
+    final decoded = P2pOfferAnnounce.fromJson(announce.toJson());
+    expect(decoded, isNotNull);
+    expect(decoded!.verifySignature(), isTrue);
+
+    final tamperedJson = Map<String, dynamic>.from(announce.toJson())
+      ..['providedPackageHashes'] = ['sha256:def'];
+    final tampered = P2pOfferAnnounce.fromJson(tamperedJson);
+    expect(tampered, isNotNull);
+    expect(tampered!.verifySignature(), isFalse);
+
+    final dirty = P2pOfferAnnounce.fromJson({
+      ...announce.toJson(),
+      'providedPackageHashes': ['sha256:abc', 99, '', null],
+    });
+    expect(dirty?.providedPackageHashes, ['sha256:abc']);
+  });
+
   test('P2P 包请求与供给响应 JSON 保留签名和传输字段', () {
     final timestamp = DateTime.utc(2026, 5, 9, 9);
     final request = ExperiencePackageRequest(

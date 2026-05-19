@@ -118,6 +118,8 @@ class P2pChunkAssembler {
 
   static const _maxPendingAge = Duration(minutes: 5);
 
+  bool hasExpected(String transferId) => _pending.containsKey(transferId);
+
   /// 注册一个传输接收。收齐后调 onComplete。
   void expect(String transferId, {required void Function(Uint8List data, String packageHash) onComplete}) {
     _pending[transferId] = _PendingTransfer(

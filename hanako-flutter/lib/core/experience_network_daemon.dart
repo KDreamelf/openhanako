@@ -84,6 +84,7 @@ class ExperienceNetworkDaemon {
       keyPair: identity.keyPair,
       store: store,
       dhtClient: dhtClient,
+      dhtNodeId: _cachedDhtNodeId ?? '',
     );
     await overlay.start();
     _overlay = overlay;
@@ -184,6 +185,7 @@ class ExperienceNetworkDaemon {
 
   ExperienceNetworkManagerClient? _managerClient;
   ExperienceDhtHttpClient? _cachedDhtClient;
+  String? _cachedDhtNodeId;
   DateTime? _nextDhtResolveAttempt;
 
   Future<ExperienceDhtHttpClient?> _resolveDhtClient() async {
@@ -209,6 +211,7 @@ class ExperienceNetworkDaemon {
         return null;
       }
       _cachedDhtClient = ExperienceDhtHttpClient(dhtBaseUrl: url);
+      _cachedDhtNodeId = best.nodeId;
       _dhtResolveFailures = 0;
       _nextDhtResolveAttempt = null;
       return _cachedDhtClient;

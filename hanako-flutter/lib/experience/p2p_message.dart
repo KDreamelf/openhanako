@@ -174,19 +174,16 @@ class P2pPackageFingerprint {
     required this.packageHash,
     required this.sizeBytes,
     this.title = '',
-    this.cacheBaseUrl = '',
   });
 
   final String packageHash;
   final int sizeBytes;
   final String title;
-  final String cacheBaseUrl;
 
   Map<String, dynamic> toJson() => {
     'packageHash': packageHash,
     'sizeBytes': sizeBytes,
     'title': title,
-    if (cacheBaseUrl.trim().isNotEmpty) 'cacheBaseUrl': cacheBaseUrl.trim(),
   };
 
   static P2pPackageFingerprint? fromJson(Object? raw) {
@@ -197,7 +194,6 @@ class P2pPackageFingerprint {
       packageHash: hash,
       sizeBytes: (raw['sizeBytes'] as int?) ?? 0,
       title: (raw['title'] as String?) ?? '',
-      cacheBaseUrl: (raw['cacheBaseUrl'] as String?)?.trim() ?? '',
     );
   }
 }

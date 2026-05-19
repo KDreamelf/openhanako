@@ -18,6 +18,7 @@ class ExperienceP2pOverlay {
     required this.keyPair,
     required this.store,
     required this.dhtClient,
+    required this.dhtNodeId,
     int bindPort = 0,
   }) : transport = P2pTransport(bindPort: bindPort),
        neighborTable = NeighborTable(localNodeId: localNodeId);
@@ -26,6 +27,7 @@ class ExperienceP2pOverlay {
   final HanakoKeyPair keyPair;
   final ExperienceStore store;
   final ExperienceDhtHttpClient dhtClient;
+  final String dhtNodeId;
   final P2pTransport transport;
   final NeighborTable neighborTable;
 
@@ -300,11 +302,17 @@ class ExperienceP2pOverlay {
     final chunk = P2pChunk.fromJson(payload);
     if (chunk == null) return;
 
-    final complete = _assembler.receive(chunk);
-    if (complete) {
-      // 转发即持有：中间客户端节点收到完整包也导入。
-      // （_assembler.expect 的 onComplete 回调会处理 requester 的导入；
-      //   这里处理中间节点的"路过缓存"。）
+    _assembler.receive(chunk);
+
+    // 转发即持有（§6.1）：不管是 requester 还是中间节点，assembler 收齐后
+    // 都会触发 onComplete 导入。但如果这个 transferId 是别人发起的传输
+    // 经过本节点（中间节点路过的分片），没有预注册 expect，需要注册一个
+    // 默认的 onComplete 来做路过缓存。
+    if (!_assembler.hasExpected(chunk.transferId)) {
+      _assembler.expect(chunk.transferId, onComplete: (data, hash) {
+        unawaited(store.importNetworkPackage(data));
+        _localPackageCache[hash] = data;
+      });
     }
   }
 
@@ -339,7 +347,7 @@ class ExperienceP2pOverlay {
       final now = DateTime.now().toUtc().toIso8601String();
       final flower = DHTServiceFlower(
         flowerId: _uuid.v4(),
-        nodeId: dhtClient.dhtBaseUrl,
+        nodeId: dhtNodeId,
         clientPubkeyHex: keyPair.publicKeyHex,
         clientPubkeyHash: keyPair.publicKeyHash,
         resourceHash: packageHash,
