@@ -73,11 +73,13 @@ Source: "..\build\windows\x64\runner\Release\models\windows_ops\ocr\text-detecti
 Source: "..\build\windows\x64\runner\Release\models\windows_ops\ocr\text-recognition.rten"; DestDir: "{app}\models\windows_ops\ocr"; Flags: ignoreversion
 
 ; ---- Camoufox 浏览器环境（内置兜底） ----
-; Python embeddable + uv：仅在系统无合适 Python/uv 时使用
+; Python embeddable + uv：始终使用内置环境，避免污染系统 Python
 Source: "bundled\python-3.12-embed-amd64.zip"; DestDir: "{tmp}"; Flags: ignoreversion deleteafterinstall
 Source: "bundled\uv.exe"; DestDir: "{tmp}"; Flags: ignoreversion deleteafterinstall
 ; Camoufox 浏览器二进制（提前从镜像下载，不走官方 CDN）
 Source: "bundled\camoufox-browser-win64.zip"; DestDir: "{tmp}"; Flags: ignoreversion deleteafterinstall nocompression
+; Hanako 浏览器桥：Dart <-> JSONL <-> Python Playwright/Camoufox
+Source: "hanako_browser_bridge.py"; DestDir: "{app}\browser"; Flags: ignoreversion
 
 [Registry]
 Root: HKCR; Subkey: "ph01"; ValueType: string; ValueData: "URL:PH01 Login Protocol"; Flags: uninsdeletekey
@@ -99,8 +101,8 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}
 Type: filesandordirs; Name: "{app}"
 
 [UninstallRun]
-; 卸载前杀掉可能在运行的 connector 进程，避免文件占用
-Filename: "taskkill.exe"; Parameters: "/F /IM python.exe /FI ""MODULES eq camoufox"""; Flags: runhidden; RunOnceId: "KillCamoufox"
+; 卸载前尽量结束可能在运行的浏览器桥进程，避免文件占用
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""$app = '{app}'; Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -and ($_.CommandLine -like ('*' + $app + '\browser\hanako_browser_bridge.py*') -or $_.CommandLine -like ('*' + $app + '\browser\venv\Scripts\python.exe*')) }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"""; Flags: runhidden; RunOnceId: "KillHanakoBrowserBridge"
 
 [Code]
 // ============================================================
@@ -115,6 +117,54 @@ var
   BrowserUv: String;
   BrowserVenvDir: String;
   BrowserDataDir: String;
+  BrowserExecutable: String;
+
+procedure CheckStepResult(const StepName: String; const Ok: Boolean; const ResultCode: Integer);
+begin
+  if (not Ok) or (ResultCode <> 0) then
+  begin
+    RaiseException(StepName + ' failed, exit code=' + IntToStr(ResultCode));
+  end;
+end;
+
+function FindFileRecursive(const RootDir: String; const FileName: String): String;
+var
+  FindRec: TFindRec;
+  ChildPath: String;
+begin
+  Result := '';
+  if FindFirst(RootDir + '\*', FindRec) then
+  begin
+    try
+      repeat
+        if (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+        begin
+          ChildPath := RootDir + '\' + FindRec.Name;
+          if DirExists(ChildPath) then
+          begin
+            Result := FindFileRecursive(ChildPath, FileName);
+            if Result <> '' then
+              Exit;
+          end
+          else if CompareText(FindRec.Name, FileName) = 0 then
+          begin
+            Result := ChildPath;
+            Exit;
+          end;
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
+function FindBrowserExecutable(const RootDir: String): String;
+begin
+  Result := FindFileRecursive(RootDir, 'camoufox.exe');
+  if Result = '' then
+    Result := FindFileRecursive(RootDir, 'firefox.exe');
+end;
 
 function EscapeJsonPath(const S: String): String;
 var
@@ -134,48 +184,60 @@ procedure ExtractBundledPython();
 var
   PythonDir: String;
   ResultCode: Integer;
+  Ok: Boolean;
 begin
   PythonDir := ExpandConstant('{app}\browser\python');
   ForceDirectories(PythonDir);
-  Exec('powershell.exe',
+  Ok := Exec('powershell.exe',
     '-NoProfile -Command "Expand-Archive -Force -Path ''' +
     ExpandConstant('{tmp}\python-3.12-embed-amd64.zip') +
     ''' -DestinationPath ''' + PythonDir + '''"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  CheckStepResult('Extract bundled Python', Ok, ResultCode);
   BrowserPython := PythonDir + '\python.exe';
 end;
 
 procedure ExtractBundledCamoufox();
 var
   ResultCode: Integer;
+  Ok: Boolean;
 begin
   BrowserDataDir := ExpandConstant('{app}\browser\camoufox-data');
   ForceDirectories(BrowserDataDir);
-  Exec('powershell.exe',
+  Ok := Exec('powershell.exe',
     '-NoProfile -Command "Expand-Archive -Force -Path ''' +
     ExpandConstant('{tmp}\camoufox-browser-win64.zip') +
     ''' -DestinationPath ''' + BrowserDataDir + '''"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  CheckStepResult('Extract bundled Camoufox', Ok, ResultCode);
+  BrowserExecutable := FindBrowserExecutable(BrowserDataDir);
+  if not FileExists(BrowserExecutable) then
+    RaiseException('Camoufox executable not found in bundled browser directory.');
 end;
 
 procedure SetupBrowserVenv();
 var
   ResultCode: Integer;
   VenvPython: String;
+  Ok: Boolean;
 begin
   BrowserVenvDir := ExpandConstant('{app}\browser\venv');
   VenvPython := BrowserVenvDir + '\Scripts\python.exe';
 
   // uv 不依赖系统 pip，可以直接对 embeddable Python 创建 venv
-  Exec(BrowserUv, 'venv "' + BrowserVenvDir + '" --python "' + BrowserPython + '"',
+  Ok := Exec(BrowserUv, 'venv "' + BrowserVenvDir + '" --python "' + BrowserPython + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  CheckStepResult('Create browser venv', Ok, ResultCode);
+  if not FileExists(VenvPython) then
+    RaiseException('Browser venv python.exe was not created.');
 
-  // 安装 camoufox + connector（阿里云镜像 + 隔离 venv）
-  Exec(BrowserUv, 'pip install --python "' + VenvPython +
+  // 安装 camoufox（阿里云镜像 + 隔离 venv）；Dart 通过 Hanako 自有 JSONL 桥调用 Playwright。
+  Ok := Exec(BrowserUv, 'pip install --python "' + VenvPython +
     '" -i https://mirrors.aliyun.com/pypi/simple/' +
     ' --trusted-host mirrors.aliyun.com' +
-    ' camoufox[geoip] camoufox-connector',
+    ' camoufox[geoip]',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  CheckStepResult('Install Camoufox Python packages', Ok, ResultCode);
 end;
 
 procedure WriteBrowserConfig();
@@ -187,13 +249,17 @@ begin
   ConfigPath := ExpandConstant('{app}\browser\config.json');
   VenvPython := BrowserVenvDir + '\Scripts\python.exe';
   BrowserDataDir := ExpandConstant('{app}\browser\camoufox-data');
+  BrowserExecutable := FindBrowserExecutable(BrowserDataDir);
+  if not FileExists(BrowserExecutable) then
+    RaiseException('Camoufox executable not found before writing browser config.');
   ConfigContent :=
     '{' + #13#10 +
     '  "venvPython": "' + EscapeJsonPath(VenvPython) + '",' + #13#10 +
-    '  "connectorModule": "camoufox_connector",' + #13#10 +
+    '  "bridgeScript": "' + EscapeJsonPath(ExpandConstant('{app}\browser\hanako_browser_bridge.py')) + '",' + #13#10 +
     '  "browserDataDir": "' + EscapeJsonPath(BrowserDataDir) + '",' + #13#10 +
-    '  "defaultPort": 0,' + #13#10 +
-    '  "headless": "virtual"' + #13#10 +
+    '  "browserExecutable": "' + EscapeJsonPath(BrowserExecutable) + '",' + #13#10 +
+    '  "headless": true,' + #13#10 +
+    '  "excludeDefaultAddons": true' + #13#10 +
     '}';
   SaveStringToFile(ConfigPath, ConfigContent, False);
 end;
@@ -208,7 +274,8 @@ begin
 
   // 2. 总是使用内置 uv
   BrowserUv := ExpandConstant('{app}\browser\uv.exe');
-  FileCopy(ExpandConstant('{tmp}\uv.exe'), BrowserUv, False);
+  if not FileCopy(ExpandConstant('{tmp}\uv.exe'), BrowserUv, False) then
+    RaiseException('Copy bundled uv.exe failed.');
 
   // 3. venv + packages
   WizardForm.StatusLabel.Caption := '正在安装 Camoufox 依赖...';

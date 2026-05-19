@@ -180,6 +180,7 @@ class LocalToolRegistry {
     BrowserManager? browserManager,
   ) async {
     final query = _requiredString(args, 'query');
+    final maxResults = _boundedInt(args['maxResults'], 10, 1, 20);
     if (browserManager == null) {
       return {
         'ok': false,
@@ -187,12 +188,23 @@ class LocalToolRegistry {
         'message': 'Browser 运行时尚未初始化。可以先用 web_fetch 读取已知 URL。',
       };
     }
-    await browserManager.start();
+    try {
+      await browserManager.start();
+    } catch (e) {
+      return {
+        'ok': false,
+        'error': 'camoufox_not_available',
+        'message':
+            'Camoufox 浏览器未安装或启动失败。web_search 需要 Camoufox 才能执行。'
+            ' 可以先用 web_fetch 读取已知 URL。启动错误：$e',
+      };
+    }
     if (!browserManager.isRunning) {
       return {
         'ok': false,
         'error': 'camoufox_not_available',
-        'message': 'Camoufox 浏览器未安装或启动失败。web_search 需要 Camoufox 才能执行。'
+        'message':
+            'Camoufox 浏览器未安装或启动失败。web_search 需要 Camoufox 才能执行。'
             ' 可以先用 web_fetch 读取已知 URL。',
       };
     }
@@ -202,11 +214,16 @@ class LocalToolRegistry {
       'url': 'https://www.bing.com/search?q=$encodedQuery',
     });
     if (navResult['ok'] != true) return navResult;
-    await browserManager.execute({'action': 'wait', 'timeout': 2000, 'state': 'networkidle'});
+    await browserManager.execute({
+      'action': 'wait',
+      'timeout': 2000,
+      'state': 'networkidle',
+    });
     final evalResult = await browserManager.execute({
       'action': 'evaluate',
-      'expression': '''
-        JSON.stringify(Array.from(document.querySelectorAll('.b_algo')).slice(0, 10).map(el => ({
+      'expression':
+          '''
+        JSON.stringify(Array.from(document.querySelectorAll('.b_algo')).slice(0, $maxResults).map(el => ({
           title: (el.querySelector('h2') || {}).textContent || '',
           url: (el.querySelector('a') || {}).href || '',
           snippet: (el.querySelector('.b_caption p, .b_lineclamp2') || {}).textContent || '',
@@ -217,12 +234,7 @@ class LocalToolRegistry {
     final rawJson = evalResult['message']?.toString() ?? '[]';
     try {
       final results = jsonDecode(rawJson);
-      return {
-        'ok': true,
-        'query': query,
-        'results': results,
-        'source': 'bing',
-      };
+      return {'ok': true, 'query': query, 'results': results, 'source': 'bing'};
     } catch (_) {
       return {
         'ok': true,
@@ -974,7 +986,7 @@ const _toolSpecs = <_ToolSpec>[
   _ToolSpec(
     name: LocalToolNames.webSearch,
     description:
-        '搜索互联网获取实时信息。仅在需要当前事件、最新数据或外部信息时使用；回答时应附上来源链接。当前 Flutter 客户端需要配置搜索 provider 后才能执行。',
+        '搜索互联网获取实时信息。仅在需要当前事件、最新数据或外部信息时使用；回答时应附上来源链接。当前客户端通过 Camoufox 浏览器执行，浏览器不可用时改用 web_fetch 读取已知 URL。',
     parameters: {
       'type': 'object',
       'additionalProperties': false,
@@ -1082,8 +1094,7 @@ const _toolSpecs = <_ToolSpec>[
   ),
   _ToolSpec(
     name: LocalToolNames.publishDemand,
-    description:
-        '向经验网络发布需求。描述你需要什么类型的经验，网络中持有匹配经验的节点会自动响应并传输经验包。',
+    description: '向经验网络发布需求。描述你需要什么类型的经验，网络中持有匹配经验的节点会自动响应并传输经验包。',
     parameters: {
       'type': 'object',
       'additionalProperties': false,
@@ -1177,6 +1188,7 @@ const _toolSpecs = <_ToolSpec>[
         },
         'url': {'type': 'string'},
         'ref': {'type': 'integer'},
+        'selector': {'type': 'string'},
         'text': {'type': 'string'},
         'direction': {
           'type': 'string',

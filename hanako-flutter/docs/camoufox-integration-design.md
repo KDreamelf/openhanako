@@ -11,24 +11,26 @@
 ```
 ┌─────────────────────────────────────────────────────┐
 │  安装器 (Inno Setup)                                 │
-│  检测 Python/uv → 内置兜底 → venv → camoufox 安装     │
-│  产物：{app}\browser\venv + Camoufox 二进制           │
+│  内置 Python/uv → venv → camoufox 安装 → 解压二进制    │
+│  产物：{app}\browser\venv + Camoufox 二进制 + bridge   │
 └───────────────┬─────────────────────────────────────┘
                 │ 安装时一次性完成
 ┌───────────────▼─────────────────────────────────────┐
-│  camoufox-connector (Python 进程)                    │
-│  启动 Camoufox 浏览器 → 暴露 WebSocket 端点            │
+│  Hanako browser bridge (Python 进程)                 │
+│  启动 Camoufox/Playwright → 暴露 JSONL stdin/stdout    │
 │  由客户端 BrowserManager 按需启停                      │
 └───────────────┬─────────────────────────────────────┘
-                │ ws://localhost:{port}
+                │ JSONL over stdio
 ┌───────────────▼─────────────────────────────────────┐
 │  BrowserManager (Dart)                               │
-│  Playwright Firefox WS 协议 → 页面控制                │
+│  JSONL 命令 → Python Playwright 页面控制              │
 │  暴露给 Agent 工具：browser / web_search              │
 └─────────────────────────────────────────────────────┘
 ```
 
-客户端代码不涉及 Python/uv/pip 操作——安装器全权负责环境搭建。
+客户端代码不涉及 Python/uv/pip 操作——安装器全权负责环境搭建。Dart 也不直接实现
+Playwright 私有协议，而是通过项目内置的 `hanako_browser_bridge.py` 调用 Python
+Playwright/Camoufox API。
 
 ---
 
@@ -42,50 +44,41 @@
 |------|------|------|
 | `python-3.12-embed-amd64.zip` | python.org embeddable package | ~15 MB |
 | `uv.exe` | astral.sh/uv releases | ~30 MB |
+| `camoufox-browser-win64.zip` | 构建机提前 fetch 后压缩 | ~300 MB |
+| `hanako_browser_bridge.py` | 项目安装器目录 | <1 MB |
 
 ### 2.2 安装逻辑（Pascal Script）
 
 ```
 [Code] 伪逻辑：
 
-function PrepareBeowserEnvironment():
+function PrepareBrowserEnvironment():
     venvDir = {app}\browser\venv
-    
-    // 1. 检测系统 Python
-    systemPython = FindPythonInPath(minVersion='3.10')
-    if systemPython != '':
-        python = systemPython
-    else:
-        // 解压内置 Python embeddable
-        ExtractBundled('python-3.12-embed-amd64.zip', '{app}\browser\python')
-        python = '{app}\browser\python\python.exe'
-    
-    // 2. 检测系统 uv
-    systemUv = FindInPath('uv.exe')
-    if systemUv != '':
-        uv = systemUv
-    else:
-        CopyBundled('uv.exe', '{app}\browser\uv.exe')
-        uv = '{app}\browser\uv.exe'
-    
-    // 3. 创建 venv + 安装 camoufox
+
+    // 1. 解压内置 Python embeddable，避免污染系统 Python
+    ExtractBundled('python-3.12-embed-amd64.zip', '{app}\browser\python')
+    python = '{app}\browser\python\python.exe'
+
+    // 2. 复制内置 uv
+    CopyBundled('uv.exe', '{app}\browser\uv.exe')
+    uv = '{app}\browser\uv.exe'
+
+    // 3. 创建 venv + 安装 camoufox Python 包
     Exec(uv, 'venv ' + venvDir + ' --python ' + python)
-    Exec(uv, 'pip install --python ' + venvDir + '\Scripts\python.exe camoufox[geoip] camoufox-connector')
-    
-    // 4. 下载 Camoufox 浏览器二进制
-    //    注意：不能从官方地址下载（墙）。
-    //    方案 A：安装包内置 camoufox 二进制（+300MB，安装包大但离线可用）
-    //    方案 B：从我们自己的 CDN/网盘镜像拉（安装包小但需要网络）
-    //    当前选择：安装包内置（离线可用优先）
-    Exec(venvDir + '\Scripts\python.exe', '-m camoufox.pkgman install')
-    // 或直接解压内置的浏览器包到 venv 的 camoufox 数据目录
-    
+    Exec(uv, 'pip install --python ' + venvDir + '\Scripts\python.exe camoufox[geoip]')
+
+    // 4. 解压内置 Camoufox 浏览器二进制，不在用户机器上走官方 CDN
+    ExtractBundled('camoufox-browser-win64.zip', '{app}\browser\camoufox-data')
+    executable = FindBrowserExecutable('{app}\browser\camoufox-data')
+
     // 5. 写入配置文件
     WriteConfigJson('{app}\browser\config.json', {
         'venvPython': venvDir + '\Scripts\python.exe',
-        'connectorModule': 'camoufox_connector',
-        'browserDataDir': venvDir + '\Lib\site-packages\camoufox\data',
-        'defaultPort': 9222,
+        'bridgeScript': '{app}\browser\hanako_browser_bridge.py',
+        'browserDataDir': '{app}\browser\camoufox-data',
+        'browserExecutable': executable,
+        'headless': true,
+        'excludeDefaultAddons': true,
     })
 ```
 
@@ -99,17 +92,17 @@ function PrepareBeowserEnvironment():
 
 ### 3.1 BrowserManager 重写
 
-当前 BrowserManager 是 HTTP 静态抓取的占位实现。重写为：
+BrowserManager 管理 Python bridge 子进程。没有安装 Camoufox 时，`navigate`/`snapshot`
+保留静态 HTTP 兜底；`web_search` 和交互类动作必须走真实 Camoufox。
 
 ```dart
 class BrowserManager {
-  // 读 {app}/browser/config.json 获取 venvPython 路径
-  // 启动 camoufox-connector 进程（python -m camoufox_connector --port {port}）
-  // 连接 WebSocket ws://localhost:{port}
-  // 通过 Playwright Firefox 协议发送命令
+  // 读 {app}/browser/config.json 获取 venvPython + bridgeScript
+  // 启动 Python bridge：python.exe hanako_browser_bridge.py config.json
+  // 通过 stdin/stdout JSONL 发送浏览器命令
   
-  Future<void> start()       // 启动 connector + 等待 WS 就绪
-  Future<void> stop()        // 关闭 WS + 杀 connector 进程
+  Future<void> start()       // 启动 bridge + Camoufox
+  Future<void> stop()        // 关闭 bridge + Camoufox
   bool get isRunning
   
   Future<void> navigate(String url)
@@ -131,7 +124,7 @@ LocalToolNames.webSearch => await _webSearch(arguments, browserManager)
 
 static Future<Map<String, dynamic>> _webSearch(args, browserManager) {
     final query = _requiredString(args, 'query');
-    await browserManager.start();  // 幂等
+    await browserManager.start();  // 幂等，且必须是真实 Camoufox
     await browserManager.navigate('https://www.bing.com/search?q=${Uri.encodeComponent(query)}');
     final results = await browserManager.evaluate('''
         // 提取搜索结果 DOM
@@ -147,7 +140,8 @@ static Future<Map<String, dynamic>> _webSearch(args, browserManager) {
 
 ### 3.3 browser 工具增强
 
-现有 browser 工具的 action 列表大部分是 stub。重写后所有 action 通过 WS 协议实际执行：
+现有 browser 工具的 action 列表大部分是 stub。重写后真实浏览器模式下所有交互 action
+通过 Python bridge 实际执行：
 - `start` → browserManager.start()
 - `stop` → browserManager.stop()
 - `navigate` → browserManager.navigate(url)
@@ -182,7 +176,8 @@ Camoufox 二进制本质是一个定制 Firefox 目录。`camoufox fetch` 下载
 1. 构建时提前下载 Camoufox 二进制包
 2. 放入 `installers/bundled/camoufox-browser-win64.zip`
 3. 安装时解压到 `{app}\browser\camoufox-data\`
-4. 配置 camoufox 库指向这个路径（环境变量 `CAMOUFOX_DATA_DIR`）
+4. 安装器递归查找 `camoufox.exe` 或 `firefox.exe`，写入 `browserExecutable`
+5. bridge 通过 `executable_path` 和版本信息启动 Camoufox，不依赖默认用户缓存
 
 ---
 
@@ -195,16 +190,16 @@ Camoufox 二进制本质是一个定制 Firefox 目录。`camoufox fetch` 下载
   │
   ├─ Agent 首次调用 browser/web_search 工具
   │   └─ browserManager.start()
-  │       ├─ 启动 camoufox-connector 子进程
-  │       │   python.exe -m camoufox_connector --port 9222 --headless virtual
-  │       ├─ 等待 WS 端口就绪（轮询 health check）
-  │       └─ 建立 WebSocket 连接
+  │       ├─ 启动 Hanako browser bridge 子进程
+  │       │   python.exe hanako_browser_bridge.py config.json
+  │       ├─ bridge 调用 Camoufox(headless=true, executable_path=...)
+  │       └─ Dart 通过 JSONL 发送命令
   │
-  ├─ Agent 后续调用 → 复用已有 WS 连接
+  ├─ Agent 后续调用 → 复用已有 bridge 进程
   │
   ├─ 空闲超时（如 10 分钟无操作）→ browserManager.stop()
-  │   ├─ 关闭 WS 连接
-  │   └─ 杀 connector 子进程
+  │   ├─ bridge 关闭 Playwright/Camoufox
+  │   └─ 杀 bridge 子进程
   │
   └─ 客户端退出 → browserManager.stop()
 ```
@@ -213,10 +208,9 @@ Camoufox 二进制本质是一个定制 Firefox 目录。`camoufox fetch` 下载
 
 ## 6. 安全考虑
 
-- Camoufox 只监听 localhost，不暴露到网络
-- WS 端口随机选择可用端口（避免端口冲突）
-- connector 进程以当前用户权限运行
-- 浏览器 profile 存在 `{app}\browser\profiles\` 下，卸载时清理
+- Camoufox 不暴露网络 API；Dart 与 bridge 只通过本机子进程 stdio 通信
+- bridge 进程以当前用户权限运行
+- 默认排除 Camoufox 的完整 `DefaultAddons` 集合，避免首次启动访问外部插件站点；若当前 Camoufox 版本无法暴露默认插件排除 API，bridge 会失败闭环而不是静默联网下载
 
 ---
 
@@ -230,13 +224,12 @@ Camoufox 二进制本质是一个定制 Firefox 目录。`camoufox fetch` 下载
 
 阶段 B：BrowserManager 重写
   → 读 config.json 获取路径
-  → 启停 camoufox-connector 子进程
-  → WebSocket 连接 + Playwright Firefox 协议客户端
+  → 启停 Hanako browser bridge 子进程
+  → JSONL 命令 + Python Playwright/Camoufox API
 
 阶段 C：工具接入
   → browser 工具所有 action 接通
   → web_search 工具实现（Bing DOM 提取）
-  → WindowsOpsCapabilities 加 browser 能力探测
 
 阶段 D：测试 + 上线
   → 端到端测试：安装 → 启动浏览器 → 搜索 → 截图

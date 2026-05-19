@@ -143,15 +143,16 @@ camoufox-prep\Scripts\activate
 uv pip install camoufox
 
 # 执行 fetch（下载浏览器二进制）
-python -m camoufox.pkgman install
+python -m camoufox fetch
 
-# 找到下载的浏览器目录
-python -c "import camoufox; print(camoufox.get_path('camoufox'))"
-# 输出类似：C:\...\site-packages\camoufox\data\camoufox-...
+# 找到下载目录里的浏览器可执行文件，并取其所在目录
+$installDir = python -m camoufox path
+$browserExe = Get-ChildItem -Path $installDir -Recurse -File -Include camoufox.exe,firefox.exe |
+  Select-Object -First 1 -ExpandProperty FullName
+$browserDir = Split-Path $browserExe -Parent
 
 # 打包成 zip
-$dataDir = python -c "import camoufox; print(camoufox.get_path('camoufox'))"
-Compress-Archive -Path "$dataDir\*" -DestinationPath "camoufox-browser-win64.zip"
+Compress-Archive -Path "$browserDir\*" -DestinationPath "camoufox-browser-win64.zip"
 
 # 复制到 installers/bundled/
 Copy-Item "camoufox-browser-win64.zip" "hanako-flutter\installers\bundled\"
@@ -164,6 +165,7 @@ Remove-Item -Recurse camoufox-prep
 **验证**：
 - `camoufox-browser-win64.zip` 约 **300MB**
 - zip 内含 `camoufox.exe`（或 `firefox.exe`）+ `omni.ja` + `xul.dll` 等 Firefox 核心文件
+- zip 内应保留 `version.json`；bridge 会读取它给 Camoufox 提供 Firefox 主版本号
 
 ### 4.4 最终检查
 
@@ -218,8 +220,10 @@ iscc.exe installers\windows.iss
 ### 6.3 浏览器功能
 
 - [ ] `{安装目录}\browser\config.json` 存在
+- [ ] `{安装目录}\browser\hanako_browser_bridge.py` 存在
 - [ ] `{安装目录}\browser\venv\Scripts\python.exe` 存在
 - [ ] `{安装目录}\browser\camoufox-data\` 内有 Firefox 文件
+- [ ] `config.json` 中有 `bridgeScript`、`browserExecutable`、`excludeDefaultAddons`
 
 Agent 测试：
 - [ ] 让 Agent 调用 `web_search` 工具搜索一个关键词
@@ -258,9 +262,17 @@ git tag -a v0.0.3 -m "v0.0.3: context compaction + P2P experience network + Camo
 A: `installers/bundled/` 下缺文件。回到第 4 节准备资源。
 
 ### Q: 安装后 Camoufox 不工作
-A: 检查 `config.json` 中 `venvPython` 路径是否正确。手动执行：
+A: 检查 `config.json` 中 `venvPython`、`bridgeScript` 和 `browserExecutable`
+路径是否正确。手动执行：
 ```powershell
-& "{安装目录}\browser\venv\Scripts\python.exe" -m camoufox_connector --port 9222
+@'
+{"id":1,"action":"start"}
+{"id":2,"action":"navigate","url":"https://example.com"}
+{"id":3,"action":"snapshot"}
+{"id":4,"action":"stop"}
+'@ | & "{安装目录}\browser\venv\Scripts\python.exe" `
+  "{安装目录}\browser\hanako_browser_bridge.py" `
+  "{安装目录}\browser\config.json"
 ```
 看是否有报错。
 
@@ -268,7 +280,7 @@ A: 检查 `config.json` 中 `venvPython` 路径是否正确。手动执行：
 A: 安装器使用阿里云镜像 (`mirrors.aliyun.com`)。如果用户环境网络异常，检查是否有代理拦截。
 
 ### Q: 用户电脑有 Python 但版本太低
-A: 安装器的 `FindPythonInPath` 只检查 Python 是否存在，未严格检查版本。如果遇到兼容问题，可以改为总是使用内置 Python（修改安装器逻辑跳过检测）。
+A: 不影响。安装器始终使用内置 Python + 内置 uv 创建隔离 venv，不读取系统 Python。
 
 ### Q: 安装包太大
 A: 主要是 Camoufox 浏览器二进制 (~300MB)。可以考虑：
