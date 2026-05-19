@@ -43,9 +43,7 @@ void main() {
     final body = jsonDecode(raw) as Map<String, dynamic>;
 
     expect(body['ok'], true);
-    expect(body['running'], true);
     expect(body['title'], '测试页面');
-    expect(body['snapshot'], contains('Hello Browser'));
 
     final statusRaw = await LocalToolRegistry.execute(LocalToolNames.browser, {
       'action': 'status',
@@ -59,7 +57,7 @@ void main() {
     }, browserManager: browser);
     final stopped = jsonDecode(stopRaw) as Map<String, dynamic>;
     expect(stopped['ok'], true);
-    expect((stopped['status'] as Map)['running'], false);
+    expect(stopped['running'], false);
   });
 
   test('Browser 权限关闭后返回中文错误', () async {

@@ -46,10 +46,7 @@ class LocalToolRegistry {
     try {
       final result = switch (name) {
         LocalToolNames.webFetch => await _webFetch(arguments),
-        LocalToolNames.webSearch => _notConfigured(
-          name,
-          '客户端尚未配置搜索 provider。可以先用 web_fetch 读取已知 URL。',
-        ),
+        LocalToolNames.webSearch => await _webSearch(arguments, browserManager),
         LocalToolNames.searchMemory => await _searchMemory(arguments, agentDir),
         LocalToolNames.pinMemory => await _pinMemory(arguments, agentDir),
         LocalToolNames.unpinMemory => await _unpinMemory(arguments, agentDir),
@@ -175,6 +172,58 @@ class LocalToolRegistry {
       return {'ok': false, 'error': 'too_many_redirects'};
     } finally {
       client.close(force: true);
+    }
+  }
+
+  static Future<Map<String, dynamic>> _webSearch(
+    Map<String, dynamic> args,
+    BrowserManager? browserManager,
+  ) async {
+    final query = _requiredString(args, 'query');
+    if (browserManager == null) {
+      return {
+        'ok': false,
+        'error': 'browser_unavailable',
+        'message': 'Browser 运行时尚未初始化。可以先用 web_fetch 读取已知 URL。',
+      };
+    }
+    await browserManager.start();
+    final encodedQuery = Uri.encodeComponent(query);
+    final navResult = await browserManager.execute({
+      'action': 'navigate',
+      'url': 'https://www.bing.com/search?q=$encodedQuery',
+    });
+    if (navResult['ok'] != true) return navResult;
+    await browserManager.execute({'action': 'wait', 'timeout': 2000, 'state': 'networkidle'});
+    final evalResult = await browserManager.execute({
+      'action': 'evaluate',
+      'expression': '''
+        JSON.stringify(Array.from(document.querySelectorAll('.b_algo')).slice(0, 10).map(el => ({
+          title: (el.querySelector('h2') || {}).textContent || '',
+          url: (el.querySelector('a') || {}).href || '',
+          snippet: (el.querySelector('.b_caption p, .b_lineclamp2') || {}).textContent || '',
+        })))
+      ''',
+    });
+    if (evalResult['ok'] != true) return evalResult;
+    final rawJson = evalResult['message']?.toString() ?? '[]';
+    try {
+      final results = jsonDecode(rawJson);
+      return {
+        'ok': true,
+        'query': query,
+        'results': results,
+        'source': 'bing',
+      };
+    } catch (_) {
+      return {
+        'ok': true,
+        'query': query,
+        'results': [],
+        'raw': rawJson,
+        'source': 'bing',
+        'message': '搜索结果解析失败，原始文本已返回',
+      };
     }
   }
 

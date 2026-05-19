@@ -132,7 +132,10 @@ class HanaEngine {
     );
     final skills = SkillManager(h);
     await skills.initialize();
-    final browser = BrowserManager(preferences: prefs);
+    final browser = BrowserManager(
+      preferences: prefs,
+      appDir: _resolveAppDir(),
+    );
     late final CronScheduler cronScheduler;
     final experienceDaemon = ExperienceNetworkDaemon(
       home: h,
@@ -254,6 +257,15 @@ class HanaEngine {
     if (selected != null && selected.isNotEmpty) {
       config.writeAt(['models', 'chat'], selected);
     }
+  }
+}
+
+String? _resolveAppDir() {
+  try {
+    final exe = Platform.resolvedExecutable;
+    return p.dirname(exe);
+  } catch (_) {
+    return null;
   }
 }
 
