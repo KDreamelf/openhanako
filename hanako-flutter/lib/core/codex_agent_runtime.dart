@@ -14,6 +14,7 @@ import 'agent_runtime.dart';
 import 'browser_manager.dart';
 import 'codex_agent_control.dart';
 import 'cron_store.dart';
+import 'experience_network_daemon.dart';
 import 'preferences_manager.dart';
 import 'skill_manager.dart';
 
@@ -266,6 +267,7 @@ class CodexToolContext {
     this.runCronNow,
     this.skillManager,
     this.browserManager,
+    this.experienceNetworkDaemon,
   });
 
   final String? cwd;
@@ -286,6 +288,7 @@ class CodexToolContext {
   final Future<CronRunRecord> Function(String jobId)? runCronNow;
   final SkillManager? skillManager;
   final BrowserManager? browserManager;
+  final ExperienceNetworkDaemon? experienceNetworkDaemon;
 }
 
 class CodexGoalStore {
@@ -764,6 +767,7 @@ class _LocalRegistryToolHandler extends CodexToolHandler {
       runCronNow: context.runCronNow,
       skillManager: context.skillManager,
       browserManager: context.browserManager,
+      experienceNetworkDaemon: context.experienceNetworkDaemon,
       sessionPath: context.sessionPath,
     );
     return RuntimeToolExecutionResult(

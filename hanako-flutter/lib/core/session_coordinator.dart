@@ -21,9 +21,12 @@ import 'agent_manager.dart';
 import 'browser_manager.dart';
 import 'codex_agent_control.dart';
 import 'codex_agent_runtime.dart';
+import 'compact_threshold.dart';
 import 'config_coordinator.dart';
+import 'conversation_compact.dart';
 import 'cron_scheduler.dart';
 import 'cron_store.dart';
+import 'experience_network_daemon.dart';
 import 'model_manager.dart';
 import 'preferences_manager.dart';
 import 'runtime_session_store.dart';
@@ -46,6 +49,7 @@ class SessionCoordinator {
     this.runCronNow,
     this.skillManager,
     this.browserManager,
+    this.experienceNetworkDaemon,
   }) : _windowsOpsClient = windowsOpsClient ?? WindowsOpsClient() {
     _codexAgentControl = CodexAgentControl(
       agentManager: agentManager,
@@ -65,6 +69,7 @@ class SessionCoordinator {
   final Future<CronRunRecord> Function(String jobId)? runCronNow;
   final SkillManager? skillManager;
   final BrowserManager? browserManager;
+  final ExperienceNetworkDaemon? experienceNetworkDaemon;
   CodexPermissionPrompt? codexPermissionPrompt;
   CodexUserInputPrompt? codexUserInputPrompt;
   final CodexProcessSessionStore _codexProcessSessions =
@@ -83,9 +88,10 @@ class SessionCoordinator {
   Session? _current;
   final _uuid = const Uuid();
   Future<WindowsOpsCapabilities>? _windowsOpsCapabilities;
-  // 当前正在跑后台 extract 的 session.path 集合。turn 结束后 unawaited 触发
-  // extract，避免连续短轮触发并行；同 session 同时只跑一个。
   final Set<String> _extractingSessionPaths = <String>{};
+  final Map<String, int> _lastPromptTokens = {};
+  int _consecutiveCompactFailures = 0;
+  static const int _maxConsecutiveCompactFailures = 3;
 
   Session? get current => _current;
 
@@ -259,13 +265,13 @@ class SessionCoordinator {
         .map((b) => b.text)
         .join(' ')
         .trim();
+    // Auto-compact: check before the turn if token usage exceeds threshold.
+    await _maybeAutoCompact();
     yield* _runRuntimeTurn(
       cancelToken: cancelToken,
       userQuery: userQuery.isEmpty ? null : userQuery,
       run: (runtime) => runtime.runUserPromptBlocks(blocks),
     );
-    // turn 已结束（MessageDone 或 LlmError）。把抽取丢到后台跑，
-    // 不阻塞返回给 chat UI 的 stream close。
     unawaited(_maybeRunExtraction());
   }
 
@@ -538,6 +544,9 @@ class SessionCoordinator {
       );
 
       await for (final event in run(runtime)) {
+        if (event is TokenUsage) {
+          _lastPromptTokens[session.path] = event.promptTokens;
+        }
         yield event;
       }
     } catch (e) {
@@ -574,6 +583,7 @@ class SessionCoordinator {
         runCronNow: runCronNow,
         skillManager: skillManager,
         browserManager: browserManager,
+        experienceNetworkDaemon: experienceNetworkDaemon,
       ),
       windowsOpsCapabilities: await _resolveWindowsOpsCapabilities(),
       processSessions: _codexProcessSessions,
@@ -652,11 +662,169 @@ class SessionCoordinator {
     }
   }
 
+  /// 手动触发当前会话压缩。返回结果；压缩失败时返回 null。
+  Future<CompactResult?> compactCurrentSession() async {
+    final session = _current;
+    if (session == null) return null;
+
+    final modelId = modelManager.currentModelId;
+    if (modelId == null || modelId.trim().isEmpty) return null;
+
+    final channel = backendClient.channel;
+    if (channel == null || DateTime.now().isAfter(channel.expiresAt)) {
+      return null;
+    }
+
+    final allMessages = RuntimeSessionStore.loadRuntimeMessages(session.path);
+    if (allMessages.isEmpty) return null;
+
+    // 确定本次压缩的消息范围：上一个 boundary 之后的消息。
+    int startIdx = 0;
+    for (var i = allMessages.length - 1; i >= 0; i--) {
+      if (allMessages[i].role == 'compactBoundary') {
+        startIdx = i + 1;
+        break;
+      }
+    }
+    final messagesToCompact = allMessages.sublist(startIdx);
+    if (messagesToCompact.isEmpty) return null;
+
+    try {
+      final result = await compactConversation(
+        messages: messagesToCompact,
+        provider: BackendLlmProvider(backendClient),
+        model: modelId,
+      );
+
+      if (result.summary.trim().isEmpty) return null;
+
+      // 截留原文到独立文件（用户要求的"类经验"截留机制）。
+      final transcriptPath = _saveCompactTranscript(
+        session,
+        messagesToCompact,
+      );
+
+      final reinject = <String, dynamic>{
+        ...?result.reinject,
+        if (transcriptPath != null) 'transcriptFile': transcriptPath,
+        // 收集之前所有已存在的 transcript 文件路径。
+        ..._collectPriorTranscriptFiles(allMessages),
+      };
+
+      RuntimeSessionStore.appendCompactBoundary(
+        session.path,
+        summary: result.summary,
+        reinject: reinject.isEmpty ? null : reinject,
+        sessionId: p.basenameWithoutExtension(session.path),
+        cwd: session.cwd,
+      );
+
+      _lastPromptTokens.remove(session.path);
+      _consecutiveCompactFailures = 0;
+      return CompactResult(summary: result.summary, reinject: reinject);
+    } catch (_) {
+      _consecutiveCompactFailures++;
+      return null;
+    }
+  }
+
+  /// 将即将被压缩的消息原文保存到会话同级目录。
+  /// 返回文件绝对路径；失败返回 null。
+  String? _saveCompactTranscript(
+    Session session,
+    List<RuntimeMessage> messages,
+  ) {
+    try {
+      final sessionId = p.basenameWithoutExtension(session.path);
+      final sessionsDir = p.dirname(session.path);
+      final compactDir = p.join(sessionsDir, 'compact-transcripts');
+      Directory(compactDir).createSync(recursive: true);
+      final seq = DateTime.now().millisecondsSinceEpoch;
+      final fileName = '$sessionId-compact-$seq.md';
+      final filePath = p.join(compactDir, fileName);
+
+      final buf = StringBuffer();
+      buf.writeln('# 对话压缩原文');
+      buf.writeln();
+      buf.writeln('> 会话：$sessionId');
+      buf.writeln('> 压缩时间：${DateTime.now().toUtc().toIso8601String()}');
+      buf.writeln('> 消息数：${messages.length}');
+      buf.writeln();
+
+      for (final msg in messages) {
+        final role = switch (msg.role) {
+          'user' => '用户',
+          'assistant' => 'AI',
+          'toolResult' => '工具结果 (${msg.toolName ?? "unknown"})',
+          _ => msg.role,
+        };
+        buf.writeln('## $role');
+        final text = msg.visibleText;
+        if (text.isNotEmpty) buf.writeln(text);
+        for (final call in msg.toolCalls) {
+          buf.writeln('### 工具调用：${call.name}');
+          buf.writeln('```json');
+          buf.writeln(call.openAiArgumentsJson);
+          buf.writeln('```');
+        }
+        buf.writeln();
+      }
+
+      File(filePath).writeAsStringSync(buf.toString(), flush: true);
+      return filePath;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Map<String, dynamic> _collectPriorTranscriptFiles(
+    List<RuntimeMessage> allMessages,
+  ) {
+    final files = <String>[];
+    for (final msg in allMessages) {
+      if (msg.role != 'compactBoundary') continue;
+      for (final block in msg.content) {
+        if (block is RuntimeDetailsBlock) {
+          final tf = block.details['transcriptFile'];
+          if (tf is String && tf.trim().isNotEmpty) {
+            files.add(tf.trim());
+          }
+          final prior = block.details['priorTranscripts'];
+          if (prior is List) {
+            for (final item in prior) {
+              if (item is String && item.trim().isNotEmpty) {
+                files.add(item.trim());
+              }
+            }
+          }
+        }
+      }
+    }
+    if (files.isEmpty) return const {};
+    return {'priorTranscripts': files};
+  }
+
+  Future<void> _maybeAutoCompact() async {
+    if (!preferences.getAutoCompactEnabled()) return;
+    if (_consecutiveCompactFailures >= _maxConsecutiveCompactFailures) return;
+
+    final session = _current;
+    if (session == null) return;
+
+    final lastTokens = _lastPromptTokens[session.path];
+    if (lastTokens == null) return;
+
+    final model = modelManager.currentModel;
+    if (model == null) return;
+
+    final thresholds = computeThresholds(model);
+    if (lastTokens < thresholds.autoCompactThreshold) return;
+
+    await compactCurrentSession();
+  }
+
   /// turn 结束后异步调用：把近端对话喂给辅助模型抽 memory 候选写入
-  /// agent/memory/。不阻塞主对话；失败 silent，仅 logForDebug 风格写到 stderr。
-  ///
-  /// 节流策略：同 session 同时只跑一个；其他触发条件（最少消息数、最小间隔
-  /// 等）暂不做，等使用一阵看实际节奏再调。
+  /// agent/memory/。不阻塞主对话；失败 silent。
   Future<void> _maybeRunExtraction() async {
     final session = _current;
     if (session == null) return;

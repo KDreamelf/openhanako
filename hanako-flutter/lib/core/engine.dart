@@ -17,6 +17,7 @@ import 'config_coordinator.dart';
 import 'cron_scheduler.dart';
 import 'cron_store.dart';
 import 'desk_manager.dart';
+import 'experience_network_daemon.dart';
 import 'heartbeat_runtime.dart';
 import 'model_manager.dart';
 import 'preferences_manager.dart';
@@ -40,6 +41,7 @@ class HanaEngine {
     required this.cronStore,
     required this.cronScheduler,
     required this.heartbeatRuntime,
+    required this.experienceNetworkDaemon,
     required this.deskManager,
     required this.browserManager,
     required this.bridgeSessionManager,
@@ -59,6 +61,7 @@ class HanaEngine {
   final CronStore cronStore;
   final CronScheduler cronScheduler;
   final HeartbeatRuntime heartbeatRuntime;
+  final ExperienceNetworkDaemon experienceNetworkDaemon;
   final DeskManager deskManager;
   final BrowserManager browserManager;
   final BridgeSessionManager bridgeSessionManager;
@@ -131,6 +134,13 @@ class HanaEngine {
     await skills.initialize();
     final browser = BrowserManager(preferences: prefs);
     late final CronScheduler cronScheduler;
+    final experienceDaemon = ExperienceNetworkDaemon(
+      home: h,
+      agentManager: agents,
+      identityRepository: identityRepo,
+      preferences: prefs,
+    );
+
     final sessions = SessionCoordinator(
       home: h,
       agentManager: agents,
@@ -143,6 +153,7 @@ class HanaEngine {
       runCronNow: (jobId) => cronScheduler.runNow(jobId),
       skillManager: skills,
       browserManager: browser,
+      experienceNetworkDaemon: experienceDaemon,
     );
     cronScheduler = CronScheduler(
       cronStore: cronStore,
@@ -194,6 +205,7 @@ class HanaEngine {
       cronStore: cronStore,
       cronScheduler: cronScheduler,
       heartbeatRuntime: heartbeat,
+      experienceNetworkDaemon: experienceDaemon,
       deskManager: deskManager,
       browserManager: browser,
       bridgeSessionManager: bridge,
@@ -209,10 +221,12 @@ class HanaEngine {
   void startAutomation() {
     cronScheduler.start();
     heartbeatRuntime.start();
+    experienceNetworkDaemon.start();
     unawaited(bridgeSourceManager.startEnabled());
   }
 
   Future<void> dispose() async {
+    await experienceNetworkDaemon.stop();
     await heartbeatRuntime.stop();
     await cronScheduler.stop();
     await config.dispose();

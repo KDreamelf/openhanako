@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 
 import '../core/browser_manager.dart';
 import '../core/cron_store.dart';
+import '../core/experience_network_daemon.dart';
 import '../core/skill_manager.dart';
 import '../experience/experience.dart';
 import '../memory/claude_memory.dart';
@@ -39,6 +40,7 @@ class LocalToolRegistry {
     Future<CronRunRecord> Function(String jobId)? runCronNow,
     SkillManager? skillManager,
     BrowserManager? browserManager,
+    ExperienceNetworkDaemon? experienceNetworkDaemon,
     String? sessionPath,
   }) async {
     try {
@@ -61,6 +63,11 @@ class LocalToolRegistry {
         LocalToolNames.experienceSearch => await _experienceSearch(
           arguments,
           agentDir,
+        ),
+        LocalToolNames.publishDemand => await _publishDemand(
+          arguments,
+          agentDir,
+          experienceNetworkDaemon,
         ),
         LocalToolNames.cron => await _cron(
           arguments,
@@ -275,6 +282,27 @@ class LocalToolRegistry {
       'results': results.map((result) => result.toJson()).toList(),
       'message': '仅返回路径、行号和片段；需要全文时请继续用 exec_command 读取对应文件。',
     };
+  }
+
+  static Future<Map<String, dynamic>> _publishDemand(
+    Map<String, dynamic> args,
+    String? agentDir,
+    ExperienceNetworkDaemon? daemon,
+  ) async {
+    if (daemon == null) {
+      return {
+        'ok': false,
+        'error': 'experience_network_unavailable',
+        'message': '经验网络守护进程未初始化',
+      };
+    }
+    final query = _requiredString(args, 'query');
+    final keywords = _jsonStringList(args['keywords']);
+    return daemon.publishDemand(
+      query: query,
+      keywords: keywords,
+      agentDirOverride: agentDir,
+    );
   }
 
   static Future<Map<String, dynamic>> _createExperience(
@@ -843,6 +871,7 @@ class LocalToolNames {
   static const listPinnedMemory = 'list_pinned_memory';
   static const createExperience = 'create_experience';
   static const experienceSearch = 'experience_search';
+  static const publishDemand = 'publish_demand';
   static const cron = 'cron';
   static const createArtifact = 'create_artifact';
   static const browser = 'browser';
@@ -990,6 +1019,27 @@ const _toolSpecs = <_ToolSpec>[
           'enum': ['private', 'network', 'all'],
         },
         'max_results': {'type': 'integer', 'minimum': 1, 'maximum': 200},
+      },
+      'required': ['query'],
+    },
+  ),
+  _ToolSpec(
+    name: LocalToolNames.publishDemand,
+    description:
+        '向经验网络发布需求。描述你需要什么类型的经验，网络中持有匹配经验的节点会自动响应并传输经验包。',
+    parameters: {
+      'type': 'object',
+      'additionalProperties': false,
+      'properties': {
+        'query': {
+          'type': 'string',
+          'description': '自然语言需求描述，例如"如何用 Flutter 实现自定义 Paint"',
+        },
+        'keywords': {
+          'type': 'array',
+          'items': {'type': 'string'},
+          'description': '可选的结构化关键词',
+        },
       },
       'required': ['query'],
     },
