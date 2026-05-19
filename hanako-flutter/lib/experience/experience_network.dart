@@ -2985,3 +2985,67 @@ ExperienceNetworkEndpoint? _httpEndpointFromBaseUrl(String value) {
   final port = uri.hasPort ? uri.port : (scheme == 'https' ? 443 : 80);
   return ExperienceNetworkEndpoint(network: scheme, host: host, port: port);
 }
+
+/// DHT 节点服务证明（小红花）。
+/// 对应服务端 `DHTServiceFlower` (Go)。
+class DHTServiceFlower {
+  const DHTServiceFlower({
+    this.schemaVersion = 'ph01.experience.dht_service_flower.v1',
+    required this.flowerId,
+    required this.nodeId,
+    required this.clientPubkeyHex,
+    required this.clientPubkeyHash,
+    this.resourceHash = '',
+    this.workKind = '',
+    required this.servedAt,
+    this.signatureHex = '',
+  });
+
+  final String schemaVersion;
+  final String flowerId;
+  final String nodeId;
+  final String clientPubkeyHex;
+  final String clientPubkeyHash;
+  final String resourceHash;
+  final String workKind;
+  final String servedAt;
+  final String signatureHex;
+
+  Map<String, dynamic> toJson() => {
+    'schema_version': schemaVersion,
+    'flower_id': flowerId,
+    'node_id': nodeId,
+    'client_pubkey_hex': clientPubkeyHex,
+    'client_pubkey_hash': clientPubkeyHash,
+    'resource_hash': resourceHash,
+    'work_kind': workKind,
+    'served_at': servedAt,
+    'signature': signatureHex,
+  };
+}
+
+/// DHT 节点信任包。
+class DHTTrustBundle {
+  const DHTTrustBundle({
+    required this.nodeId,
+    this.wreathCount = 0,
+    this.flowerCount = 0,
+    this.updatedAt,
+  });
+
+  final String nodeId;
+  final int wreathCount;
+  final int flowerCount;
+  final String? updatedAt;
+
+  static DHTTrustBundle fromJson(Map<String, dynamic> json) {
+    final wreaths = json['wreaths'];
+    final flowers = json['flowers'];
+    return DHTTrustBundle(
+      nodeId: (json['node_id'] as String?) ?? '',
+      wreathCount: wreaths is List ? wreaths.length : 0,
+      flowerCount: flowers is List ? flowers.length : 0,
+      updatedAt: json['updated_at'] as String?,
+    );
+  }
+}
