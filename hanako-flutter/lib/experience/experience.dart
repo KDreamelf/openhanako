@@ -3,3 +3,7 @@ export 'experience_store.dart';
 export 'experience_network.dart';
 export 'experience_udp.dart';
 export 'experience_review.dart';
+export 'neighbor_table.dart';
+export 'p2p_message.dart';
+export 'p2p_overlay.dart';
+export 'p2p_transport.dart';
