@@ -378,17 +378,17 @@ Demand 的生命周期由两个条件终止（先到先停）：
 | B2 | 被动响应：收需求 → 匹配 → 回包 | ⚠️ 断 | `answerMatchingExperienceDemands()` 写好但无后台轮询触发 | 后台调度定期调用 fetchDemands + answerMatching | ✅ 已修复 |
 | B3 | 包下载：offer → 下载 → 入库 | ✅ 通 | — | — | ✅✅ 已检查 |
 | B4 | 邻居发现：announce + 邻居管理 | ❌ 断 | `announcePresence()` 零调用；无邻居表管理逻辑 | 后台调度定期 announce；新建 NeighborTable | ✅ 已修复 |
-| B5 | UDP 打洞：hole punch 传输层 | ❌ 断 | `ExperienceUdpHolePuncher` / `createHolePunchSession` / `reportHolePunch` 全部零调用 | 在传输层选择时接入 hole punch 路径 | 🔴 待修 |
+| B5 | UDP 打洞：hole punch 传输层 | ❌ 断 | `ExperienceUdpHolePuncher` / `createHolePunchSession` / `reportHolePunch` 全部零调用 | 在传输层选择时接入 hole punch 路径 | ✅ 已修复 |
 | B6 | 后台调度：定期轮询/探测 | ❌ 空 | CronStore 无经验网络相关 job | 注册 announce / fetchDemands / neighborProbe 三个定期任务 | ✅ 已修复 |
 
 ### 10.2 Dead Code 清单
 
 | 类/方法 | 文件 | 说明 | 状态 |
 |---------|------|------|------|
-| `ExperienceUdpHolePuncher`（整类） | experience_udp.dart | 完整实现，生产零调用 | 🔴 dead |
+| `ExperienceUdpHolePuncher`（整类） | experience_udp.dart | UDP 打洞实现 | ✅ importOffer._tryHolePunchTransfer |
 | `ExperienceDemandPullWorkflow`（整类） | experience_store.dart | 需求拉取工作流 | ✅ daemon.publishDemand + publish_demand 工具 |
 | `ExperiencePackageSupplyWorkflow`（整类） | experience_store.dart | 包供应工作流 | ✅ daemon._pollAndAnswer |
 | `announcePresence()` | experience_network.dart | DHT 在线广播 | ✅ daemon._announce |
 | `answerMatchingExperienceDemands()` | experience_store.dart | 需求匹配+回包 | ✅ daemon._pollAndAnswer |
-| `createHolePunchSession()` | experience_network.dart | 打洞会话创建，零调用 | 🔴 dead |
-| `reportHolePunch()` | experience_network.dart | 打洞结果上报，零调用 | 🔴 dead |
+| `createHolePunchSession()` | experience_network.dart | 打洞会话创建 | ✅ importOffer._tryHolePunchTransfer |
+| `reportHolePunch()` | experience_network.dart | 打洞结果上报 | ✅ importOffer._tryHolePunchTransfer |

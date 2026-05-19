@@ -10,6 +10,7 @@ import 'package:path/path.dart' as p;
 import '../identity/keypair.dart';
 import 'experience_network.dart';
 import 'experience_review.dart';
+import 'experience_udp.dart';
 
 class ExperienceStore {
   ExperienceStore({required Directory agentDir}) : _agentDir = agentDir;
@@ -1168,6 +1169,8 @@ class ExperienceDemandPullWorkflow {
     final imported = await importOffer(
       selected,
       trustAnchor: trustAnchor,
+      requesterPeerId: requesterPeerId,
+      keyPair: keyPair,
       now: now,
     );
     return ExperienceDemandPullResult(
@@ -1181,10 +1184,27 @@ class ExperienceDemandPullWorkflow {
   Future<ExperienceImportResult> importOffer(
     ExperienceDemandOfferRecord record, {
     ExperienceReviewTrustAnchor? trustAnchor,
+    String? requesterPeerId,
+    HanakoKeyPair? keyPair,
     DateTime? now,
   }) async {
     final offer = record.offer;
     var bytes = await _tryDownloadCachedOfferPackage(offer);
+
+    // B5: 尝试 UDP hole punch 直连传输。
+    if (bytes == null &&
+        keyPair != null &&
+        requesterPeerId != null &&
+        offer.availableTransports
+            .contains(ExperienceTransport.ipv4HolePunch) &&
+        offer.providerAddrs.any((e) => !e.isIPv6 && e.isValid)) {
+      bytes = await _tryHolePunchTransfer(
+        offer,
+        requesterPeerId: requesterPeerId,
+        keyPair: keyPair,
+      );
+    }
+
     if (bytes == null &&
         offer.relaySessionId.trim().isNotEmpty &&
         offer.availableTransports.contains(ExperienceTransport.dhtRelay)) {
@@ -1197,7 +1217,7 @@ class ExperienceDemandPullWorkflow {
       );
     } else if (bytes == null) {
       return ExperienceImportResult.failed(
-        'offer 没有可用 DHT 缓存、relay 会话，且未配置管理端兜底下载',
+        'offer 没有可用 DHT 缓存、hole punch、relay 会话，且未配置管理端兜底下载',
       );
     }
     final expectedHash = _normalizePackageHashForCheck(offer.packageHash);
@@ -1212,6 +1232,53 @@ class ExperienceDemandPullWorkflow {
       trustAnchor: trustAnchor,
       now: now,
     );
+  }
+
+  /// 尝试通过 UDP hole punch 直连传输包。
+  /// 成功打洞后报告结果给 DHT。当前实现只完成打洞协调；
+  /// 实际 UDP 数据传输待后续实现，打洞成功后 fallback 到缓存下载。
+  Future<Uint8List?> _tryHolePunchTransfer(
+    ExperienceDemandOffer offer, {
+    required String requesterPeerId,
+    required HanakoKeyPair keyPair,
+  }) async {
+    try {
+      final session = await _dhtClient.createHolePunchSession(
+        request: ExperienceDhtHolePunchSessionRequest(
+          requestId: offer.requestId,
+          packageHash: offer.packageHash,
+          requesterPeerId: requesterPeerId,
+          providerPeerId: offer.providerPeerId,
+          providerAddrs: offer.providerAddrs,
+        ),
+        keyPair: keyPair,
+      );
+
+      final puncher = ExperienceUdpHolePuncher();
+      final result = await puncher.punch(
+        session: session,
+        peerId: requesterPeerId,
+        role: 'requester',
+        remoteEndpoints: offer.providerAddrs
+            .where((e) => e.isUdpCandidate && e.isValid)
+            .toList(),
+      );
+
+      await _dhtClient.reportHolePunch(
+        sessionId: session.sessionId,
+        report: result.toReport(),
+        keyPair: keyPair,
+      );
+
+      if (result.ok) {
+        // 打洞成功。实际 UDP 数据传输待实现。
+        // 当前 fallback：通过 DHT 缓存下载（对端可能已上传）。
+        return _tryDownloadCachedOfferPackage(offer);
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<Uint8List?> _tryDownloadCachedOfferPackage(
