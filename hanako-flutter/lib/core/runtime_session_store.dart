@@ -108,6 +108,32 @@ class RuntimeSessionStore {
     }
   }
 
+  static void appendCompactBoundary(
+    String sessionPath, {
+    required String summary,
+    Map<String, dynamic>? reinject,
+    String? sessionId,
+    String? cwd,
+  }) {
+    _ensureEntryFile(sessionPath, sessionId: sessionId, cwd: cwd);
+    final file = File(sessionPath);
+    final parentId = _lastEntryId(file.readAsLinesSync());
+    final id = _uuid.v4().substring(0, 8);
+    final entry = {
+      'type': 'compact',
+      'id': id,
+      'parentId': parentId,
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
+      'summary': summary,
+      if (reinject != null) 'reinject': reinject,
+    };
+    file.writeAsStringSync(
+      '${jsonEncode(entry)}\n',
+      mode: FileMode.append,
+      flush: true,
+    );
+  }
+
   static List<Map<String, dynamic>> loadOpenAiMessages(
     String sessionPath, {
     String? systemPrompt,
@@ -199,16 +225,28 @@ class RuntimeSessionStore {
     final out = <RuntimeMessage>[];
     for (final line in lines.skip(1)) {
       final raw = _tryDecodeMap(line);
-      if (raw == null || raw['type'] != 'message') continue;
-      final message = raw['message'];
-      if (message is Map<String, dynamic>) {
-        final runtime = RuntimeMessage.fromJson(message);
-        if (runtime != null) out.add(runtime);
-      } else if (message is Map) {
-        final runtime = RuntimeMessage.fromJson(
-          message.cast<String, dynamic>(),
-        );
-        if (runtime != null) out.add(runtime);
+      if (raw == null) continue;
+      final type = raw['type'];
+      if (type == 'message') {
+        final message = raw['message'];
+        if (message is Map<String, dynamic>) {
+          final runtime = RuntimeMessage.fromJson(message);
+          if (runtime != null) out.add(runtime);
+        } else if (message is Map) {
+          final runtime = RuntimeMessage.fromJson(
+            message.cast<String, dynamic>(),
+          );
+          if (runtime != null) out.add(runtime);
+        }
+      } else if (type == 'compact') {
+        final summary = raw['summary'];
+        if (summary is String && summary.trim().isNotEmpty) {
+          final reinject = raw['reinject'];
+          out.add(RuntimeMessage.compactBoundary(
+            summary: summary,
+            reinject: reinject is Map<String, dynamic> ? reinject : null,
+          ));
+        }
       }
     }
     return out;
@@ -252,6 +290,13 @@ class RuntimeSessionStore {
           if (blocks.isNotEmpty) {
             out.add(RuntimeDisplayMessage(role: 'user', blocks: blocks));
           }
+        case 'compactBoundary':
+          flushAssistant();
+          out.clear();
+          out.add(RuntimeDisplayMessage(
+            role: 'compactBoundary',
+            blocks: [RuntimeDisplayCompactBoundaryBlock(message.visibleText)],
+          ));
         case 'assistant':
           final messageStartIndex = assistantBlocks.length;
           for (final block in message.content) {
@@ -422,6 +467,8 @@ class RuntimeDisplayMessage {
             );
           }
           parts.add(lines.join('\n\n'));
+        case RuntimeDisplayCompactBoundaryBlock():
+          parts.add('--- 对话已压缩 ---');
       }
     }
     return parts.join('\n\n');
@@ -508,6 +555,11 @@ class RuntimeDisplayLinkBlock extends RuntimeDisplayBlock {
 class RuntimeDisplayThinkingBlock extends RuntimeDisplayBlock {
   const RuntimeDisplayThinkingBlock(this.text);
   final String text;
+}
+
+class RuntimeDisplayCompactBoundaryBlock extends RuntimeDisplayBlock {
+  const RuntimeDisplayCompactBoundaryBlock(this.summary);
+  final String summary;
 }
 
 List<RuntimeDisplayBlock> displayBlocksFromMarkdownLinks(String text) {

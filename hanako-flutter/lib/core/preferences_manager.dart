@@ -172,4 +172,27 @@ class PreferencesManager {
     }
     _write(p);
   }
+
+  // ===== 上下文压缩配置 =====
+
+  bool getAutoCompactEnabled() {
+    final compact = _read()['compact'];
+    if (compact is Map) {
+      final raw = compact['auto_enabled'];
+      if (raw is bool) return raw;
+    }
+    return true;
+  }
+
+  void setAutoCompactEnabled(bool enabled) {
+    final p = Map<String, dynamic>.of(_read());
+    final compact = p['compact'] is Map
+        ? Map<String, dynamic>.of(
+            (p['compact'] as Map).cast<String, dynamic>(),
+          )
+        : <String, dynamic>{};
+    compact['auto_enabled'] = enabled;
+    p['compact'] = compact;
+    _write(p);
+  }
 }

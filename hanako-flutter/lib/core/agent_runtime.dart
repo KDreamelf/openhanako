@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import '../llm/provider.dart';
+import 'conversation_compact.dart';
 
 typedef RuntimeChatStream =
     Stream<LlmEvent> Function({
@@ -337,6 +338,17 @@ class RuntimeMessage {
     isError: isError,
   );
 
+  factory RuntimeMessage.compactBoundary({
+    required String summary,
+    Map<String, dynamic>? reinject,
+  }) => RuntimeMessage._(
+    role: 'compactBoundary',
+    content: [
+      RuntimeTextBlock(summary),
+      if (reinject != null) RuntimeDetailsBlock(reinject),
+    ],
+  );
+
   final String role;
   final List<RuntimeContentBlock> content;
   final String? toolCallId;
@@ -664,12 +676,42 @@ List<Map<String, dynamic>> runtimeMessagesToOpenAi(
   List<RuntimeMessage> messages, {
   String? systemPrompt,
 }) {
+  // Find last compact boundary → truncate history, inject summary.
+  int? lastBoundaryIdx;
+  String? compactSummary;
+  Map<String, dynamic>? reinjectData;
+  for (var i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role == 'compactBoundary') {
+      lastBoundaryIdx = i;
+      compactSummary = messages[i].visibleText;
+      for (final block in messages[i].content) {
+        if (block is RuntimeDetailsBlock) {
+          reinjectData = block.details;
+          break;
+        }
+      }
+      break;
+    }
+  }
+
+  final effectiveMessages = lastBoundaryIdx != null
+      ? messages.sublist(lastBoundaryIdx + 1)
+      : messages;
+
+  String? effectiveSystemPrompt = systemPrompt;
+  if (compactSummary != null && compactSummary.trim().isNotEmpty) {
+    final preamble = buildCompactPreamble(compactSummary, reinjectData);
+    effectiveSystemPrompt = effectiveSystemPrompt == null
+        ? preamble
+        : '$effectiveSystemPrompt\n\n$preamble';
+  }
+
   final transformed = _mergeConsecutiveUserMessages(
-    _insertSyntheticToolResults(messages),
+    _insertSyntheticToolResults(effectiveMessages),
   );
   final out = <Map<String, dynamic>>[
-    if (systemPrompt != null && systemPrompt.trim().isNotEmpty)
-      {'role': 'system', 'content': systemPrompt.trim()},
+    if (effectiveSystemPrompt != null && effectiveSystemPrompt.trim().isNotEmpty)
+      {'role': 'system', 'content': effectiveSystemPrompt.trim()},
   ];
   for (final message in transformed) {
     final openAi = _runtimeMessageToOpenAi(message);
@@ -742,6 +784,11 @@ List<RuntimeMessage> _insertSyntheticToolResults(
       result.add(message);
       continue;
     }
+    if (message.role == 'compactBoundary') {
+      flushPending();
+      result.add(message);
+      continue;
+    }
     result.add(message);
   }
   return result;
@@ -786,6 +833,8 @@ Map<String, dynamic>? _runtimeMessageToOpenAi(RuntimeMessage message) {
           'name': message.toolName!.trim(),
         'content': message.visibleText,
       };
+    case 'compactBoundary':
+      return null;
     default:
       return null;
   }

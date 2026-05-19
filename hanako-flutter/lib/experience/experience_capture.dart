@@ -133,6 +133,8 @@ class ExperienceSessionCapture {
               )
               ..writeln();
             hasToolEvent = true;
+          case RuntimeDisplayCompactBoundaryBlock():
+            break;
         }
       }
       if (parts.isNotEmpty) {

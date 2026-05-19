@@ -257,6 +257,8 @@ class _DisplayBlockView extends StatelessWidget {
         return _ToolCallStackCard(
           blocks: [block as RuntimeDisplayToolCallBlock],
         );
+      case RuntimeDisplayCompactBoundaryBlock():
+        return const SizedBox.shrink();
     }
   }
 }

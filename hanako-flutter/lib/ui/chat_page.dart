@@ -13,6 +13,7 @@ import '../app/providers.dart';
 import '../app/window_factory.dart';
 import '../core/agent_runtime.dart';
 import '../core/codex_agent_runtime.dart';
+import '../core/compact_threshold.dart';
 import '../core/engine.dart';
 import '../core/runtime_session_store.dart';
 import '../experience/experience.dart';
@@ -40,6 +41,8 @@ class ChatState {
   final String? error;
   final String? errorDetails;
   final int? errorStatusCode;
+  final int? promptTokens;
+  final bool compacting;
 
   const ChatState({
     this.history = const [],
@@ -49,6 +52,8 @@ class ChatState {
     this.error,
     this.errorDetails,
     this.errorStatusCode,
+    this.promptTokens,
+    this.compacting = false,
   });
 
   ChatState copyWith({
@@ -59,6 +64,8 @@ class ChatState {
     Object? error = _sentinel,
     Object? errorDetails = _sentinel,
     Object? errorStatusCode = _sentinel,
+    Object? promptTokens = _sentinel,
+    bool? compacting,
   }) => ChatState(
     history: history ?? this.history,
     currentBlocks: currentBlocks ?? this.currentBlocks,
@@ -73,6 +80,10 @@ class ChatState {
     errorStatusCode: identical(errorStatusCode, _sentinel)
         ? this.errorStatusCode
         : errorStatusCode as int?,
+    promptTokens: identical(promptTokens, _sentinel)
+        ? this.promptTokens
+        : promptTokens as int?,
+    compacting: compacting ?? this.compacting,
   );
 
   static const _sentinel = Object();
@@ -300,6 +311,24 @@ class ChatNotifier extends StateNotifier<ChatState> {
     if (state.streaming) return;
     state = const ChatState();
     _replaceCurrentHistory(const []);
+  }
+
+  Future<void> compact() async {
+    if (state.streaming || state.compacting) return;
+    state = state.copyWith(compacting: true);
+    try {
+      final eng = _ref.read(engineProvider);
+      final result = await eng.sessionCoordinator.compactCurrentSession();
+      if (result != null) {
+        state = ChatState(
+          history: eng.sessionCoordinator.currentDisplayMessages(),
+        );
+      } else {
+        state = state.copyWith(compacting: false, error: '压缩失败：总结为空或模型未就绪');
+      }
+    } catch (e) {
+      state = state.copyWith(compacting: false, error: '压缩失败：$e');
+    }
   }
 
   Future<void> _sendWithRetries(
@@ -551,8 +580,8 @@ class ChatNotifier extends StateNotifier<ChatState> {
               ),
               hadProgress: hadProgress,
             );
-          case TokenUsage():
-            break;
+          case TokenUsage(:final promptTokens):
+            state = state.copyWith(promptTokens: promptTokens);
         }
       }
       if (currentBlocks.isNotEmpty) {
@@ -1311,6 +1340,12 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     final canUseComposer =
         activeAgent != null && identity != null && selectedModel != null;
 
+    final model = eng.modelManager.currentModel;
+    final thresholds = model != null ? computeThresholds(model) : null;
+    final compactLevel = thresholds != null && state.promptTokens != null
+        ? thresholds.level(state.promptTokens!)
+        : CompactLevel.normal;
+
     return Scaffold(
       backgroundColor: Colors.transparent,
       drawer: SessionDrawer(
@@ -1377,6 +1412,28 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                             DS.s32,
                           ),
                           children: [
+                            if (compactLevel != CompactLevel.normal ||
+                                state.compacting)
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                  bottom: DS.s12,
+                                ),
+                                child: _ContextUsageBanner(
+                                  level: compactLevel,
+                                  usagePercent: thresholds != null &&
+                                          state.promptTokens != null
+                                      ? thresholds
+                                          .usagePercent(state.promptTokens!)
+                                      : 0,
+                                  compacting: state.compacting,
+                                  onCompact: state.streaming ||
+                                          state.compacting
+                                      ? null
+                                      : () => ref
+                                          .read(chatProvider.notifier)
+                                          .compact(),
+                                ),
+                              ),
                             if (state.history.isEmpty && !state.streaming)
                               _EmptyHint(
                                 activeAgent: activeAgent,
@@ -1384,7 +1441,10 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                                 selectedModel: selectedModel,
                               ),
                             for (var i = 0; i < state.history.length; i++)
-                              _MessageBubble(
+                              if (state.history[i].role == 'compactBoundary')
+                                _CompactBoundaryCard(key: ValueKey('compact_$i'))
+                              else
+                                _MessageBubble(
                                 index: i,
                                 message: state.history[i],
                                 streaming: state.streaming,
@@ -1762,6 +1822,92 @@ class _ModelChoiceTileState extends State<_ModelChoiceTile> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ContextUsageBanner extends StatelessWidget {
+  const _ContextUsageBanner({
+    required this.level,
+    required this.usagePercent,
+    required this.compacting,
+    this.onCompact,
+  });
+
+  final CompactLevel level;
+  final double usagePercent;
+  final bool compacting;
+  final VoidCallback? onCompact;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    if (compacting) {
+      return HanaBanner(
+        icon: Icons.compress,
+        leadingLabel: 'COMPACT',
+        title: '正在压缩对话...',
+        subtitle: '完成后对话将继续',
+        color: palette.accentCyan,
+        trailing: const SizedBox(
+          width: 16,
+          height: 16,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    final isCritical = level == CompactLevel.critical;
+    final color = isCritical ? palette.accentCrimson : palette.accentAmber;
+    final pct = (usagePercent * 100).toStringAsFixed(0);
+    return HanaBanner(
+      icon: Icons.memory,
+      leadingLabel: isCritical ? 'CRITICAL' : 'WARNING',
+      title: '上下文使用 $pct%',
+      subtitle: isCritical ? '上下文即将耗尽，请立即压缩' : '建议压缩以释放上下文空间',
+      color: color,
+      trailing: GlassButton(
+        label: '压缩',
+        icon: Icons.compress,
+        onPressed: onCompact,
+        dense: true,
+      ),
+    );
+  }
+}
+
+class _CompactBoundaryCard extends StatelessWidget {
+  const _CompactBoundaryCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: DS.s12),
+      child: Row(
+        children: [
+          Expanded(child: Divider(color: palette.divider, height: 1)),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: DS.s12),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.compress, size: 13, color: palette.textTertiary),
+                const SizedBox(width: DS.s6),
+                Text(
+                  '对话已压缩',
+                  style: TextStyle(
+                    color: palette.textTertiary,
+                    fontSize: DS.t11,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.3,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(child: Divider(color: palette.divider, height: 1)),
+        ],
       ),
     );
   }
