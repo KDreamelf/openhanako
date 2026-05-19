@@ -7,6 +7,7 @@ import 'package:dio/dio.dart';
 import 'package:pointycastle/export.dart' as pc;
 
 import 'bridge_adapter.dart';
+import 'lark_ws_client.dart';
 
 /// 飞书 / Lark Bridge。
 ///
@@ -31,6 +32,7 @@ class LarkBridge implements BridgeAdapter {
     required this.appSecret,
     this.verificationToken,
     this.encryptKey,
+    this.receiveMode = LarkReceiveMode.websocket,
     Dio? dio,
   }) : _dio = dio ?? Dio(BaseOptions(receiveTimeout: const Duration(seconds: 30)));
 
@@ -38,12 +40,14 @@ class LarkBridge implements BridgeAdapter {
   final String appSecret;
   final String? verificationToken;
   final String? encryptKey;
+  final LarkReceiveMode receiveMode;
   final Dio _dio;
 
   static const _baseUrl = 'https://open.feishu.cn';
 
   String? _cachedToken;
   DateTime? _tokenExpiresAt;
+  LarkWsClient? _wsClient;
 
   final _controller = StreamController<IncomingMessage>.broadcast();
 
@@ -52,6 +56,28 @@ class LarkBridge implements BridgeAdapter {
 
   @override
   Stream<IncomingMessage> get messages => _controller.stream;
+
+  /// 启动 WS 接收（如果 receiveMode == websocket）。
+  /// Webhook 模式不需要调 start()——由 server 路由 push 到 _controller。
+  Future<void> start() async {
+    if (receiveMode != LarkReceiveMode.websocket) return;
+    _wsClient = LarkWsClient(
+      appId: appId,
+      appSecret: appSecret,
+    );
+    _wsClient!.messages.listen(
+      (msg) => _controller.add(msg),
+      onError: (_) {},
+    );
+    await _wsClient!.start();
+  }
+
+  @override
+  Future<void> dispose() async {
+    await _wsClient?.stop();
+    _wsClient = null;
+    await _controller.close();
+  }
 
   /// 由 server 路由调用。raw 是 HTTP request body 字符串，headers 来自 HTTP 头。
   /// 返回值是要给飞书的 HTTP 响应 body（challenge 验证时返回 `{challenge: ...}`）。
@@ -199,11 +225,6 @@ class LarkBridge implements BridgeAdapter {
     return token;
   }
 
-  @override
-  Future<void> dispose() async {
-    if (!_controller.isClosed) await _controller.close();
-  }
-
   // ---------------- AES-256-CBC pkcs7（飞书加密事件）----------------
   static String _aesDecrypt(String encryptedB64, String encryptKey) {
     final keyBytes = crypto.sha256.convert(utf8.encode(encryptKey)).bytes;
@@ -244,3 +265,5 @@ class LarkBridge implements BridgeAdapter {
     return hex == signature;
   }
 }
+
+enum LarkReceiveMode { websocket, webhook }

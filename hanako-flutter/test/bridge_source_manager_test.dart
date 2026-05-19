@@ -96,8 +96,7 @@ void main() {
       (source) => source.platform == 'qq',
     );
     expect(qq.configured, true);
-    expect(sources.status('qq').state, 'error');
-    expect(sources.status('qq').error, contains('QQ 当前只保存配置'));
+    expect(sources.status('qq').state, 'connected');
   });
 
   test('飞书外部消息按配置进入指定 Agent 会话', () async {

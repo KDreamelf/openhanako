@@ -1,4 +1,5 @@
 import '../bridge/lark_bridge.dart';
+import '../bridge/qq_bridge.dart';
 import 'bridge_session_manager.dart';
 import 'preferences_manager.dart';
 
@@ -72,17 +73,24 @@ class BridgeSourceManager {
             appSecret: config.credentials['appSecret'] ?? '',
             verificationToken: config.credentials['verificationToken'],
             encryptKey: config.credentials['encryptKey'],
+            receiveMode: LarkReceiveMode.websocket,
           );
           await bridgeSessionManager.register(adapter);
+          await adapter.start();
           _statuses[platform] = BridgeSourceStatus(
             platform: platform,
             state: 'connected',
           );
         case 'qq':
-          _statuses[platform] = const BridgeSourceStatus(
-            platform: 'qq',
-            state: 'error',
-            error: 'QQ 当前只保存配置；运行 adapter 尚未接入 Flutter 客户端。',
+          final httpPort = int.tryParse(
+            config.credentials['httpPort']?.toString() ?? '3000',
+          ) ?? 3000;
+          final adapter = QqBridge(httpPort: httpPort);
+          await adapter.start();
+          await bridgeSessionManager.register(adapter);
+          _statuses[platform] = BridgeSourceStatus(
+            platform: platform,
+            state: 'connected',
           );
         default:
           throw ArgumentError.value(platform, 'platform', 'unknown platform');
