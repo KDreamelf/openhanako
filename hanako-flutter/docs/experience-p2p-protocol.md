@@ -369,6 +369,11 @@ Demand 的生命周期由两个条件终止（先到先停）：
 
 > 排查日期：2026-05-19  
 > 规则：修复后标 ✅ 已修复；修复后经代码验证标 ✅✅ 已检查。
+>
+> **重要说明**：§3-§6 描述的是 P2P gossip 协议**目标设计**。当前代码修复
+> 的是**中心化 DHT HTTP API 链路的断裂**——让已有的工作流代码有调用者。
+> gossip 协议层（DemandPropagator / ResponseRouter / NeighborTable /
+> P2pMessageCodec）尚未实现，属于 §8.3 迁移路径的阶段 A-C。
 
 ### 10.1 断裂清单
 
