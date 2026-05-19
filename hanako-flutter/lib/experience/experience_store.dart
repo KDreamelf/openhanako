@@ -980,7 +980,6 @@ class ExperiencePackageSupplyWorkflow {
       trustAnchor: trustAnchor,
       now: now,
     );
-    await _uploadOfferPackageToReturnPath(offer);
     return _dhtClient.publishExperienceDemandOffer(
       requestId: demand.requestId,
       offer: offer,
@@ -1045,52 +1044,7 @@ class ExperiencePackageSupplyWorkflow {
     ExperienceReviewTrustAnchor? trustAnchor,
     DateTime? now,
   }) async {
-    await _store.init();
-    final id = _requireNonEmpty(experienceId, 'experienceId');
-    final relaySessionId = _requireNonEmpty(sessionId, 'sessionId');
-    final cacheFile = File(p.join(_store.cacheDir.path, '$id.hxp'));
-    if (!await cacheFile.exists()) {
-      throw StateError('本地私有经验包缓存不存在：$id');
-    }
-    final bytes = await cacheFile.readAsBytes();
-    if (bytes.isEmpty) {
-      throw StateError('本地私有经验包缓存为空：$id');
-    }
-    final info = _readOuterPackage(bytes);
-    final verification = _verifyReviewedOuterPackage(
-      info,
-      trustAnchor: trustAnchor,
-      now: now,
-    );
-    if (!verification.ok) {
-      throw StateError('本地私有经验包不能上传 relay：${verification.message}');
-    }
-    return _dhtClient.uploadRelayPackage(
-      sessionId: relaySessionId,
-      packageBytes: bytes,
-    );
-  }
-
-  Future<void> _uploadOfferPackageToReturnPath(
-    ExperienceDemandOffer offer,
-  ) async {
-    if (offer.returnPath.isEmpty) return;
-    final cacheFile = File(
-      p.join(_store.cacheDir.path, '${offer.experienceId}.hxp'),
-    );
-    if (!await cacheFile.exists()) return;
-    final bytes = await cacheFile.readAsBytes();
-    if (bytes.isEmpty) return;
-    try {
-      await _dhtClient.uploadCachedPackageToReturnPath(
-        packageHash: offer.packageHash,
-        packageBytes: bytes,
-        experienceId: offer.experienceId,
-        returnPath: offer.returnPath,
-      );
-    } catch (_) {
-      return;
-    }
+    throw UnsupportedError('DHT relay 不允许承载经验包体，请使用 P2P 传播路径');
   }
 }
 
@@ -1115,7 +1069,7 @@ class ExperienceDemandPullWorkflow {
     List<String> queryKeywords = const [],
     String? requesterOwnerPeerId,
     List<ExperienceTransport> preferredTransports = const [
-      ExperienceTransport.dhtRelay,
+      ExperienceTransport.ipv4HolePunch,
       ExperienceTransport.managerSeed,
     ],
     int ttlSeconds = 300,
@@ -1221,11 +1175,10 @@ class ExperienceDemandPullWorkflow {
     DateTime? now,
   }) async {
     final offer = record.offer;
-    var bytes = await _tryDownloadCachedOfferPackage(offer);
+    Uint8List? bytes;
 
     // B5: 尝试 UDP hole punch 直连传输。
-    if (bytes == null &&
-        keyPair != null &&
+    if (keyPair != null &&
         requesterPeerId != null &&
         offer.availableTransports.contains(ExperienceTransport.ipv4HolePunch) &&
         offer.providerAddrs.any((e) => !e.isIPv6 && e.isValid)) {
@@ -1236,20 +1189,12 @@ class ExperienceDemandPullWorkflow {
       );
     }
 
-    if (bytes == null &&
-        offer.relaySessionId.trim().isNotEmpty &&
-        offer.availableTransports.contains(ExperienceTransport.dhtRelay)) {
-      bytes = await _dhtClient.downloadRelayPackage(
-        sessionId: offer.relaySessionId,
-      );
-    } else if (bytes == null && _managerClient != null) {
+    if (bytes == null && _managerClient != null) {
       bytes = await _managerClient.fetchPackage(
         experienceId: offer.experienceId,
       );
     } else if (bytes == null) {
-      return ExperienceImportResult.failed(
-        'offer 没有可用 DHT 缓存、hole punch、relay 会话，且未配置管理端兜底下载',
-      );
+      return ExperienceImportResult.failed('offer 没有可用传播路径包体，且未配置管理端兜底下载');
     }
     final expectedHash = _normalizePackageHashForCheck(offer.packageHash);
     if (expectedHash.isNotEmpty) {
@@ -1265,9 +1210,8 @@ class ExperienceDemandPullWorkflow {
     );
   }
 
-  /// 尝试通过 UDP hole punch 直连传输包。
-  /// 成功打洞后报告结果给 DHT。当前实现只完成打洞协调；
-  /// 实际 UDP 数据传输待后续实现，打洞成功后 fallback 到缓存下载。
+  /// 尝试通过 UDP hole punch 协调建立连接。
+  /// 该 DHT 接口只允许做协调；包体不能落到 DHT cache/relay。
   Future<Uint8List?> _tryHolePunchTransfer(
     ExperienceDemandOffer offer, {
     required String requesterPeerId,
@@ -1301,25 +1245,7 @@ class ExperienceDemandPullWorkflow {
         keyPair: keyPair,
       );
 
-      if (result.ok) {
-        // 打洞成功。实际 UDP 数据传输待实现。
-        // 当前 fallback：通过 DHT 缓存下载（对端可能已上传）。
-        return _tryDownloadCachedOfferPackage(offer);
-      }
       return null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<Uint8List?> _tryDownloadCachedOfferPackage(
-    ExperienceDemandOffer offer,
-  ) async {
-    try {
-      return await _dhtClient.downloadCachedPackage(
-        packageHash: offer.packageHash,
-        returnPath: offer.returnPath,
-      );
     } catch (_) {
       return null;
     }
@@ -1363,7 +1289,6 @@ List<ExperienceTransport> _inferAvailableTransports(
   if (endpoints.any((endpoint) => endpoint.isIPv4)) {
     transports.add(ExperienceTransport.ipv4HolePunch);
   }
-  transports.add(ExperienceTransport.dhtRelay);
   return transports;
 }
 
@@ -1453,10 +1378,6 @@ List<ExperienceDemandOfferRecord> _sortDemandOffers(
 }
 
 int _demandOfferTransportScore(ExperienceDemandOffer offer) {
-  if (offer.relaySessionId.trim().isNotEmpty &&
-      offer.availableTransports.contains(ExperienceTransport.dhtRelay)) {
-    return 3;
-  }
   if (offer.availableTransports.contains(ExperienceTransport.ipv6Direct)) {
     return 2;
   }

@@ -129,11 +129,15 @@ class ExperienceNetworkDaemon {
 
     // 包含 P2P overlay 的 UDP 端口，让其他客户端能 probe/连接。
     final overlay = _overlay;
+    final overlayHost = overlay?.transport.advertisedHost;
     final endpoints = <ExperienceNetworkEndpoint>[
-      if (overlay != null && overlay.transport.localPort != null)
+      if (overlay != null &&
+          overlayHost != null &&
+          overlayHost.trim().isNotEmpty &&
+          overlay.transport.localPort != null)
         ExperienceNetworkEndpoint(
           network: 'udp',
-          host: overlay.transport.localAddress?.address ?? '0.0.0.0',
+          host: overlayHost,
           port: overlay.transport.localPort!,
         ),
     ];
@@ -234,6 +238,7 @@ class ExperienceNetworkDaemon {
 
   void invalidateDhtClient() {
     _cachedDhtClient = null;
+    _cachedDhtNodeId = null;
     _dhtResolveFailures = 0;
     _nextDhtResolveAttempt = null;
   }

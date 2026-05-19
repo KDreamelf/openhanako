@@ -9,7 +9,7 @@ import 'package:hanako/experience/experience.dart';
 import 'package:hanako/identity/keypair.dart';
 
 void main() {
-  test('连接策略优先 IPv6 直连，然后 IPv4，最后 DHT 和管理端兜底', () {
+  test('连接策略优先 IPv6 直连，然后 IPv4，最后管理端兜底', () {
     final planner = ExperienceConnectionPlanner();
     final attempts = planner.plan(
       requesterPeerId: 'peer_requester',
@@ -36,7 +36,6 @@ void main() {
     expect(attempts.map((item) => item.transport).toList(), [
       ExperienceTransport.ipv6Direct,
       ExperienceTransport.ipv4HolePunch,
-      ExperienceTransport.dhtRelay,
       ExperienceTransport.managerSeed,
     ]);
     expect(attempts.first.endpoint?.host, '2001:db8::20');
@@ -1051,6 +1050,49 @@ void main() {
     expect(peers.single.endpoints.single.isUdpCandidate, isTrue);
   });
 
+  test('客户端提交 DHT 小红花使用原始 flower 签名契约', () async {
+    final keyPair = HanakoKeyPair.generate();
+    final dio = Dio();
+    dio.httpClientAdapter = _InspectingAdapter((options, requestStream) async {
+      expect(options.method, 'POST');
+      expect(options.uri.path, '/api/v1/trust/flowers');
+      final body = await _readJsonBody(requestStream);
+      expect(body.containsKey('payload'), isFalse);
+      expect(body.containsKey('pubkey'), isFalse);
+      expect(body['schema_version'], 'ph01.experience.dht_service_flower.v1');
+      expect(body['node_id'], 'dht_1');
+      expect(body['client_pubkey_hex'], keyPair.publicKeyHex);
+      expect(body['client_pubkey_hash'], keyPair.publicKeyHash);
+      expect(body['resource_hash'], 'sha256:pkg');
+      expect(body['work_kind'], 'p2p_rendezvous');
+      expect((body['signature'] as String).trim(), isNotEmpty);
+      return ResponseBody.fromString(
+        jsonEncode(body),
+        200,
+        headers: {
+          Headers.contentTypeHeader: [Headers.jsonContentType],
+        },
+      );
+    });
+    final client = ExperienceDhtHttpClient(
+      dhtBaseUrl: 'https://dht.test/',
+      dio: dio,
+    );
+
+    await client.submitFlower(
+      keyPair: keyPair,
+      flower: DHTServiceFlower(
+        flowerId: 'flower_1',
+        nodeId: 'dht_1',
+        clientPubkeyHex: keyPair.publicKeyHex,
+        clientPubkeyHash: keyPair.publicKeyHash,
+        resourceHash: 'sha256:pkg',
+        workKind: 'p2p_rendezvous',
+        servedAt: '2026-05-09T09:00:00Z',
+      ),
+    );
+  });
+
   test('P2P gossip demand 签名可验，篡改查询后失败', () {
     final requester = HanakoKeyPair.generate();
     final demand = P2pDemandPacket(
@@ -1122,11 +1164,7 @@ void main() {
 
     final tamperedJson = Map<String, dynamic>.from(json)
       ..['fingerprints'] = [
-        {
-          'packageHash': 'sha256:tampered',
-          'sizeBytes': 1234,
-          'title': '窗口经验',
-        },
+        {'packageHash': 'sha256:tampered', 'sizeBytes': 1234, 'title': '窗口经验'},
       ];
     final tampered = P2pResponsePacket.fromJson(tamperedJson);
     expect(tampered, isNotNull);
@@ -1211,6 +1249,182 @@ void main() {
     expect(dirty?.providedPackageHashes, ['sha256:abc']);
   });
 
+  test('P2P 分片必须预登记并保留 response 签名承诺的包 hash', () {
+    final data = Uint8List.fromList(List<int>.generate(3000, (i) => i % 251));
+    const path = [
+      P2pPathEntry(
+        nodeId: 'requester',
+        host: '127.0.0.1',
+        port: 41001,
+        timestamp: 1778323200000,
+      ),
+      P2pPathEntry(
+        nodeId: 'provider',
+        host: '127.0.0.1',
+        port: 41002,
+        timestamp: 1778323201000,
+      ),
+    ];
+    final chunks = P2pChunkedTransfer.split(
+      'tx_1',
+      data,
+      packageHash: 'sha256:package_zip_hash',
+      path: path,
+    );
+    expect(chunks.length, greaterThan(1));
+    expect(chunks.first.packageHash, 'sha256:package_zip_hash');
+    expect(chunks.first.payloadSha256, sha256.convert(data).toString());
+    expect(chunks.first.path.map((e) => e.nodeId), ['requester', 'provider']);
+
+    final unexpected = P2pChunkAssembler();
+    expect(unexpected.receive(chunks.first), isFalse);
+    expect(unexpected.hasExpected('tx_1'), isFalse);
+
+    final assembler = P2pChunkAssembler();
+    var completed = false;
+    assembler.expect(
+      'tx_1',
+      onComplete: (received, packageHash) {
+        completed = true;
+        expect(received, data);
+        expect(packageHash, 'sha256:package_zip_hash');
+      },
+    );
+    for (final chunk in chunks) {
+      assembler.receive(chunk);
+    }
+    expect(completed, isTrue);
+  });
+
+  test('P2P 包体按 forwardPath 三节点逐跳传输并让中间节点持有', () async {
+    final tmp = Directory.systemTemp.createTempSync('hanako_p2p_forward_path_');
+    addTearDown(() {
+      if (tmp.existsSync()) tmp.deleteSync(recursive: true);
+    });
+
+    final requesterStore = ExperienceStore(
+      agentDir: Directory('${tmp.path}/requester'),
+    );
+    final relayStore = ExperienceStore(
+      agentDir: Directory('${tmp.path}/relay'),
+    );
+    final providerStore = ExperienceStore(
+      agentDir: Directory('${tmp.path}/provider'),
+    );
+
+    final providerKey = HanakoKeyPair.generate();
+    final saved = await providerStore.savePrivateExperience(
+      title: '逐跳传输经验',
+      conversation: '[2026-05-09T00:00:00Z] 用户: 逐跳传输 forwardPath\n',
+      keywords: const ['逐跳', 'forwardPath'],
+      now: DateTime.utc(2026, 5, 9, 1, 2, 3),
+    );
+    final generated = await providerStore.packagePrivateExperience(
+      experienceId: saved.experienceId,
+      keyPair: providerKey,
+    );
+    final review = _reviewFixture(generated.publisher);
+    await providerStore.attachReviewMaterialsToPrivatePackage(
+      experienceId: saved.experienceId,
+      reviewMaterials: review.materials,
+      trustAnchor: review.anchor,
+      now: DateTime.utc(2026, 5, 9),
+    );
+
+    final requesterKey = HanakoKeyPair.generate();
+    final relayKey = HanakoKeyPair.generate();
+    final dhtClient = ExperienceDhtHttpClient(
+      dhtBaseUrl: 'http://127.0.0.1:1/',
+    );
+    final requester = ExperienceP2pOverlay(
+      localNodeId: requesterKey.publicKeyHash,
+      keyPair: requesterKey,
+      store: requesterStore,
+      dhtClient: dhtClient,
+      dhtNodeId: 'dht_test',
+      trustAnchor: review.anchor,
+    );
+    final relay = ExperienceP2pOverlay(
+      localNodeId: relayKey.publicKeyHash,
+      keyPair: relayKey,
+      store: relayStore,
+      dhtClient: dhtClient,
+      dhtNodeId: 'dht_test',
+      trustAnchor: review.anchor,
+    );
+    final provider = ExperienceP2pOverlay(
+      localNodeId: providerKey.publicKeyHash,
+      keyPair: providerKey,
+      store: providerStore,
+      dhtClient: dhtClient,
+      dhtNodeId: 'dht_test',
+      trustAnchor: review.anchor,
+    );
+    addTearDown(() async {
+      await requester.stop();
+      await relay.stop();
+      await provider.stop();
+    });
+
+    await requester.start();
+    await relay.start();
+    await provider.start();
+
+    requester.neighborTable.addOrUpdate(
+      Neighbor(
+        nodeId: relayKey.publicKeyHash,
+        host: '127.0.0.1',
+        port: relay.transport.localPort!,
+      ),
+    );
+    relay.neighborTable
+      ..addOrUpdate(
+        Neighbor(
+          nodeId: requesterKey.publicKeyHash,
+          host: '127.0.0.1',
+          port: requester.transport.localPort!,
+        ),
+      )
+      ..addOrUpdate(
+        Neighbor(
+          nodeId: providerKey.publicKeyHash,
+          host: '127.0.0.1',
+          port: provider.transport.localPort!,
+        ),
+      );
+    provider.neighborTable.addOrUpdate(
+      Neighbor(
+        nodeId: relayKey.publicKeyHash,
+        host: '127.0.0.1',
+        port: relay.transport.localPort!,
+      ),
+    );
+
+    final demand = P2pDemandPacket(
+      demandId: 'dem_forward_path',
+      requesterPubKey: requesterKey.publicKeyHex,
+      signature: '',
+      query: '逐跳传输',
+      tags: const ['forwardPath'],
+      maxResponses: 1,
+      createdAt: DateTime.utc(2026, 5, 9).millisecondsSinceEpoch,
+    )..signWith(requesterKey);
+    requester.publishDemand(demand);
+
+    final requesterCache = File(
+      '${requesterStore.cacheDir.path}/${saved.experienceId}.hxp',
+    );
+    final relayCache = File(
+      '${relayStore.cacheDir.path}/${saved.experienceId}.hxp',
+    );
+    await _waitUntil(
+      () => requesterCache.existsSync() && relayCache.existsSync(),
+    );
+
+    expect(requesterCache.lengthSync(), greaterThan(0));
+    expect(relayCache.lengthSync(), requesterCache.lengthSync());
+  });
+
   test('P2P 包请求与供给响应 JSON 保留签名和传输字段', () {
     final timestamp = DateTime.utc(2026, 5, 9, 9);
     final request = ExperiencePackageRequest(
@@ -1228,7 +1442,7 @@ void main() {
       ],
       preferredTransports: const [
         ExperienceTransport.ipv6Direct,
-        ExperienceTransport.dhtRelay,
+        ExperienceTransport.managerSeed,
       ],
       dhtNodeId: 'dht_1',
       nonce: 'nonce_1',
@@ -1241,7 +1455,7 @@ void main() {
     expect(decodedRequest.requesterPublicKey, 'pub_requester');
     expect(decodedRequest.preferredTransports, [
       ExperienceTransport.ipv6Direct,
-      ExperienceTransport.dhtRelay,
+      ExperienceTransport.managerSeed,
     ]);
     expect(decodedRequest.requesterSignature, 'sig_requester');
 
@@ -1260,7 +1474,7 @@ void main() {
       ],
       availableTransports: const [
         ExperienceTransport.ipv4HolePunch,
-        ExperienceTransport.dhtRelay,
+        ExperienceTransport.managerSeed,
       ],
       reviewMaterials: const ExperienceReviewMaterials(
         rootKeyId: 'test-root',
@@ -1281,7 +1495,7 @@ void main() {
     expect(decodedOffer.providerAddrs.single.requiresHolePunch, isTrue);
     expect(decodedOffer.availableTransports, [
       ExperienceTransport.ipv4HolePunch,
-      ExperienceTransport.dhtRelay,
+      ExperienceTransport.managerSeed,
     ]);
     expect(decodedOffer.reviewMaterials?.rootKeyId, 'test-root');
     expect(decodedOffer.publisher['pubkey'], 'pub_provider');
@@ -1333,9 +1547,8 @@ void main() {
           requiresHolePunch: true,
         ),
       ],
-      availableTransports: const [ExperienceTransport.dhtRelay],
+      availableTransports: const [ExperienceTransport.ipv4HolePunch],
       returnPath: demand.returnPath,
-      relaySessionId: 'relay_1',
       timestamp: timestamp,
       providerSignature: 'sig_provider',
     );
@@ -1345,9 +1558,10 @@ void main() {
     expect(decodedOffer.effectiveReviewChainLength, 1);
     expect(decodedOffer.reviewChain.single['type'], 'root');
     expect(decodedOffer.providerAddrs.single.requiresHolePunch, isTrue);
-    expect(decodedOffer.availableTransports, [ExperienceTransport.dhtRelay]);
+    expect(decodedOffer.availableTransports, [
+      ExperienceTransport.ipv4HolePunch,
+    ]);
     expect(decodedOffer.returnPath.single.apiBaseUrl, 'https://dht.test');
-    expect(decodedOffer.relaySessionId, 'relay_1');
   });
 
   test('客户端可通过 DHT 发布自然语言需求并查询 offer', () async {
@@ -1395,7 +1609,7 @@ void main() {
                 'natural_language_query': '窗口自动化经验',
                 'query_keywords': ['窗口'],
                 'requester_peer_id': 'peer_requester',
-                'preferred_transports': ['dht_relay', 'manager_seed'],
+                'preferred_transports': ['ipv4_hole_punch', 'manager_seed'],
                 'created_at': timestamp.toIso8601String(),
                 'expires_at': '2026-05-09T10:00:00Z',
                 'updated_at': '2026-05-09T09:00:00Z',
@@ -1444,7 +1658,7 @@ void main() {
               ],
               'review_chain_length': 1,
               'provider_peer_id': 'peer_provider',
-              'available_transports': ['dht_relay'],
+              'available_transports': ['ipv4_hole_punch'],
               'timestamp': timestamp.toIso8601String(),
               'offered_at': '2026-05-09T09:01:00Z',
             },
@@ -1537,7 +1751,7 @@ void main() {
                 'requester_addrs': [
                   {'network': 'udp', 'host': '198.51.100.10', 'port': 41010},
                 ],
-                'preferred_transports': ['ipv4_hole_punch', 'dht_relay'],
+                'preferred_transports': ['ipv4_hole_punch', 'manager_seed'],
                 'nonce': 'nonce_1',
                 'timestamp': timestamp.toIso8601String(),
                 'expires_at': '2026-05-09T10:00:00Z',
@@ -1581,7 +1795,7 @@ void main() {
               'provider_addrs': [
                 {'network': 'udp', 'host': '198.51.100.20', 'port': 41020},
               ],
-              'available_transports': ['ipv4_hole_punch', 'dht_relay'],
+              'available_transports': ['ipv4_hole_punch', 'manager_seed'],
               'publisher': {'pubkey': 'pub_provider'},
               'nonce': 'nonce_2',
               'timestamp': timestamp.toIso8601String(),
@@ -1618,7 +1832,7 @@ void main() {
         ],
         preferredTransports: const [
           ExperienceTransport.ipv4HolePunch,
-          ExperienceTransport.dhtRelay,
+          ExperienceTransport.managerSeed,
         ],
         nonce: 'nonce_1',
         timestamp: timestamp,
@@ -1644,7 +1858,7 @@ void main() {
         ],
         availableTransports: const [
           ExperienceTransport.ipv4HolePunch,
-          ExperienceTransport.dhtRelay,
+          ExperienceTransport.managerSeed,
         ],
         publisher: const {'pubkey': 'pub_provider'},
         nonce: 'nonce_2',
@@ -1656,13 +1870,13 @@ void main() {
     expect(requestRecord.request.requestId, 'req_1');
     expect(requests.single.request.preferredTransports, [
       ExperienceTransport.ipv4HolePunch,
-      ExperienceTransport.dhtRelay,
+      ExperienceTransport.managerSeed,
     ]);
     expect(offerRecord.offer.providerPeerId, 'peer_provider');
     expect(offers.single.offer.providerAddrs.single.host, '198.51.100.20');
   });
 
-  test('供给方工作流可从本地完整包发布 offer 并上传 relay 缓存', () async {
+  test('供给方工作流只发布 offer 元数据，不向 DHT 上传包体', () async {
     final tmp = Directory.systemTemp.createTempSync('hanako_supply_flow_');
     addTearDown(() {
       if (tmp.existsSync()) tmp.deleteSync(recursive: true);
@@ -1686,78 +1900,21 @@ void main() {
       trustAnchor: review.anchor,
       now: DateTime.utc(2026, 5, 9),
     );
-    final cacheBytes = File(generated.cachePath).readAsBytesSync();
 
     final dio = Dio();
     dio.httpClientAdapter = _InspectingAdapter((options, requestStream) async {
-      if (options.method == 'POST' &&
-          options.uri.path == '/api/v1/package-requests/req_1/offers') {
-        final envelope = await _readJsonBody(requestStream);
-        expect(envelope['pubkey'], keyPair.publicKeyHex);
-        final payload =
-            jsonDecode(envelope['payload'] as String) as Map<String, dynamic>;
-        expect(payload['schema_version'], 'ph01.experience.package_offer.v1');
-        expect(payload['experience_id'], saved.experienceId);
-        expect(payload['provider_peer_id'], 'peer_provider');
-        expect(payload['review_materials'], isA<Map>());
-        return ResponseBody.fromString(
-          jsonEncode({...payload, 'offered_at': '2026-05-09T09:01:00Z'}),
-          200,
-          headers: {
-            Headers.contentTypeHeader: [Headers.jsonContentType],
-          },
-        );
-      }
-      if (options.method == 'POST' &&
-          options.uri.path == '/api/v1/relay/sessions') {
-        final envelope = await _readJsonBody(requestStream);
-        expect(envelope['pubkey'], keyPair.publicKeyHex);
-        final payload =
-            jsonDecode(envelope['payload'] as String) as Map<String, dynamic>;
-        expect(
-          payload['schema_version'],
-          'ph01.experience.relay_session_request.v1',
-        );
-        expect(payload['request_id'], 'req_1');
-        expect(payload['provider_peer_id'], 'peer_provider');
-        return ResponseBody.fromString(
-          jsonEncode({
-            'schema_version': 'ph01.experience.relay_session.v1',
-            'session_id': 'relay_1',
-            'request_id': 'req_1',
-            'experience_id': saved.experienceId,
-            'package_hash': generated.publisher.packageHash,
-            'requester_peer_id': 'peer_requester',
-            'provider_peer_id': 'peer_provider',
-            'expires_at': '2026-05-09T10:00:00Z',
-            'max_bytes': 1024,
-            'status': 'open',
-          }),
-          200,
-          headers: {
-            Headers.contentTypeHeader: [Headers.jsonContentType],
-          },
-        );
-      }
-      expect(options.method, 'PUT');
-      expect(options.uri.path, '/api/v1/relay/sessions/relay_1/package');
-      final body = await _readRawBody(requestStream);
-      expect(body, cacheBytes);
+      expect(options.method, 'POST');
+      expect(options.uri.path, '/api/v1/package-requests/req_1/offers');
+      final envelope = await _readJsonBody(requestStream);
+      expect(envelope['pubkey'], keyPair.publicKeyHex);
+      final payload =
+          jsonDecode(envelope['payload'] as String) as Map<String, dynamic>;
+      expect(payload['schema_version'], 'ph01.experience.package_offer.v1');
+      expect(payload['experience_id'], saved.experienceId);
+      expect(payload['provider_peer_id'], 'peer_provider');
+      expect(payload['review_materials'], isA<Map>());
       return ResponseBody.fromString(
-        jsonEncode({
-          'schema_version': 'ph01.experience.relay_session.v1',
-          'session_id': 'relay_1',
-          'request_id': 'req_1',
-          'experience_id': saved.experienceId,
-          'package_hash': generated.publisher.packageHash,
-          'requester_peer_id': 'peer_requester',
-          'provider_peer_id': 'peer_provider',
-          'expires_at': '2026-05-09T10:00:00Z',
-          'max_bytes': 1024,
-          'status': 'uploaded',
-          'bytes': cacheBytes.length,
-          'payload_sha256': 'hash_1',
-        }),
+        jsonEncode({...payload, 'offered_at': '2026-05-09T09:01:00Z'}),
         200,
         headers: {
           Headers.contentTypeHeader: [Headers.jsonContentType],
@@ -1786,36 +1943,16 @@ void main() {
           port: 41020,
         ),
       ],
-      availableTransports: const [
-        ExperienceTransport.ipv4HolePunch,
-        ExperienceTransport.dhtRelay,
-      ],
+      availableTransports: const [ExperienceTransport.ipv4HolePunch],
       trustAnchor: review.anchor,
       now: DateTime.utc(2026, 5, 9, 9, 0, 0),
-    );
-    final relaySession = await client.createRelaySession(
-      keyPair: keyPair,
-      request: ExperienceDhtRelaySessionRequest(
-        requestId: 'req_1',
-        experienceId: saved.experienceId,
-        packageHash: generated.publisher.packageHash,
-        requesterPeerId: 'peer_requester',
-        providerPeerId: 'peer_provider',
-        maxBytes: 1024,
-      ),
-    );
-    final uploaded = await workflow.uploadLocalPackageToRelay(
-      experienceId: saved.experienceId,
-      sessionId: relaySession.sessionId,
-      now: DateTime.utc(2026, 5, 9, 9, 0, 0),
-      trustAnchor: review.anchor,
     );
 
     expect(offerRecord.offer.requestId, 'req_1');
     expect(offerRecord.offer.reviewMaterials?.rootKeyId, 'test-root');
-    expect(relaySession.sessionId, 'relay_1');
-    expect(uploaded.status, 'uploaded');
-    expect(uploaded.bytes, cacheBytes.length);
+    expect(offerRecord.offer.availableTransports, [
+      ExperienceTransport.ipv4HolePunch,
+    ]);
   });
 
   test('自然语言需求工作流可收集 offer 并通过管理端兜底导入经验包', () async {
@@ -1981,7 +2118,7 @@ void main() {
                 'request_id': 'dem_supply',
                 'natural_language_query': '窗口 自动化',
                 'requester_peer_id': 'peer_requester',
-                'preferred_transports': ['dht_relay', 'manager_seed'],
+                'preferred_transports': ['ipv4_hole_punch', 'manager_seed'],
                 'return_path': [
                   {'node_id': 'dht_1', 'api_base_url': 'https://dht.test'},
                 ],
@@ -2038,74 +2175,39 @@ void main() {
     expect(offers.single.offer.reviewChain, isNotEmpty);
   });
 
-  test('客户端可创建 DHT relay 会话并上传下载包字节', () async {
+  test('客户端可创建 DHT relay 会话但禁止上传下载包字节', () async {
     final keyPair = HanakoKeyPair.generate();
     final packageBytes = Uint8List.fromList([1, 2, 3, 4]);
     final dio = Dio();
     dio.httpClientAdapter = _InspectingAdapter((options, requestStream) async {
-      if (options.method == 'POST') {
-        expect(options.uri.path, '/api/v1/relay/sessions');
-        final envelope = await _readJsonBody(requestStream);
-        expect(envelope['pubkey'], keyPair.publicKeyHex);
-        final payload =
-            jsonDecode(envelope['payload'] as String) as Map<String, dynamic>;
-        expect(
-          payload['schema_version'],
-          'ph01.experience.relay_session_request.v1',
-        );
-        expect(payload['request_id'], 'req_1');
-        expect(payload['package_hash'], 'sha256:abc');
-        return ResponseBody.fromString(
-          jsonEncode({
-            'schema_version': 'ph01.experience.relay_session.v1',
-            'session_id': 'relay_1',
-            'request_id': 'req_1',
-            'experience_id': 'exp_1',
-            'package_hash': 'sha256:abc',
-            'requester_peer_id': 'peer_requester',
-            'provider_peer_id': 'peer_provider',
-            'expires_at': '2026-05-09T10:00:00Z',
-            'max_bytes': 1024,
-            'status': 'open',
-          }),
-          200,
-          headers: {
-            Headers.contentTypeHeader: [Headers.jsonContentType],
-          },
-        );
-      }
-      if (options.method == 'PUT') {
-        expect(options.uri.path, '/api/v1/relay/sessions/relay_1/package');
-        final body = await _readRawBody(requestStream);
-        expect(body, packageBytes);
-        return ResponseBody.fromString(
-          jsonEncode({
-            'schema_version': 'ph01.experience.relay_session.v1',
-            'session_id': 'relay_1',
-            'request_id': 'req_1',
-            'experience_id': 'exp_1',
-            'package_hash': 'sha256:abc',
-            'requester_peer_id': 'peer_requester',
-            'provider_peer_id': 'peer_provider',
-            'expires_at': '2026-05-09T10:00:00Z',
-            'max_bytes': 1024,
-            'status': 'uploaded',
-            'bytes': 4,
-            'payload_sha256': 'hash_1',
-          }),
-          200,
-          headers: {
-            Headers.contentTypeHeader: [Headers.jsonContentType],
-          },
-        );
-      }
-      expect(options.method, 'GET');
-      expect(options.uri.path, '/api/v1/relay/sessions/relay_1/package');
-      return ResponseBody.fromBytes(
-        packageBytes,
+      expect(options.method, 'POST');
+      expect(options.uri.path, '/api/v1/relay/sessions');
+      final envelope = await _readJsonBody(requestStream);
+      expect(envelope['pubkey'], keyPair.publicKeyHex);
+      final payload =
+          jsonDecode(envelope['payload'] as String) as Map<String, dynamic>;
+      expect(
+        payload['schema_version'],
+        'ph01.experience.relay_session_request.v1',
+      );
+      expect(payload['request_id'], 'req_1');
+      expect(payload['package_hash'], 'sha256:abc');
+      return ResponseBody.fromString(
+        jsonEncode({
+          'schema_version': 'ph01.experience.relay_session.v1',
+          'session_id': 'relay_1',
+          'request_id': 'req_1',
+          'experience_id': 'exp_1',
+          'package_hash': 'sha256:abc',
+          'requester_peer_id': 'peer_requester',
+          'provider_peer_id': 'peer_provider',
+          'expires_at': '2026-05-09T10:00:00Z',
+          'max_bytes': 1024,
+          'status': 'open',
+        }),
         200,
         headers: {
-          Headers.contentTypeHeader: ['application/octet-stream'],
+          Headers.contentTypeHeader: [Headers.jsonContentType],
         },
       );
     });
@@ -2125,57 +2227,24 @@ void main() {
         maxBytes: 1024,
       ),
     );
-    final uploaded = await client.uploadRelayPackage(
-      sessionId: session.sessionId,
-      packageBytes: packageBytes,
-    );
-    final downloaded = await client.downloadRelayPackage(
-      sessionId: session.sessionId,
-    );
-
     expect(session.status, 'open');
-    expect(uploaded.hasPayload, isTrue);
-    expect(uploaded.payloadSha256, 'hash_1');
-    expect(downloaded, packageBytes);
+    expect(
+      client.uploadRelayPackage(
+        sessionId: session.sessionId,
+        packageBytes: packageBytes,
+      ),
+      throwsUnsupportedError,
+    );
+    expect(
+      client.downloadRelayPackage(sessionId: session.sessionId),
+      throwsUnsupportedError,
+    );
   });
 
-  test('客户端可沿需求回传路径缓存包并按需拉取评价链', () async {
-    final packageBytes = Uint8List.fromList([7, 8, 9]);
+  test('客户端只从 DHT 拉取评价链，不再上传或下载包体缓存', () async {
     final calls = <String>[];
     final dio = Dio();
     dio.httpClientAdapter = _InspectingAdapter((options, requestStream) async {
-      if (options.method == 'PUT') {
-        expect(options.uri.path, '/api/v1/cache/packages/abc');
-        expect(options.headers['X-PH01-Experience-ID'], 'exp_1');
-        final body = await _readRawBody(requestStream);
-        expect(body, packageBytes);
-        calls.add('PUT ${options.uri.host}');
-        return ResponseBody.fromString(
-          jsonEncode({
-            'package_hash': 'sha256:abc',
-            'experience_id': 'exp_1',
-            'bytes': packageBytes.length,
-            'payload_sha256': 'hash_1',
-            'stored_at': '2026-05-09T09:00:00Z',
-            'expires_at': '2026-05-16T09:00:00Z',
-          }),
-          200,
-          headers: {
-            Headers.contentTypeHeader: [Headers.jsonContentType],
-          },
-        );
-      }
-      if (options.method == 'GET' &&
-          options.uri.path == '/api/v1/cache/packages/abc') {
-        calls.add('GET ${options.uri.host}');
-        return ResponseBody.fromBytes(
-          packageBytes,
-          200,
-          headers: {
-            Headers.contentTypeHeader: ['application/octet-stream'],
-          },
-        );
-      }
       expect(options.method, 'GET');
       expect(options.uri.path, '/api/v1/review-chains/chain');
       calls.add('GET_CHAIN ${options.uri.host}');
@@ -2196,33 +2265,11 @@ void main() {
       dhtBaseUrl: 'https://local-dht.test/',
       dio: dio,
     );
-    const returnPath = [
-      ExperienceDemandReturnHop(nodeId: 'dht_a', apiBaseUrl: 'https://a.test'),
-      ExperienceDemandReturnHop(nodeId: 'dht_b', apiBaseUrl: 'https://b.test'),
-    ];
 
-    final uploaded = await client.uploadCachedPackageToReturnPath(
-      packageHash: 'sha256:abc',
-      packageBytes: packageBytes,
-      experienceId: 'exp_1',
-      returnPath: returnPath,
-    );
-    final downloaded = await client.downloadCachedPackage(
-      packageHash: 'sha256:abc',
-      returnPath: returnPath,
-    );
     final chain = await client.fetchReviewChainByDigest(digest: 'sha256:chain');
 
-    expect(uploaded, 3);
-    expect(downloaded, packageBytes);
     expect(chain, hasLength(2));
-    expect(calls, [
-      'PUT b.test',
-      'PUT a.test',
-      'PUT local-dht.test',
-      'GET a.test',
-      'GET_CHAIN local-dht.test',
-    ]);
+    expect(calls, ['GET_CHAIN local-dht.test']);
   });
 
   test('客户端可创建 DHT 打洞协调会话并上报查询状态', () async {
@@ -2547,6 +2594,19 @@ class _InspectingAdapter implements HttpClientAdapter {
 
   @override
   void close({bool force = false}) {}
+}
+
+Future<void> _waitUntil(
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 5),
+  Duration interval = const Duration(milliseconds: 50),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(deadline)) {
+    if (condition()) return;
+    await Future<void>.delayed(interval);
+  }
+  expect(condition(), isTrue);
 }
 
 Future<Map<String, dynamic>> _readJsonBody(

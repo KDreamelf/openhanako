@@ -463,6 +463,22 @@ func TestPresenceAndProviderLookup(t *testing.T) {
 	if out.Total != 1 || out.Items[0].PeerID != "peer_owner_device" {
 		t.Fatalf("unexpected providers: %+v", out)
 	}
+
+	resp, err = http.Get(srv.URL + "/api/v1/peers?limit=10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var peers struct {
+		Items []ProviderRecord `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&peers); err != nil {
+		t.Fatal(err)
+	}
+	if peers.Total != 1 || peers.Items[0].PeerID != "peer_owner_device" {
+		t.Fatalf("unexpected peers: %+v", peers)
+	}
 }
 
 func TestProviderLookupIncludesFederatedUpstream(t *testing.T) {
@@ -496,6 +512,114 @@ func TestProviderLookupIncludesFederatedUpstream(t *testing.T) {
 	items := fetchProviders(t, localSrv.URL, "sha256:fed")
 	if len(items) != 1 || items[0].PeerID != "peer_remote" {
 		t.Fatalf("unexpected federated providers: %+v", items)
+	}
+}
+
+func TestPeerDiscoveryIncludesFederatedUpstream(t *testing.T) {
+	cfg := testConfig(t)
+	owner := testKey(t)
+	remoteHandler, _, _ := testHandler(t, cfg)
+	remoteSrv := httptest.NewServer(remoteHandler)
+	defer remoteSrv.Close()
+
+	resp := postSigned(t, remoteSrv.URL+"/api/v1/peers/presence", owner, PresenceRequest{
+		PeerID:        "peer_remote_online",
+		PackageHashes: []string{"sha256:fed"},
+		Endpoints: []Endpoint{{
+			Network: "udp",
+			Host:    "203.0.113.22",
+			Port:    41001,
+		}},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("remote presence status=%d body=%s", resp.StatusCode, readBody(t, resp))
+	}
+	_ = resp.Body.Close()
+
+	localCfg := testConfig(t)
+	localCfg.NodeID = "dht_local_peer_discovery"
+	localHandler, _, _ := testHandler(t, localCfg)
+	localHandler.setUpstreams([]NodeDescriptor{testServerNode(t, "dht_remote_peer_discovery", remoteSrv.URL)})
+	localSrv := httptest.NewServer(localHandler)
+	defer localSrv.Close()
+
+	resp, err := http.Get(localSrv.URL + "/api/v1/peers?limit=10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Items []ProviderRecord `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Total != 1 || out.Items[0].PeerID != "peer_remote_online" {
+		t.Fatalf("unexpected federated peers: %+v", out)
+	}
+}
+
+func TestPeerDiscoveryFiltersInvalidFederatedPeers(t *testing.T) {
+	now := time.Now().UTC()
+	remoteSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/federation/peers" {
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"items": []ProviderRecord{
+				{
+					PeerID:    "peer_no_endpoint",
+					ExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
+					UpdatedAt: now.Format(time.RFC3339),
+				},
+				{
+					PeerID: "peer_expired",
+					Endpoints: []Endpoint{{
+						Network: "udp",
+						Host:    "203.0.113.23",
+						Port:    41001,
+					}},
+					ExpiresAt: now.Add(-time.Hour).Format(time.RFC3339),
+					UpdatedAt: now.Add(-2 * time.Hour).Format(time.RFC3339),
+				},
+				{
+					PeerID: "peer_remote_usable",
+					Endpoints: []Endpoint{{
+						Network: "udp",
+						Host:    "203.0.113.24",
+						Port:    41001,
+					}},
+					ExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
+					UpdatedAt: now.Format(time.RFC3339),
+				},
+			},
+			"total": 3,
+		})
+	}))
+	defer remoteSrv.Close()
+
+	localCfg := testConfig(t)
+	localCfg.NodeID = "dht_local_peer_filter"
+	localHandler, _, _ := testHandler(t, localCfg)
+	localHandler.setUpstreams([]NodeDescriptor{testServerNode(t, "dht_remote_peer_filter", remoteSrv.URL)})
+	localSrv := httptest.NewServer(localHandler)
+	defer localSrv.Close()
+
+	resp, err := http.Get(localSrv.URL + "/api/v1/peers?limit=10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Items []ProviderRecord `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Total != 1 || out.Items[0].PeerID != "peer_remote_usable" {
+		t.Fatalf("unexpected filtered peers: %+v", out)
 	}
 }
 
@@ -564,7 +688,7 @@ func TestOwnerOnlyPresenceRejectsOtherPubkey(t *testing.T) {
 	}
 }
 
-func TestRelaySessionUploadsAndDownloadsExactBytes(t *testing.T) {
+func TestRelaySessionDoesNotExposePackageByteEndpoints(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.RelayPolicy = RelayPolicyPublic
 	cfg.RelayMaxBytes = 1024
@@ -594,31 +718,20 @@ func TestRelaySessionUploadsAndDownloadsExactBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var uploaded RelaySession
-	if err := json.NewDecoder(resp.Body).Decode(&uploaded); err != nil {
-		t.Fatal(err)
-	}
+	body := []byte(readBody(t, resp))
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("upload status=%d session=%+v", resp.StatusCode, uploaded)
-	}
-	if uploaded.Status != "uploaded" || uploaded.Bytes != int64(len(payload)) {
-		t.Fatalf("unexpected uploaded session: %+v", uploaded)
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("DHT relay package upload must stay disabled, body=%s", body)
 	}
 
 	resp, err = http.Get(srv.URL + "/api/v1/relay/sessions/" + session.SessionID + "/package")
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := []byte(readBody(t, resp))
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("download status=%d body=%s", resp.StatusCode, body)
-	}
-	if !bytes.Equal(body, payload) {
-		t.Fatalf("downloaded bytes mismatch: %q", body)
-	}
-	if resp.Header.Get("X-PH01-Relay-Payload-SHA256") != hex.EncodeToString(sha256Bytes(payload)) {
-		t.Fatalf("payload hash header mismatch")
+	body = []byte(readBody(t, resp))
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("DHT relay package download must stay disabled, body=%s", body)
 	}
 
 	resp, err = http.Get(srv.URL + "/api/v1/cache/packages/abc")
@@ -626,14 +739,8 @@ func TestRelaySessionUploadsAndDownloadsExactBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	body = []byte(readBody(t, resp))
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("cache download status=%d body=%s", resp.StatusCode, body)
-	}
-	if !bytes.Equal(body, payload) {
-		t.Fatalf("cached relay bytes mismatch: %q", body)
-	}
-	if resp.Header.Get("X-PH01-Package-Hash") != "sha256:abc" {
-		t.Fatalf("cache package hash header mismatch: %s", resp.Header.Get("X-PH01-Package-Hash"))
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("DHT package cache must stay disabled, body=%s", body)
 	}
 }
 
@@ -685,7 +792,7 @@ func TestOwnerOnlyRelayAllowsOwnerParticipant(t *testing.T) {
 	}
 }
 
-func TestRelayRejectsOversizedPayload(t *testing.T) {
+func TestRelayPackageEndpointStaysDisabledBeforeSizeChecks(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.RelayPolicy = RelayPolicyPublic
 	cfg.RelayMaxBytes = 4
@@ -704,8 +811,8 @@ func TestRelayRejectsOversizedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("expected 413, got %d body=%s", resp.StatusCode, readBody(t, resp))
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("DHT relay package upload must stay disabled, body=%s", readBody(t, resp))
 	}
 	_ = resp.Body.Close()
 }
@@ -875,7 +982,7 @@ func TestPackageRequestOfferRouting(t *testing.T) {
 			Host:    "198.51.100.10",
 			Port:    41010,
 		}},
-		PreferredTransports: []string{"ipv4_hole_punch", "dht_relay"},
+		PreferredTransports: []string{"ipv4_hole_punch", "manager_seed"},
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("request publish status=%d body=%s", resp.StatusCode, readBody(t, resp))
@@ -908,7 +1015,7 @@ func TestPackageRequestOfferRouting(t *testing.T) {
 			Host:    "198.51.100.20",
 			Port:    41020,
 		}},
-		AvailableTransports: []string{"ipv4_hole_punch", "dht_relay"},
+		AvailableTransports: []string{"ipv4_hole_punch", "manager_seed"},
 		ReviewMaterials:     map[string]any{"schema_version": "ph01.experience.review_materials.v1"},
 		Publisher:           map[string]any{"pubkey": "pub_provider"},
 	})
@@ -949,7 +1056,7 @@ func TestExperienceDemandOfferRouting(t *testing.T) {
 		QueryLanguage:        "zh-CN",
 		QueryKeywords:        []string{"窗口", "自动化"},
 		RequesterPeerID:      "peer_requester",
-		PreferredTransports:  []string{"dht_relay", "manager_seed"},
+		PreferredTransports:  []string{"ipv4_hole_punch", "manager_seed"},
 		HopLimit:             4,
 	})
 	if resp.StatusCode != http.StatusOK {
@@ -995,7 +1102,7 @@ func TestExperienceDemandOfferRouting(t *testing.T) {
 			Host:    "198.51.100.20",
 			Port:    41020,
 		}},
-		AvailableTransports: []string{"dht_relay"},
+		AvailableTransports: []string{"ipv4_hole_punch"},
 		ReviewChain: []map[string]any{{
 			"schema_version": "ph01.experience.ratings.v1",
 			"type":           "root",
@@ -1184,7 +1291,7 @@ func TestExperienceDemandOffersFallbackToManagerSeed(t *testing.T) {
 		RequestID:            "dem_manager",
 		NaturalLanguageQuery: "我想要窗口识别经验",
 		RequesterPeerID:      "peer_requester",
-		PreferredTransports:  []string{"dht_relay", "manager_seed"},
+		PreferredTransports:  []string{"ipv4_hole_punch", "manager_seed"},
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected demand status: %d", resp.StatusCode)

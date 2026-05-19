@@ -712,7 +712,6 @@ class ExperiencePackageRequest {
     this.preferredTransports = const [
       ExperienceTransport.ipv6Direct,
       ExperienceTransport.ipv4HolePunch,
-      ExperienceTransport.dhtRelay,
       ExperienceTransport.managerSeed,
     ],
     this.dhtNodeId,
@@ -952,7 +951,7 @@ class ExperienceDemand {
     this.requesterOwnerPeerId,
     this.requesterPubkeyHash = '',
     this.preferredTransports = const [
-      ExperienceTransport.dhtRelay,
+      ExperienceTransport.ipv4HolePunch,
       ExperienceTransport.managerSeed,
     ],
     this.ttlSeconds,
@@ -1194,37 +1193,6 @@ class ExperienceDemandOffer {
           DateTime.tryParse(json['timestamp']?.toString() ?? '')?.toUtc() ??
           DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
       providerSignature: json['provider_signature']?.toString() ?? '',
-    );
-  }
-}
-
-class ExperienceDhtPackageCacheRecord {
-  const ExperienceDhtPackageCacheRecord({
-    required this.packageHash,
-    this.experienceId = '',
-    this.bytes = 0,
-    this.payloadSha256 = '',
-    this.storedAt,
-    this.expiresAt,
-  });
-
-  final String packageHash;
-  final String experienceId;
-  final int bytes;
-  final String payloadSha256;
-  final DateTime? storedAt;
-  final DateTime? expiresAt;
-
-  static ExperienceDhtPackageCacheRecord fromJson(Map<String, dynamic> json) {
-    return ExperienceDhtPackageCacheRecord(
-      packageHash: json['package_hash']?.toString() ?? '',
-      experienceId: json['experience_id']?.toString() ?? '',
-      bytes: _intValue(json['bytes']),
-      payloadSha256: json['payload_sha256']?.toString() ?? '',
-      storedAt: DateTime.tryParse(json['stored_at']?.toString() ?? '')?.toUtc(),
-      expiresAt: DateTime.tryParse(
-        json['expires_at']?.toString() ?? '',
-      )?.toUtc(),
     );
   }
 }
@@ -1543,7 +1511,6 @@ class ExperienceConnectionPlanner {
     DateTime? now,
     bool managerSeedAvailable = true,
   }) {
-    final timestamp = (now ?? DateTime.now()).toUtc();
     final attempts = <ExperienceConnectionAttempt>[];
     final endpoints = provider.endpoints.where((item) => item.isValid).toList();
 
@@ -1571,30 +1538,6 @@ class ExperienceConnectionPlanner {
       );
     }
 
-    final relayNodes =
-        dhtNodes
-            .where((node) => node.isUsable(timestamp))
-            .where(
-              (node) => node.canRelayBetween(
-                requesterPeerId: requesterPeerId,
-                providerPeerId: provider.peerId,
-              ),
-            )
-            .toList()
-          ..sort(_compareDhtNodes);
-    for (final node in relayNodes) {
-      attempts.add(
-        ExperienceConnectionAttempt(
-          transport: ExperienceTransport.dhtRelay,
-          peerId: provider.peerId,
-          dhtNodeId: node.nodeId,
-          reason: node.relayPolicy == ExperienceRelayPolicy.ownerOnly
-              ? 'owner-only DHT relay'
-              : '公共 DHT relay',
-        ),
-      );
-    }
-
     if (managerSeedAvailable) {
       attempts.add(
         ExperienceConnectionAttempt(
@@ -1605,12 +1548,6 @@ class ExperienceConnectionPlanner {
       );
     }
     return attempts;
-  }
-
-  int _compareDhtNodes(ExperienceDhtNode a, ExperienceDhtNode b) {
-    final region = a.region.compareTo(b.region);
-    if (region != 0) return region;
-    return a.load.relayActiveSessions.compareTo(b.load.relayActiveSessions);
   }
 }
 
@@ -2135,10 +2072,9 @@ class ExperienceDhtHttpClient {
     required DHTServiceFlower flower,
     required HanakoKeyPair keyPair,
   }) async {
-    final signed = ph01.signRequest(
-      keyPair: keyPair,
-      businessPayload: flower.toJson(),
-    );
+    final signed = flower.signatureHex.trim().isEmpty
+        ? flower.signedWith(keyPair)
+        : flower;
     await _dio.postUri<void>(
       Uri.parse('$dhtBaseUrl/api/v1/trust/flowers'),
       data: signed.toJson(),
@@ -2347,90 +2283,6 @@ class ExperienceDhtHttpClient {
         .toList(growable: false);
   }
 
-  Future<ExperienceDhtPackageCacheRecord> uploadCachedPackage({
-    required String packageHash,
-    required Uint8List packageBytes,
-    String experienceId = '',
-    String? baseUrl,
-  }) async {
-    if (packageBytes.isEmpty) {
-      throw ArgumentError.value(
-        packageBytes,
-        'packageBytes',
-        'must not be empty',
-      );
-    }
-    final root = _normalizeOptionalBaseUrl(baseUrl) ?? dhtBaseUrl;
-    final segment = _hashPathSegment(packageHash, 'packageHash');
-    final resp = await _dio.putUri<Map<String, dynamic>>(
-      Uri.parse('$root/api/v1/cache/packages/${Uri.encodeComponent(segment)}'),
-      data: packageBytes,
-      options: Options(
-        contentType: 'application/octet-stream',
-        headers: experienceId.trim().isEmpty
-            ? null
-            : {'X-PH01-Experience-ID': experienceId.trim()},
-      ),
-    );
-    final data = resp.data;
-    if (data == null) {
-      throw StateError('DHT 未返回缓存写入结果');
-    }
-    return ExperienceDhtPackageCacheRecord.fromJson(data);
-  }
-
-  Future<int> uploadCachedPackageToReturnPath({
-    required String packageHash,
-    required Uint8List packageBytes,
-    String experienceId = '',
-    List<ExperienceDemandReturnHop> returnPath = const [],
-  }) async {
-    var uploaded = 0;
-    for (final baseUrl in _returnPathCacheBaseUrls(
-      returnPath,
-      dhtBaseUrl,
-      reversePath: true,
-    )) {
-      try {
-        await uploadCachedPackage(
-          packageHash: packageHash,
-          packageBytes: packageBytes,
-          experienceId: experienceId,
-          baseUrl: baseUrl,
-        );
-        uploaded++;
-      } catch (_) {
-        continue;
-      }
-    }
-    return uploaded;
-  }
-
-  Future<Uint8List> downloadCachedPackage({
-    required String packageHash,
-    List<ExperienceDemandReturnHop> returnPath = const [],
-  }) async {
-    final segment = _hashPathSegment(packageHash, 'packageHash');
-    Object? lastError;
-    for (final baseUrl in _returnPathCacheBaseUrls(returnPath, dhtBaseUrl)) {
-      try {
-        final resp = await _dio.getUri<List<int>>(
-          Uri.parse(
-            '$baseUrl/api/v1/cache/packages/${Uri.encodeComponent(segment)}',
-          ),
-          options: Options(responseType: ResponseType.bytes),
-        );
-        final data = resp.data;
-        if (data != null && data.isNotEmpty) {
-          return Uint8List.fromList(data);
-        }
-      } catch (err) {
-        lastError = err;
-      }
-    }
-    throw StateError('DHT 缓存未命中：$lastError');
-  }
-
   Future<List<Map<String, dynamic>>> fetchReviewChainByDigest({
     required String digest,
     String? baseUrl,
@@ -2468,37 +2320,11 @@ class ExperienceDhtHttpClient {
     required String sessionId,
     required Uint8List packageBytes,
   }) async {
-    final id = _requiredID(sessionId, 'sessionId');
-    if (packageBytes.isEmpty) {
-      throw ArgumentError.value(
-        packageBytes,
-        'packageBytes',
-        'must not be empty',
-      );
-    }
-    final resp = await _dio.putUri<Map<String, dynamic>>(
-      Uri.parse('$dhtBaseUrl/api/v1/relay/sessions/$id/package'),
-      data: packageBytes,
-      options: Options(contentType: 'application/octet-stream'),
-    );
-    final data = resp.data;
-    if (data == null) {
-      throw StateError('DHT 未返回 relay 上传状态');
-    }
-    return ExperienceDhtRelaySession.fromJson(data);
+    throw UnsupportedError('DHT relay 不允许承载经验包体，请使用 P2P 传播路径');
   }
 
   Future<Uint8List> downloadRelayPackage({required String sessionId}) async {
-    final id = _requiredID(sessionId, 'sessionId');
-    final resp = await _dio.getUri<List<int>>(
-      Uri.parse('$dhtBaseUrl/api/v1/relay/sessions/$id/package'),
-      options: Options(responseType: ResponseType.bytes),
-    );
-    final data = resp.data;
-    if (data == null || data.isEmpty) {
-      throw StateError('DHT relay 未返回包字节');
-    }
-    return Uint8List.fromList(data);
+    throw UnsupportedError('DHT relay 不允许承载经验包体，请使用 P2P 传播路径');
   }
 
   Future<ExperienceDhtHolePunchSession> createHolePunchSession({
@@ -2940,27 +2766,6 @@ List<ExperienceNetworkEndpoint> _endpointsFromJson(Object? value) {
       .toList(growable: false);
 }
 
-List<String> _returnPathCacheBaseUrls(
-  List<ExperienceDemandReturnHop> returnPath,
-  String dhtBaseUrl, {
-  bool reversePath = false,
-}) {
-  final out = <String>[];
-  final seen = <String>{};
-  void add(String value) {
-    final normalized = _normalizeOptionalBaseUrl(value);
-    if (normalized == null || !seen.add(normalized)) return;
-    out.add(normalized);
-  }
-
-  final hops = reversePath ? returnPath.reversed : returnPath;
-  for (final hop in hops) {
-    add(hop.apiBaseUrl);
-  }
-  add(dhtBaseUrl);
-  return out;
-}
-
 List<ExperienceDemandReturnHop> _demandReturnPathFromJson(Object? value) {
   if (value is! List) return const [];
   return value
@@ -3022,6 +2827,33 @@ class DHTServiceFlower {
     'served_at': servedAt,
     'signature': signatureHex,
   };
+
+  String signingPayload() => [
+    schemaVersion,
+    flowerId.trim(),
+    nodeId.trim(),
+    clientPubkeyHash.trim().toLowerCase(),
+    resourceHash.trim(),
+    workKind.trim(),
+    servedAt.trim(),
+  ].join('\n');
+
+  DHTServiceFlower signedWith(HanakoKeyPair keyPair) {
+    final signature = keyPair.sign(
+      Uint8List.fromList(utf8.encode(signingPayload())),
+    );
+    return DHTServiceFlower(
+      schemaVersion: schemaVersion,
+      flowerId: flowerId,
+      nodeId: nodeId,
+      clientPubkeyHex: clientPubkeyHex,
+      clientPubkeyHash: clientPubkeyHash,
+      resourceHash: resourceHash,
+      workKind: workKind,
+      servedAt: servedAt,
+      signatureHex: _hexEncode(signature),
+    );
+  }
 }
 
 /// DHT 节点信任包。
@@ -3048,4 +2880,14 @@ class DHTTrustBundle {
       updatedAt: json['updated_at'] as String?,
     );
   }
+}
+
+String _hexEncode(Uint8List bytes) {
+  const chars = '0123456789abcdef';
+  final buf = StringBuffer();
+  for (final b in bytes) {
+    buf.write(chars[(b >> 4) & 0x0f]);
+    buf.write(chars[b & 0x0f]);
+  }
+  return buf.toString();
 }

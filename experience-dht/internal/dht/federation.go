@@ -131,6 +131,12 @@ func (h *Handler) handleFederationProviders(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
 }
 
+func (h *Handler) handleFederationPeers(w http.ResponseWriter, r *http.Request) {
+	limit := intQuery(r, "limit", 200)
+	items := h.localPeers(time.Now().UTC(), limit)
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
+}
+
 func (h *Handler) handleFederationPackageRequests(w http.ResponseWriter, r *http.Request) {
 	hash := strings.TrimSpace(r.URL.Query().Get("package_hash"))
 	if hash == "" {
@@ -192,6 +198,30 @@ func (h *Handler) localProviders(hash string, now time.Time) []ProviderRecord {
 		}
 		if hasString(record.PackageHashes, hash) {
 			out = append(out, record)
+		}
+	}
+	return out
+}
+
+func (h *Handler) localPeers(now time.Time, limit int) []ProviderRecord {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]ProviderRecord, 0)
+	for key, record := range h.providers {
+		expiresAt, err := time.Parse(time.RFC3339, record.ExpiresAt)
+		if err != nil || !expiresAt.After(now) {
+			delete(h.providers, key)
+			continue
+		}
+		if strings.TrimSpace(record.PeerID) == "" || !hasUsableEndpoint(record.Endpoints) {
+			continue
+		}
+		out = append(out, record)
+		if len(out) >= limit {
+			break
 		}
 	}
 	return out
@@ -268,6 +298,24 @@ func (h *Handler) fetchFederatedProviders(ctx context.Context, hash string) []Pr
 			Items []ProviderRecord `json:"items"`
 		}
 		if !h.getFromUpstream(ctx, node, "/api/v1/federation/providers", url.Values{"package_hash": []string{hash}}, &resp) {
+			continue
+		}
+		out = append(out, resp.Items...)
+	}
+	return out
+}
+
+func (h *Handler) fetchFederatedPeers(ctx context.Context, limit int) []ProviderRecord {
+	var out []ProviderRecord
+	params := url.Values{}
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	for _, node := range h.upstreamNodes() {
+		var resp struct {
+			Items []ProviderRecord `json:"items"`
+		}
+		if !h.getFromUpstream(ctx, node, "/api/v1/federation/peers", params, &resp) {
 			continue
 		}
 		out = append(out, resp.Items...)
@@ -462,6 +510,36 @@ func dedupeProviders(items []ProviderRecord) []ProviderRecord {
 		}
 		seen[key] = true
 		out = append(out, item)
+	}
+	return out
+}
+
+func hasUsableEndpoint(endpoints []Endpoint) bool {
+	for _, endpoint := range endpoints {
+		if validEndpoint(endpoint) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterUsablePeers(items []ProviderRecord, now time.Time, limit int) []ProviderRecord {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	out := make([]ProviderRecord, 0, len(items))
+	for _, item := range items {
+		expiresAt, err := time.Parse(time.RFC3339, item.ExpiresAt)
+		if err != nil || !expiresAt.After(now) {
+			continue
+		}
+		if strings.TrimSpace(item.PeerID) == "" || !hasUsableEndpoint(item.Endpoints) {
+			continue
+		}
+		out = append(out, item)
+		if len(out) >= limit {
+			break
+		}
 	}
 	return out
 }

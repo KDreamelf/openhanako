@@ -12,12 +12,15 @@ class P2pTransport {
   final int bindPort;
   RawDatagramSocket? _socket;
   P2pMessageHandler? onMessage;
+  String? _advertisedHost;
 
   InternetAddress? get localAddress => _socket?.address;
   int? get localPort => _socket?.port;
+  String? get advertisedHost => _advertisedHost;
 
   Future<void> start() async {
     _socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, bindPort);
+    _advertisedHost = await _detectAdvertisedHost();
     _socket!.listen((event) {
       if (event != RawSocketEvent.read) return;
       final datagram = _socket!.receive();
@@ -81,5 +84,25 @@ class P2pTransport {
   Future<void> stop() async {
     _socket?.close();
     _socket = null;
+    _advertisedHost = null;
+  }
+
+  Future<String?> _detectAdvertisedHost() async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        includeLoopback: false,
+        type: InternetAddressType.IPv4,
+      );
+      for (final interface in interfaces) {
+        for (final address in interface.addresses) {
+          if (!address.isLoopback && !address.isMulticast) {
+            return address.address;
+          }
+        }
+      }
+    } catch (_) {}
+    final address = _socket?.address.address;
+    if (address == null || address == '0.0.0.0') return null;
+    return address;
   }
 }

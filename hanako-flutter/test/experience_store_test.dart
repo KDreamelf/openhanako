@@ -324,7 +324,7 @@ void main() {
       ],
       availableTransports: const [
         ExperienceTransport.ipv4HolePunch,
-        ExperienceTransport.dhtRelay,
+        ExperienceTransport.managerSeed,
       ],
       trustAnchor: review.anchor,
       now: DateTime.utc(2026, 5, 9, 9, 0, 0),
@@ -339,7 +339,7 @@ void main() {
     expect(offer.publisher['experience_id'], saved.experienceId);
     expect(offer.availableTransports, [
       ExperienceTransport.ipv4HolePunch,
-      ExperienceTransport.dhtRelay,
+      ExperienceTransport.managerSeed,
     ]);
   });
 

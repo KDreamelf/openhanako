@@ -412,15 +412,6 @@ type ReviewChainPayload struct {
 	UpdatedAt     string           `json:"updated_at"`
 }
 
-type PackageCacheRecord struct {
-	PackageHash   string `json:"package_hash"`
-	ExperienceID  string `json:"experience_id,omitempty"`
-	Bytes         int64  `json:"bytes"`
-	PayloadSHA256 string `json:"payload_sha256"`
-	StoredAt      string `json:"stored_at"`
-	ExpiresAt     string `json:"expires_at"`
-}
-
 type ErrorResponse struct {
 	Error   string `json:"error"`
 	Message string `json:"message,omitempty"`

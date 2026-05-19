@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import '../identity/keypair.dart';
 import 'experience_network.dart';
+import 'experience_review.dart';
 import 'experience_store.dart';
 import 'neighbor_table.dart';
 import 'p2p_chunked_transfer.dart';
@@ -19,6 +20,7 @@ class ExperienceP2pOverlay {
     required this.store,
     required this.dhtClient,
     required this.dhtNodeId,
+    this.trustAnchor,
     int bindPort = 0,
   }) : transport = P2pTransport(bindPort: bindPort),
        neighborTable = NeighborTable(localNodeId: localNodeId);
@@ -28,6 +30,7 @@ class ExperienceP2pOverlay {
   final ExperienceStore store;
   final ExperienceDhtHttpClient dhtClient;
   final String dhtNodeId;
+  final ExperienceReviewTrustAnchor? trustAnchor;
   final P2pTransport transport;
   final NeighborTable neighborTable;
 
@@ -35,11 +38,12 @@ class ExperienceP2pOverlay {
   final Map<String, List<P2pPathEntry>> _demandForwardPaths = {};
   final Map<String, Set<String>> _demandResponseSets = {};
   final Map<String, int> _demandMaxResponses = {};
+  final Map<String, P2pPathEntry> _observedRoutes = {};
 
   /// chunk 重组器：接收 UDP 分片数据。
   final P2pChunkAssembler _assembler = P2pChunkAssembler();
 
-  /// 本地持有的包字节缓存（transferId → hxpBytes），用于中间节点转发。
+  /// 本地持有的包字节缓存（packageHash → hxpBytes），用于中间节点转发。
   final Map<String, Uint8List> _localPackageCache = {};
 
   Timer? _maintenanceTimer;
@@ -67,12 +71,7 @@ class ExperienceP2pOverlay {
   }
 
   void publishDemand(P2pDemandPacket demand) {
-    demand.forwardPath.add(P2pPathEntry(
-      nodeId: localNodeId,
-      host: transport.localAddress?.address ?? '',
-      port: transport.localPort ?? 0,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
-    ));
+    demand.forwardPath.add(_localPathEntry());
     _seenDemandIds.add(demand.demandId);
     _demandMaxResponses[demand.demandId] = demand.maxResponses;
     _demandResponseSets[demand.demandId] = {};
@@ -84,12 +83,16 @@ class ExperienceP2pOverlay {
 
   // ---- message dispatch ----
 
-  void _onMessage(P2pEnvelope envelope, InternetAddress sender, int senderPort) {
+  void _onMessage(
+    P2pEnvelope envelope,
+    InternetAddress sender,
+    int senderPort,
+  ) {
     switch (envelope.type) {
       case P2pMessageType.demand:
         _handleDemand(envelope.payload, sender, senderPort);
       case P2pMessageType.response:
-        _handleResponse(envelope.payload);
+        _handleResponse(envelope.payload, sender, senderPort);
       case P2pMessageType.offerAnnounce:
         _handleOfferAnnounce(envelope.payload, sender, senderPort);
       case P2pMessageType.probe:
@@ -107,22 +110,23 @@ class ExperienceP2pOverlay {
 
   // ---- demand handling (§3) ----
 
-  void _handleDemand(Map<String, dynamic> payload, InternetAddress sender, int senderPort) {
+  void _handleDemand(
+    Map<String, dynamic> payload,
+    InternetAddress sender,
+    int senderPort,
+  ) {
     final demand = P2pDemandPacket.fromJson(payload);
     if (demand == null) return;
     if (!demand.verifySignature()) return;
+
+    _correctPreviousHop(demand.forwardPath, sender, senderPort);
 
     if (_seenDemandIds.contains(demand.demandId)) return;
     _seenDemandIds.add(demand.demandId);
     _demandMaxResponses[demand.demandId] = demand.maxResponses;
     _demandResponseSets.putIfAbsent(demand.demandId, () => {});
 
-    demand.forwardPath.add(P2pPathEntry(
-      nodeId: localNodeId,
-      host: transport.localAddress?.address ?? '',
-      port: transport.localPort ?? 0,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
-    ));
+    demand.forwardPath.add(_localPathEntry());
 
     _demandForwardPaths[demand.demandId] = List.from(demand.forwardPath);
 
@@ -147,13 +151,16 @@ class ExperienceP2pOverlay {
       for (final result in results) {
         final package = await store.readReviewedCachedPackage(
           result.experienceId,
+          trustAnchor: trustAnchor,
         );
         if (package == null) continue;
-        fingerprints.add(P2pPackageFingerprint(
-          packageHash: package.packageHash,
-          sizeBytes: package.hxpBytes.length,
-          title: result.title,
-        ));
+        fingerprints.add(
+          P2pPackageFingerprint(
+            packageHash: package.packageHash,
+            sizeBytes: package.hxpBytes.length,
+            title: result.title,
+          ),
+        );
         // 缓存包字节，等 requester 沿路请求时用 UDP 分片发送。
         _localPackageCache[package.packageHash] = package.hxpBytes;
       }
@@ -178,7 +185,10 @@ class ExperienceP2pOverlay {
         providerSig: '',
       )..signWith(keyPair);
       _broadcastToNeighbors(
-        P2pEnvelope(type: P2pMessageType.offerAnnounce, payload: announce.toJson()),
+        P2pEnvelope(
+          type: P2pMessageType.offerAnnounce,
+          payload: announce.toJson(),
+        ),
       );
     } catch (_) {}
   }
@@ -206,53 +216,51 @@ class ExperienceP2pOverlay {
     }
 
     final nextHop = path[myIdx - 1];
-    response.returnPath.add(P2pPathEntry(
-      nodeId: localNodeId,
-      host: transport.localAddress?.address ?? '',
-      port: transport.localPort ?? 0,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
-    ));
-    transport.sendTo(
+    response.returnPath.add(_localPathEntry());
+    _sendToPathEntry(
       P2pEnvelope(type: P2pMessageType.response, payload: response.toJson()),
-      nextHop.host,
-      nextHop.port,
+      nextHop,
     );
   }
 
   /// requester 收到 fingerprint 后，向 provider 发送 PackageTransferRequest，
   /// provider 用 UDP 分片把完整包沿 forwardPath 正向传回。
   Future<void> _requestChunkedTransfer(P2pResponsePacket response) async {
+    final path = response.forwardPath;
+    if (path.length < 2 || path.first.nodeId != localNodeId) return;
+
     for (final fp in response.fingerprints) {
       final transferId = _uuid.v4();
-      _assembler.expect(transferId, onComplete: (data, hash) {
-        unawaited(store.importNetworkPackage(data));
-        // 完成后向参与工作的 DHT 节点发小红花。
-        unawaited(_awardFlowers(response, hash));
-      });
+      _assembler.expect(
+        transferId,
+        onComplete: (data, hash) {
+          unawaited(
+            _importTransferredPackage(data, hash, awardFlowerFor: response),
+          );
+        },
+      );
 
-      // 向 forwardPath 的最后一跳（provider 或最近的持有者）请求数据。
-      final providerEntry = response.forwardPath.isNotEmpty
-          ? response.forwardPath.last
-          : null;
-      if (providerEntry == null) continue;
-      transport.sendTo(
+      // 请求只能沿 demand 的传播路径逐跳前进，不能直连 provider。
+      _sendToPathEntry(
         P2pEnvelope(
           type: P2pMessageType.packageData,
           payload: {
             'action': 'request',
             'transferId': transferId,
             'packageHash': fp.packageHash,
-            'requesterHost': transport.localAddress?.address ?? '',
-            'requesterPort': transport.localPort ?? 0,
+            'path': path.map((entry) => entry.toJson()).toList(),
           },
         ),
-        providerEntry.host,
-        providerEntry.port,
+        path[1],
       );
     }
   }
 
-  void _handleResponse(Map<String, dynamic> payload) {
+  void _handleResponse(
+    Map<String, dynamic> payload,
+    InternetAddress sender,
+    int senderPort,
+  ) {
     final response = P2pResponsePacket.fromJson(payload);
     if (response == null) return;
     if (!response.verifySignature()) return;
@@ -260,7 +268,6 @@ class ExperienceP2pOverlay {
     final responseSet = _demandResponseSets[response.demandId];
     if (responseSet != null) {
       for (final fp in response.fingerprints) {
-        if (responseSet.contains(fp.packageHash)) return;
         responseSet.add(fp.packageHash);
       }
     }
@@ -272,58 +279,103 @@ class ExperienceP2pOverlay {
       }
     }
 
+    final myIdx = _pathIndex(response.forwardPath);
+    if (myIdx >= 0 && myIdx + 1 < response.forwardPath.length) {
+      _rememberRoute(
+        response.forwardPath[myIdx + 1].nodeId,
+        sender,
+        senderPort,
+      );
+    } else if (response.forwardPath.isNotEmpty) {
+      _rememberRoute(response.forwardPath.last.nodeId, sender, senderPort);
+    }
+
     _routeResponseBackward(response);
   }
 
   // ---- UDP 分片数据处理 ----
 
-  void _handlePackageData(Map<String, dynamic> payload, InternetAddress sender, int senderPort) {
+  void _handlePackageData(
+    Map<String, dynamic> payload,
+    InternetAddress sender,
+    int senderPort,
+  ) {
     final action = payload['action'] as String?;
 
     if (action == 'request') {
-      // 有节点向我请求某个包的分片传输。
       final packageHash = payload['packageHash'] as String?;
       final transferId = payload['transferId'] as String?;
-      final reqHost = payload['requesterHost'] as String?;
-      final reqPort = payload['requesterPort'] as int?;
-      if (packageHash == null || transferId == null ||
-          reqHost == null || reqPort == null) return;
+      final path = _pathFromJson(payload['path']);
+      final myIdx = _pathIndex(path);
+      if (packageHash == null || transferId == null || myIdx < 0) return;
+      if (myIdx > 0) {
+        _rememberRoute(path[myIdx - 1].nodeId, sender, senderPort);
+      }
 
       final bytes = _localPackageCache[packageHash];
-      if (bytes == null) return;
+      if (bytes != null && myIdx > 0) {
+        final chunks = P2pChunkedTransfer.split(
+          transferId,
+          bytes,
+          packageHash: packageHash,
+          path: path,
+        );
+        final previousHop = path[myIdx - 1];
+        unawaited(_sendChunksToPathEntry(chunks, previousHop));
+        return;
+      }
 
-      // 分片发送。
-      final chunks = P2pChunkedTransfer.split(transferId, bytes);
-      unawaited(P2pChunkedTransfer.sendAll(transport, chunks, reqHost, reqPort));
+      if (myIdx + 1 >= path.length) return;
+      if (myIdx > 0 && !_assembler.hasExpected(transferId)) {
+        _assembler.expect(
+          transferId,
+          onComplete: (data, hash) {
+            unawaited(_importTransferredPackage(data, hash));
+          },
+        );
+      }
+      _sendToPathEntry(
+        P2pEnvelope(type: P2pMessageType.packageData, payload: payload),
+        path[myIdx + 1],
+      );
       return;
     }
 
     // 收到分片数据。
     final chunk = P2pChunk.fromJson(payload);
     if (chunk == null) return;
+    final myIdx = _pathIndex(chunk.path);
+    if (myIdx < 0) return;
+    if (!_assembler.hasExpected(chunk.transferId)) return;
+    if (myIdx + 1 < chunk.path.length) {
+      _rememberRoute(chunk.path[myIdx + 1].nodeId, sender, senderPort);
+    }
+
+    if (myIdx > 0) {
+      _sendToPathEntry(
+        P2pEnvelope(type: P2pMessageType.packageData, payload: chunk.toJson()),
+        chunk.path[myIdx - 1],
+      );
+    }
 
     _assembler.receive(chunk);
-
-    // 转发即持有（§6.1）：不管是 requester 还是中间节点，assembler 收齐后
-    // 都会触发 onComplete 导入。但如果这个 transferId 是别人发起的传输
-    // 经过本节点（中间节点路过的分片），没有预注册 expect，需要注册一个
-    // 默认的 onComplete 来做路过缓存。
-    if (!_assembler.hasExpected(chunk.transferId)) {
-      _assembler.expect(chunk.transferId, onComplete: (data, hash) {
-        unawaited(store.importNetworkPackage(data));
-        _localPackageCache[hash] = data;
-      });
-    }
   }
 
   // ---- offer announce (§5) ----
 
-  void _handleOfferAnnounce(Map<String, dynamic> payload, InternetAddress sender, int senderPort) {
+  void _handleOfferAnnounce(
+    Map<String, dynamic> payload,
+    InternetAddress sender,
+    int senderPort,
+  ) {
     final announce = P2pOfferAnnounce.fromJson(payload);
     if (announce == null) return;
     if (!announce.verifySignature()) return;
 
-    final responseSet = _demandResponseSets.putIfAbsent(announce.demandId, () => {});
+    final responseSet = _demandResponseSets.putIfAbsent(
+      announce.demandId,
+      () => {},
+    );
     var newHashes = false;
     for (final hash in announce.providedPackageHashes) {
       if (responseSet.add(hash)) newHashes = true;
@@ -334,7 +386,10 @@ class ExperienceP2pOverlay {
 
     if (!newHashes) return;
     _broadcastToNeighbors(
-      P2pEnvelope(type: P2pMessageType.offerAnnounce, payload: announce.toJson()),
+      P2pEnvelope(
+        type: P2pMessageType.offerAnnounce,
+        payload: announce.toJson(),
+      ),
       excludeHost: sender.address,
       excludePort: senderPort,
     );
@@ -342,8 +397,12 @@ class ExperienceP2pOverlay {
 
   // ---- 小红花发放 ----
 
-  Future<void> _awardFlowers(P2pResponsePacket response, String packageHash) async {
+  Future<void> _awardFlowers(
+    P2pResponsePacket response,
+    String packageHash,
+  ) async {
     try {
+      if (dhtNodeId.trim().isEmpty) return;
       final now = DateTime.now().toUtc().toIso8601String();
       final flower = DHTServiceFlower(
         flowerId: _uuid.v4(),
@@ -351,11 +410,110 @@ class ExperienceP2pOverlay {
         clientPubkeyHex: keyPair.publicKeyHex,
         clientPubkeyHash: keyPair.publicKeyHash,
         resourceHash: packageHash,
-        workKind: 'p2p_demand_relay',
+        workKind: 'p2p_rendezvous',
         servedAt: now,
-      );
+      ).signedWith(keyPair);
       await dhtClient.submitFlower(flower: flower, keyPair: keyPair);
     } catch (_) {}
+  }
+
+  Future<void> _importTransferredPackage(
+    Uint8List data,
+    String packageHash, {
+    P2pResponsePacket? awardFlowerFor,
+  }) async {
+    final result = await store.importNetworkPackage(
+      data,
+      trustAnchor: trustAnchor,
+      expectedPackageHash: packageHash,
+    );
+    if (!result.ok) return;
+    _localPackageCache[packageHash] = data;
+    if (awardFlowerFor != null) {
+      await _awardFlowers(awardFlowerFor, packageHash);
+    }
+  }
+
+  P2pPathEntry _localPathEntry() {
+    return P2pPathEntry(
+      nodeId: localNodeId,
+      host: transport.advertisedHost ?? transport.localAddress?.address ?? '',
+      port: transport.localPort ?? 0,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  void _correctPreviousHop(
+    List<P2pPathEntry> path,
+    InternetAddress sender,
+    int senderPort,
+  ) {
+    if (path.isEmpty) return;
+    final previous = path.last;
+    final observed = P2pPathEntry(
+      nodeId: previous.nodeId,
+      host: sender.address,
+      port: senderPort,
+      timestamp: previous.timestamp,
+    );
+    path[path.length - 1] = observed;
+    _observedRoutes[previous.nodeId] = observed;
+  }
+
+  void _rememberRoute(String nodeId, InternetAddress sender, int senderPort) {
+    if (nodeId.trim().isEmpty) return;
+    _observedRoutes[nodeId] = P2pPathEntry(
+      nodeId: nodeId,
+      host: sender.address,
+      port: senderPort,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  int _pathIndex(List<P2pPathEntry> path) {
+    for (var i = 0; i < path.length; i++) {
+      if (path[i].nodeId == localNodeId) return i;
+    }
+    return -1;
+  }
+
+  List<P2pPathEntry> _pathFromJson(Object? raw) {
+    if (raw is! List) return const [];
+    return raw
+        .map(P2pPathEntry.fromJson)
+        .whereType<P2pPathEntry>()
+        .toList(growable: false);
+  }
+
+  P2pPathEntry _routeFor(P2pPathEntry entry) {
+    final observed = _observedRoutes[entry.nodeId];
+    if (observed != null && _isUsableEndpoint(observed.host, observed.port)) {
+      return observed;
+    }
+    return entry;
+  }
+
+  bool _isUsableEndpoint(String host, int port) {
+    final normalized = host.trim();
+    return normalized.isNotEmpty &&
+        normalized != '0.0.0.0' &&
+        normalized != '::' &&
+        port > 0;
+  }
+
+  void _sendToPathEntry(P2pEnvelope envelope, P2pPathEntry entry) {
+    final route = _routeFor(entry);
+    if (!_isUsableEndpoint(route.host, route.port)) return;
+    transport.sendTo(envelope, route.host, route.port);
+  }
+
+  Future<void> _sendChunksToPathEntry(
+    List<P2pChunk> chunks,
+    P2pPathEntry entry,
+  ) async {
+    final route = _routeFor(entry);
+    if (!_isUsableEndpoint(route.host, route.port)) return;
+    await P2pChunkedTransfer.sendAll(transport, chunks, route.host, route.port);
   }
 
   // ---- broadcast ----

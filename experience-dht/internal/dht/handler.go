@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -82,7 +81,6 @@ type rateWindow struct {
 
 type relaySessionRecord struct {
 	session RelaySession
-	payload []byte
 }
 
 type holePunchSessionRecord struct {
@@ -94,7 +92,6 @@ var (
 	errRelayUnavailable = errors.New("relay unavailable")
 	errRelayNotFound    = errors.New("relay session not found")
 	errRelayExpired     = errors.New("relay session expired")
-	errRelayNotReady    = errors.New("relay payload not ready")
 
 	errHolePunchForbidden   = errors.New("hole punch forbidden")
 	errHolePunchUnavailable = errors.New("hole punch unavailable")
@@ -118,6 +115,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleSignedAdmin(w, r, h.setPublicMode)
 	case r.URL.Path == "/api/v1/federation/providers" && r.Method == http.MethodGet:
 		h.handleFederationProviders(w, r)
+	case r.URL.Path == "/api/v1/federation/peers" && r.Method == http.MethodGet:
+		h.handleFederationPeers(w, r)
 	case r.URL.Path == "/api/v1/federation/package-requests" && r.Method == http.MethodGet:
 		h.handleFederationPackageRequests(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/v1/federation/package-requests/") && strings.HasSuffix(r.URL.Path, "/offers") && r.Method == http.MethodGet:
@@ -126,10 +125,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleFederationExperienceDemands(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/v1/federation/experience-demands/") && strings.HasSuffix(r.URL.Path, "/offers") && r.Method == http.MethodGet:
 		h.handleFederationExperienceDemandOffers(w, r)
-	case strings.HasPrefix(r.URL.Path, "/api/v1/cache/packages/") && r.Method == http.MethodPut:
-		h.handleCachePackageUpload(w, r)
-	case strings.HasPrefix(r.URL.Path, "/api/v1/cache/packages/") && r.Method == http.MethodGet:
-		h.handleCachePackageDownload(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/v1/review-chains/") && r.Method == http.MethodGet:
 		h.handleReviewChainDownload(w, r)
 	case r.URL.Path == "/api/v1/trust/flowers" && r.Method == http.MethodPost:
@@ -140,6 +135,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleTrustBundle(w, r)
 	case r.URL.Path == "/api/v1/peers/presence" && r.Method == http.MethodPost:
 		h.handlePresence(w, r)
+	case r.URL.Path == "/api/v1/peers" && r.Method == http.MethodGet:
+		h.handlePeers(w, r)
 	case r.URL.Path == "/api/v1/providers" && r.Method == http.MethodGet:
 		h.handleProviders(w, r)
 	case r.URL.Path == "/api/v1/package-requests" && r.Method == http.MethodPost:
@@ -160,10 +157,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleExperienceDemandOffers(w, r)
 	case r.URL.Path == "/api/v1/relay/sessions" && r.Method == http.MethodPost:
 		h.handleRelaySession(w, r)
-	case strings.HasPrefix(r.URL.Path, "/api/v1/relay/sessions/") && strings.HasSuffix(r.URL.Path, "/package") && r.Method == http.MethodPut:
-		h.handleRelayUpload(w, r)
-	case strings.HasPrefix(r.URL.Path, "/api/v1/relay/sessions/") && strings.HasSuffix(r.URL.Path, "/package") && r.Method == http.MethodGet:
-		h.handleRelayDownload(w, r)
 	case r.URL.Path == "/api/v1/hole-punch/sessions" && r.Method == http.MethodPost:
 		h.handleHolePunchSession(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/v1/hole-punch/sessions/") && strings.HasSuffix(r.URL.Path, "/reports") && r.Method == http.MethodPost:
@@ -549,6 +542,14 @@ func (h *Handler) handleProviders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": out, "total": len(out)})
 }
 
+func (h *Handler) handlePeers(w http.ResponseWriter, r *http.Request) {
+	limit := intQuery(r, "limit", 200)
+	now := time.Now().UTC()
+	out := h.localPeers(now, limit)
+	out = filterUsablePeers(dedupeProviders(append(out, h.fetchFederatedPeers(r.Context(), limit)...)), now, limit)
+	writeJSON(w, http.StatusOK, map[string]any{"items": out, "total": len(out)})
+}
+
 func (h *Handler) handlePackageRequest(w http.ResponseWriter, r *http.Request) {
 	state, signed, payload, ok := h.verifySignedRequest(w, r)
 	if !ok {
@@ -758,59 +759,6 @@ func (h *Handler) handleRelaySession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, session)
-}
-
-func (h *Handler) handleRelayUpload(w http.ResponseWriter, r *http.Request) {
-	sessionID := relaySessionIDFromPath(r.URL.Path)
-	if sessionID == "" {
-		writeError(w, http.StatusNotFound, "not_found", "")
-		return
-	}
-	session, err := h.relaySessionForWrite(sessionID, time.Now().UTC())
-	if err != nil {
-		writeRelaySessionError(w, err)
-		return
-	}
-	if r.ContentLength > session.MaxBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "relay_payload_too_large", "")
-		return
-	}
-	reader := http.MaxBytesReader(w, r.Body, session.MaxBytes+1)
-	payload, err := io.ReadAll(reader)
-	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "relay_payload_too_large", err.Error())
-		return
-	}
-	if int64(len(payload)) > session.MaxBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "relay_payload_too_large", "")
-		return
-	}
-	updated, err := h.storeRelayPayload(sessionID, payload, time.Now().UTC())
-	if err != nil {
-		writeRelaySessionError(w, err)
-		return
-	}
-	_, _ = h.storeCachedPackage(updated.PackageHash, updated.ExperienceID, payload, time.Now().UTC())
-	writeJSON(w, http.StatusOK, updated)
-}
-
-func (h *Handler) handleRelayDownload(w http.ResponseWriter, r *http.Request) {
-	sessionID := relaySessionIDFromPath(r.URL.Path)
-	if sessionID == "" {
-		writeError(w, http.StatusNotFound, "not_found", "")
-		return
-	}
-	session, payload, err := h.relayPayload(sessionID, time.Now().UTC())
-	if err != nil {
-		writeRelaySessionError(w, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("X-PH01-Relay-Session-ID", session.SessionID)
-	w.Header().Set("X-PH01-Relay-Package-Hash", session.PackageHash)
-	w.Header().Set("X-PH01-Relay-Payload-SHA256", session.PayloadSHA256)
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(payload)
 }
 
 func (h *Handler) handleHolePunchSession(w http.ResponseWriter, r *http.Request) {
@@ -1057,61 +1005,6 @@ func (h *Handler) authorizeOwnerOnly(
 	return false
 }
 
-func (h *Handler) relaySessionForWrite(sessionID string, now time.Time) (RelaySession, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.cleanupRelaySessionsLocked(now)
-	record, ok := h.relay[sessionID]
-	if !ok {
-		return RelaySession{}, errRelayNotFound
-	}
-	if relaySessionExpired(record.session, now) {
-		delete(h.relay, sessionID)
-		return RelaySession{}, errRelayExpired
-	}
-	return record.session, nil
-}
-
-func (h *Handler) storeRelayPayload(sessionID string, payload []byte, now time.Time) (RelaySession, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.cleanupRelaySessionsLocked(now)
-	record, ok := h.relay[sessionID]
-	if !ok {
-		return RelaySession{}, errRelayNotFound
-	}
-	if relaySessionExpired(record.session, now) {
-		delete(h.relay, sessionID)
-		return RelaySession{}, errRelayExpired
-	}
-	copied := append([]byte(nil), payload...)
-	sum := sha256.Sum256(copied)
-	record.payload = copied
-	record.session.Status = "uploaded"
-	record.session.Bytes = int64(len(copied))
-	record.session.PayloadSHA256 = hex.EncodeToString(sum[:])
-	h.relay[sessionID] = record
-	return record.session, nil
-}
-
-func (h *Handler) relayPayload(sessionID string, now time.Time) (RelaySession, []byte, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.cleanupRelaySessionsLocked(now)
-	record, ok := h.relay[sessionID]
-	if !ok {
-		return RelaySession{}, nil, errRelayNotFound
-	}
-	if relaySessionExpired(record.session, now) {
-		delete(h.relay, sessionID)
-		return RelaySession{}, nil, errRelayExpired
-	}
-	if record.session.Status != "uploaded" {
-		return RelaySession{}, nil, errRelayNotReady
-	}
-	return record.session, append([]byte(nil), record.payload...), nil
-}
-
 func (h *Handler) cleanupRelaySessionsLocked(now time.Time) {
 	for id, record := range h.relay {
 		if relaySessionExpired(record.session, now) {
@@ -1153,8 +1046,6 @@ func writeRelaySessionError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "relay_session_not_found", err.Error())
 	case errors.Is(err, errRelayExpired):
 		writeError(w, http.StatusGone, "relay_session_expired", err.Error())
-	case errors.Is(err, errRelayNotReady):
-		writeError(w, http.StatusConflict, "relay_payload_not_ready", err.Error())
 	default:
 		writeError(w, http.StatusBadRequest, "relay_failed", err.Error())
 	}

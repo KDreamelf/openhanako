@@ -64,11 +64,13 @@ docker run -d \
 - 更新 bootstrap 管理端：`POST /api/v1/admin/bootstrap`
 - 开启/关闭公共注册：`POST /api/v1/admin/public`
 - 短 TTL presence：`POST /api/v1/peers/presence`
+- 活跃 peer 查询：`GET /api/v1/peers?limit=200`
 - provider 查询：`GET /api/v1/providers?package_hash=sha256:...`
 - 包请求/offer：`/api/v1/package-requests...`
 - federation 查询：`/api/v1/federation/...`
 - 打洞协调：`/api/v1/hole-punch/sessions...`
-- relay：`/api/v1/relay/sessions...`
+- legacy relay 会话元数据：`/api/v1/relay/sessions...`（不承载 `.hxp` 包体）
+- 评价链查询：`GET /api/v1/review-chains/{digest}`
 
 绑定后，管理请求必须使用绑定账号公钥按 PH01 `SignedRequest` 签名。
 
