@@ -57,6 +57,7 @@ class NeighborTable {
       return;
     }
     if (_neighbors.length >= maxNeighbors) {
+      if (!shouldReplace(neighbor)) return;
       _evictWorst();
     }
     _neighbors[neighbor.nodeId] = neighbor;
@@ -116,26 +117,33 @@ class NeighborTable {
     return worst;
   }
 
+  /// 通过 DHT 获取已 announce 的客户端节点列表，对其 UDP 端点做延迟探测，
+  /// 按 RTT 排名择优加入邻居表。
   Future<void> discoverAndProbe({
-    required ExperienceNetworkManagerClient managerClient,
+    required ExperienceDhtHttpClient dhtClient,
     required P2pTransport transport,
   }) async {
-    List<ExperienceDhtNode> nodes;
+    List<ExperienceDhtProviderRecord> peers;
     try {
-      nodes = await managerClient.fetchPublicDhtNodes();
+      peers = await dhtClient.fetchActivePeers();
     } catch (_) {
       return;
     }
 
     final candidates = <_ProbeCandidate>[];
-    for (final node in nodes) {
-      for (final ep in node.endpoints) {
+    for (final peer in peers) {
+      if (peer.peerId == localNodeId) continue;
+      if (_neighbors.containsKey(peer.peerId)) continue;
+      for (final ep in peer.endpoints) {
         if (!ep.isValid) continue;
-        if (ep.isIPv6) continue;
-        final id = node.dhtPeerId ?? node.nodeId;
-        if (id == localNodeId) continue;
-        if (_neighbors.containsKey(id)) continue;
-        candidates.add(_ProbeCandidate(nodeId: id, host: ep.host, port: ep.port));
+        if (ep.isUdpCandidate) {
+          candidates.add(_ProbeCandidate(
+            nodeId: peer.peerId,
+            host: ep.host,
+            port: ep.port,
+          ));
+          break;
+        }
       }
     }
 
@@ -151,9 +159,7 @@ class NeighborTable {
         port: c.port,
         rttMs: rtt.inMilliseconds,
       );
-      if (shouldReplace(neighbor)) {
-        addOrUpdate(neighbor);
-      }
+      addOrUpdate(neighbor);
     }
   }
 

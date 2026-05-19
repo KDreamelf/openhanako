@@ -2105,6 +2105,31 @@ class ExperienceDhtHttpClient {
         .toList(growable: false);
   }
 
+  Future<List<ExperienceDhtProviderRecord>> fetchActivePeers({
+    int limit = 200,
+    DateTime? now,
+  }) async {
+    final resp = await _dio.getUri<Map<String, dynamic>>(
+      Uri.parse('$dhtBaseUrl/api/v1/peers').replace(
+        queryParameters: {'limit': '$limit'},
+      ),
+      options: Options(contentType: Headers.jsonContentType),
+    );
+    final items = resp.data?['items'];
+    if (items is! List) return const [];
+    final timestamp = (now ?? DateTime.now()).toUtc();
+    return items
+        .whereType<Map>()
+        .map(
+          (item) => ExperienceDhtProviderRecord.fromJson(
+            item.cast<String, dynamic>(),
+          ),
+        )
+        .where((record) => record.expiresAt == null ||
+            record.expiresAt!.isAfter(timestamp))
+        .toList(growable: false);
+  }
+
   Future<ExperiencePackageRequestRecord> publishPackageRequest({
     required ExperiencePackageRequest request,
     required HanakoKeyPair keyPair,

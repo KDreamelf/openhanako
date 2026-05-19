@@ -183,14 +183,17 @@ class P2pResponsePacket {
     required this.providerPubKey,
     required this.providerSig,
     required this.fingerprints,
+    List<P2pPathEntry>? forwardPath,
     List<P2pPathEntry>? returnPath,
     this.packageData,
-  }) : returnPath = returnPath ?? [];
+  }) : forwardPath = forwardPath ?? [],
+       returnPath = returnPath ?? [];
 
   final String demandId;
   final String providerPubKey;
   final String providerSig;
   final List<P2pPackageFingerprint> fingerprints;
+  final List<P2pPathEntry> forwardPath;
   final List<P2pPathEntry> returnPath;
   final Uint8List? packageData;
 
@@ -199,6 +202,7 @@ class P2pResponsePacket {
     'providerPubKey': providerPubKey,
     'providerSig': providerSig,
     'fingerprints': fingerprints.map((f) => f.toJson()).toList(),
+    'forwardPath': forwardPath.map((e) => e.toJson()).toList(),
     'returnPath': returnPath.map((e) => e.toJson()).toList(),
     if (packageData != null) 'packageData': base64Encode(packageData!),
   };
@@ -226,6 +230,11 @@ class P2pResponsePacket {
       fingerprints: (json['fingerprints'] as List?)
               ?.map(P2pPackageFingerprint.fromJson)
               .whereType<P2pPackageFingerprint>()
+              .toList() ??
+          const [],
+      forwardPath: (json['forwardPath'] as List?)
+              ?.map(P2pPathEntry.fromJson)
+              .whereType<P2pPathEntry>()
               .toList() ??
           const [],
       returnPath: (json['returnPath'] as List?)

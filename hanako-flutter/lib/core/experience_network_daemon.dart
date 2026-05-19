@@ -12,8 +12,8 @@ import 'preferences_manager.dart';
 /// 经验网络后台守护进程。
 ///
 /// 双轨运行：
-/// 1. 中心化 DHT HTTP 链路（兜底）：定期 announce + 轮询需求 + 自动回包
-/// 2. P2P gossip 覆盖网络（首选）：ExperienceP2pOverlay 管理邻居、传播需求、沿路回包
+/// 1. P2P gossip 覆盖网络（首选）：ExperienceP2pOverlay 管理邻居、传播需求、沿路回包
+/// 2. 中心化 DHT HTTP 链路（兜底）：定期 announce + 轮询需求 + 自动回包
 ///
 /// 在 `HanaEngine.startAutomation()` 中启动。
 class ExperienceNetworkDaemon {
@@ -51,7 +51,6 @@ class ExperienceNetworkDaemon {
     _demandPollTimer = Timer.periodic(_demandPollInterval, (_) {
       unawaited(_safePollAndAnswer());
     });
-    unawaited(_initOverlay());
     unawaited(_safeAnnounce());
   }
 
@@ -65,21 +64,26 @@ class ExperienceNetworkDaemon {
     _overlay = null;
   }
 
-  Future<void> _initOverlay() async {
+  /// 每次 announce 和 poll 都尝试确保 overlay 已就绪。
+  /// 启动时 identity 可能为 null（未登录），登录后的下一个 timer 触发会补上。
+  Future<void> _ensureOverlay() async {
+    if (_overlay != null) return;
     final identity = identityRepository.current;
     if (identity == null) return;
     final agentId = agentManager.activeAgentId;
     if (agentId == null) return;
 
+    final dhtClient = await _resolveDhtClient();
+    if (dhtClient == null) return;
+
     final agentDir = home.agentDir(agentId);
     final store = ExperienceStore(agentDir: agentDir);
-    _managerClient ??= ExperienceNetworkManagerClient();
 
     final overlay = ExperienceP2pOverlay(
       localNodeId: identity.publicKeyHash,
       keyPair: identity.keyPair,
       store: store,
-      managerClient: _managerClient!,
+      dhtClient: dhtClient,
     );
     await overlay.start();
     _overlay = overlay;
@@ -89,6 +93,7 @@ class ExperienceNetworkDaemon {
     if (_announcing) return;
     _announcing = true;
     try {
+      await _ensureOverlay();
       await _announce();
     } catch (_) {
     } finally {
@@ -100,6 +105,7 @@ class ExperienceNetworkDaemon {
     if (_polling) return;
     _polling = true;
     try {
+      await _ensureOverlay();
       await _pollAndAnswer();
     } catch (_) {
     } finally {
@@ -118,13 +124,25 @@ class ExperienceNetworkDaemon {
 
     final agentDir = home.agentDir(agentId);
     final store = ExperienceStore(agentDir: agentDir);
-    final packageHashes = await _collectLocalExperienceIds(store);
+    final experienceIds = await _collectLocalExperienceIds(store);
+
+    // 包含 P2P overlay 的 UDP 端口，让其他客户端能 probe/连接。
+    final overlay = _overlay;
+    final endpoints = <ExperienceNetworkEndpoint>[
+      if (overlay != null && overlay.transport.localPort != null)
+        ExperienceNetworkEndpoint(
+          network: 'udp',
+          host: overlay.transport.localAddress?.address ?? '0.0.0.0',
+          port: overlay.transport.localPort!,
+        ),
+    ];
 
     await dhtClient.announcePresence(
       presence: ExperienceDhtPresence(
         peerId: identity.publicKeyHash,
         ownerPeerId: identity.publicKeyHash,
-        packageHashes: packageHashes,
+        endpoints: endpoints,
+        packageHashes: experienceIds,
       ),
       keyPair: identity.keyPair,
     );
@@ -142,7 +160,6 @@ class ExperienceNetworkDaemon {
     }
   }
 
-  /// 中心化兜底：通过 DHT HTTP API 轮询需求并响应。
   Future<void> _pollAndAnswer() async {
     final identity = identityRepository.current;
     if (identity == null) return;
@@ -214,9 +231,6 @@ class ExperienceNetworkDaemon {
     _nextDhtResolveAttempt = null;
   }
 
-  /// Agent 工具调用入口：双轨发布需求。
-  /// 1. P2P gossip 传播（如果 overlay 已就绪）
-  /// 2. 中心化 DHT HTTP 兜底（总是尝试）
   Future<Map<String, dynamic>> publishDemand({
     required String query,
     List<String> keywords = const [],
@@ -231,9 +245,10 @@ class ExperienceNetworkDaemon {
       return {'ok': false, 'error': '无活跃 Agent'};
     }
 
+    await _ensureOverlay();
+
     final demandId = _uuid.v4();
 
-    // 1. P2P gossip 传播
     final overlay = _overlay;
     if (overlay != null) {
       overlay.publishDemand(P2pDemandPacket(
@@ -247,7 +262,6 @@ class ExperienceNetworkDaemon {
       ));
     }
 
-    // 2. 中心化 DHT HTTP 兜底
     final dhtClient = await _resolveDhtClient();
     if (dhtClient == null && overlay == null) {
       return {'ok': false, 'error': '无法连接 DHT 节点且 P2P 覆盖网络未就绪'};
