@@ -33,6 +33,19 @@ import 'runtime_session_store.dart';
 import 'session.dart';
 import 'skill_manager.dart';
 
+class MemoryExtractionEvent {
+  const MemoryExtractionEvent({
+    required this.created,
+    required this.updated,
+    required this.agentId,
+  });
+
+  final int created;
+  final int updated;
+  final String agentId;
+  int get written => created + updated;
+}
+
 /// SessionCoordinator 与 legacy core/session-coordinator.js 对齐。
 /// Phase 2 spike 版：能 createSession / switchSession / prompt（流式）/ listSessions。
 class SessionCoordinator {
@@ -76,6 +89,12 @@ class SessionCoordinator {
       CodexProcessSessionStore();
   late final CodexAgentControl _codexAgentControl;
   final CodexGoalStore _codexGoalStore = CodexGoalStore();
+
+  /// 记忆抽取事件流，UI 可订阅用于轻量提示。
+  final _memoryExtractionController =
+      StreamController<MemoryExtractionEvent>.broadcast();
+  Stream<MemoryExtractionEvent> get memoryExtractionEvents =>
+      _memoryExtractionController.stream;
 
   void setCodexPermissionPrompt(CodexPermissionPrompt? prompt) {
     codexPermissionPrompt = prompt;
@@ -847,12 +866,19 @@ class SessionCoordinator {
 
     _extractingSessionPaths.add(session.path);
     try {
-      await extractMemories(
+      final result = await extractMemories(
         memoryRoot: memoryRoot,
         transcript: transcript,
         provider: BackendLlmProvider(backendClient),
         model: auxModel,
       );
+      if (result.written > 0) {
+        _memoryExtractionController.add(MemoryExtractionEvent(
+          created: result.created,
+          updated: result.updated,
+          agentId: session.agentId,
+        ));
+      }
     } catch (_) {
       // 后台路径不能让主对话出错。任何异常吞掉。
     } finally {
@@ -910,6 +936,21 @@ class SessionCoordinator {
             teamMemoryRoot: teamMemoryRoot,
           )
         : '';
+    // pinned.md：Agent 置顶的快速访问记忆，每轮注入。
+    String pinnedBlock = '';
+    if (session.memoryEnabled) {
+      final pinnedFile =
+          File(p.join(home.agentDir(session.agentId).path, 'pinned.md'));
+      if (pinnedFile.existsSync()) {
+        try {
+          final content = pinnedFile.readAsStringSync().trim();
+          if (content.isNotEmpty) {
+            pinnedBlock =
+                '<system-reminder>\n## 置顶记忆\n\n$content\n</system-reminder>';
+          }
+        } catch (_) {}
+      }
+    }
     // 当前轮的相关记忆段：仅在启用 memory + 有 user query 时跑。
     // 调辅助小模型按 .md 描述筛 ≤5 条；失败/空 → 返回空串不影响主流程。
     String relevantBlock = '';
@@ -936,6 +977,7 @@ class SessionCoordinator {
     final parts = <String>[
       _ph01CodexSystemPrompt(permissionMode),
       if (memoryPrompt.trim().isNotEmpty) memoryPrompt,
+      if (pinnedBlock.trim().isNotEmpty) pinnedBlock,
       if (relevantBlock.trim().isNotEmpty) relevantBlock,
       '<environment_context>',
       if (session.cwd != null && session.cwd!.trim().isNotEmpty)
@@ -1132,6 +1174,7 @@ class SessionCoordinator {
   }
 
   Future<void> dispose() async {
+    _memoryExtractionController.close();
     await _codexProcessSessions.dispose();
     await _windowsOpsClient.dispose();
   }

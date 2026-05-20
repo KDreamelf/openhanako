@@ -401,7 +401,13 @@ Map<String, dynamic> _parseFrontmatter(String content) {
   try {
     final yaml = loadYaml(content.substring(3, end));
     if (yaml is YamlMap) {
-      return yaml.map((key, value) => MapEntry(key.toString(), value));
+      final map = yaml.map((key, value) => MapEntry(key.toString(), value));
+      // 兼容 CC 嵌套 metadata.type 格式：type 可以在顶层或 metadata 子层。
+      if (map['type'] == null && map['metadata'] is Map) {
+        final meta = map['metadata'] as Map;
+        if (meta['type'] != null) map['type'] = meta['type'];
+      }
+      return map;
     }
   } catch (_) {}
   return const {};

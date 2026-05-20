@@ -82,8 +82,6 @@ class HanaHome {
   Directory agentDesk(String agentId) =>
       _ensure(p.join(agentDir(agentId).path, 'desk'));
 
-  File agentFactsDb(String agentId) =>
-      File(p.join(agentMemory(agentId).path, 'facts.db'));
 
   Directory agentLearnedSkills(String agentId) =>
       _ensure(p.join(agentDir(agentId).path, 'learned-skills'));

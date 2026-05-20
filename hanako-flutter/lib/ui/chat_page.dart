@@ -15,6 +15,7 @@ import '../core/agent_runtime.dart';
 import '../core/codex_agent_runtime.dart';
 import '../core/compact_threshold.dart';
 import '../core/engine.dart';
+import '../core/session_coordinator.dart' show MemoryExtractionEvent;
 import '../core/runtime_session_store.dart';
 import '../experience/experience.dart';
 import '../llm/provider.dart';
@@ -993,6 +994,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   final _input = ImageComposerController();
   final _scroll = ScrollController();
   bool _onboardingShown = false;
+  StreamSubscription<MemoryExtractionEvent>? _memoryExtractionSub;
 
   /// Codex 待授权请求 — 弹出底部横条而不是 modal dialog，让对话能保持
   /// 在视野里。当用户做出决定后通过 [_pendingPermissionCompleter] 完成 future。
@@ -1019,20 +1021,31 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      ref
-          .read(engineProvider)
-          .sessionCoordinator
+      final eng = ref.read(engineProvider);
+      eng.sessionCoordinator
           .setCodexPermissionPrompt(_showCodexPermissionDialog);
-      ref
-          .read(engineProvider)
-          .sessionCoordinator
+      eng.sessionCoordinator
           .setCodexUserInputPrompt(_showCodexUserInputDialog);
+      _memoryExtractionSub =
+          eng.sessionCoordinator.memoryExtractionEvents.listen((event) {
+        if (!mounted) return;
+        final parts = <String>[];
+        if (event.created > 0) parts.add('新增 ${event.created} 条');
+        if (event.updated > 0) parts.add('更新 ${event.updated} 条');
+        final text = '记忆已变更：${parts.join('、')}';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(text),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+        ));
+      });
       unawaited(ref.read(chatProvider.notifier).restoreLastSession());
     });
   }
 
   @override
   void dispose() {
+    _memoryExtractionSub?.cancel();
     ref.read(engineProvider).sessionCoordinator.setCodexPermissionPrompt(null);
     ref.read(engineProvider).sessionCoordinator.setCodexUserInputPrompt(null);
     _input.dispose();

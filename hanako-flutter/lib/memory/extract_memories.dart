@@ -23,13 +23,20 @@ import 'claude_memory.dart';
 /// 这里不做并发控制。
 class ExtractMemoryResult {
   const ExtractMemoryResult({
-    required this.written,
+    required this.created,
+    required this.updated,
     required this.skipped,
     required this.errors,
   });
 
-  /// 新创建或覆盖的 .md 数。
-  final int written;
+  /// 新创建的 .md 数。
+  final int created;
+
+  /// 覆盖更新的 .md 数。
+  final int updated;
+
+  /// 总共写入（新建 + 更新）。
+  int get written => created + updated;
 
   /// 模型给了候选但被本地校验拒掉（文件名非法、type 不在四种、与现有
   /// MEMORY.md 索引重复等）。
@@ -38,7 +45,7 @@ class ExtractMemoryResult {
   /// 整体级失败（LLM 调用、JSON 解析）描述；为空表示流程跑完。
   final List<String> errors;
 
-  bool get isEmpty => written == 0 && skipped == 0 && errors.isEmpty;
+  bool get isEmpty => created == 0 && updated == 0 && skipped == 0 && errors.isEmpty;
 }
 
 class _Candidate {
@@ -74,9 +81,10 @@ const String _extractSystemPrompt =
 - 临时任务状态、计划进度（属于 plan/tasks，不属于 memory）
 - 用户没明确说的猜测
 
-## 重复处理
+## 重复与更新处理
 
-下面会提供 existing memory 的索引；如果某条事实已经被覆盖，**不要重复抽**。
+下面会提供 existing memory 的索引；如果某条事实已经被覆盖且内容没有变化，**不要重复抽**。
+但如果现有记忆的内容已经**过时**（用户偏好变了、项目状态更新了），请用**相同的 filename** 输出更新后的版本，系统会自动覆盖旧文件。
 
 ## 输出格式
 
@@ -109,7 +117,8 @@ Future<ExtractMemoryResult> extractMemories({
   Duration timeout = const Duration(seconds: 30),
 }) async {
   if (transcript.trim().isEmpty) {
-    return const ExtractMemoryResult(written: 0, skipped: 0, errors: []);
+    return const ExtractMemoryResult(
+        created: 0, updated: 0, skipped: 0, errors: []);
   }
   await ensureMemoryDirExists(memoryRoot);
 
@@ -117,7 +126,7 @@ Future<ExtractMemoryResult> extractMemories({
   final manifest = formatMemoryManifest(headers);
   final manifestBlock = manifest.isEmpty
       ? ''
-      : '\n\n## Existing memories（不要重复抽）\n\n$manifest';
+      : '\n\n## Existing memories（不变的跳过，过时的用同名 filename 更新）\n\n$manifest';
 
   final userContent = '## 近端对话\n\n$transcript$manifestBlock';
 
@@ -134,7 +143,8 @@ Future<ExtractMemoryResult> extractMemories({
     );
   } catch (e) {
     return ExtractMemoryResult(
-      written: 0,
+      created: 0,
+      updated: 0,
       skipped: 0,
       errors: ['LLM 调用失败：$e'],
     );
@@ -145,57 +155,75 @@ Future<ExtractMemoryResult> extractMemories({
     candidates = _parseExtracted(response);
   } catch (e) {
     return ExtractMemoryResult(
-      written: 0,
+      created: 0,
+      updated: 0,
       skipped: 0,
       errors: ['JSON 解析失败：$e'],
     );
   }
 
   if (candidates.isEmpty) {
-    return const ExtractMemoryResult(written: 0, skipped: 0, errors: []);
+    return const ExtractMemoryResult(
+        created: 0, updated: 0, skipped: 0, errors: []);
   }
 
-  // 现有 .md 文件名集合，用来避免覆盖已有同名文件（更新策略保守：跳过，
-  // 让用户/模型显式编辑老文件）。
+  // 现有 .md 文件名集合：同名文件存在时覆盖更新（而非跳过），
+  // 这样用户偏好变化、项目状态更新时后台抽取能自然刷新记忆。
   final existing = headers.map((h) => h.filename).toSet();
   final entrypoint = getClaudeMemoryEntrypoint(memoryRoot);
   final indexBefore = entrypoint.existsSync()
       ? entrypoint.readAsStringSync()
       : '';
 
-  var written = 0;
+  var created = 0;
+  var updated = 0;
   var skipped = 0;
   final newIndexEntries = <String>[];
+  final updatedIndexEntries = <String, String>{};
   for (final c in candidates) {
     if (!_isValidCandidate(c)) {
       skipped++;
       continue;
     }
-    if (existing.contains(c.filename)) {
-      skipped++;
-      continue;
-    }
-    if (indexBefore.contains('](${c.filename})')) {
-      skipped++;
-      continue;
-    }
+    final isUpdate = existing.contains(c.filename) ||
+        indexBefore.contains('](${c.filename})');
     try {
       final file = File(p.join(memoryRoot.path, c.filename));
       final body = _buildFileBody(c);
       file.writeAsStringSync(body, flush: true);
-      newIndexEntries.add('- [${c.description}](${c.filename}) — ${c.type}');
-      written++;
+      final entry = '- [${c.description}](${c.filename}) — ${c.type}';
+      if (isUpdate) {
+        updatedIndexEntries[c.filename] = entry;
+        updated++;
+      } else {
+        newIndexEntries.add(entry);
+        created++;
+      }
     } catch (_) {
       skipped++;
     }
   }
 
-  if (newIndexEntries.isNotEmpty) {
-    final trimmedIndex = indexBefore.trimRight();
-    final nextIndex = trimmedIndex.isEmpty
-        ? newIndexEntries.join('\n')
-        : '$trimmedIndex\n${newIndexEntries.join('\n')}';
+  if (newIndexEntries.isNotEmpty || updatedIndexEntries.isNotEmpty) {
     try {
+      var lines = indexBefore.trimRight().split('\n');
+      // 更新已有索引行的描述
+      if (updatedIndexEntries.isNotEmpty) {
+        lines = lines.map((line) {
+          for (final entry in updatedIndexEntries.entries) {
+            if (line.contains('](${entry.key})')) {
+              return entry.value;
+            }
+          }
+          return line;
+        }).toList();
+      }
+      final combined = lines.where((l) => l.trim().isNotEmpty).join('\n');
+      final nextIndex = newIndexEntries.isEmpty
+          ? combined
+          : combined.isEmpty
+              ? newIndexEntries.join('\n')
+              : '$combined\n${newIndexEntries.join('\n')}';
       entrypoint.writeAsStringSync('$nextIndex\n', flush: true);
     } catch (_) {
       // 索引写不进去：单条 .md 已落盘，模型下次会通过 grep 找到；
@@ -204,7 +232,8 @@ Future<ExtractMemoryResult> extractMemories({
   }
 
   return ExtractMemoryResult(
-    written: written,
+    created: created,
+    updated: updated,
     skipped: skipped,
     errors: const [],
   );
